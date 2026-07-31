@@ -100,8 +100,11 @@ function validate(cfg: NucleusConfig, path: string): void {
     if (!m.key || !m.baseUrl) errors.push(`模型 ${m.key || '(无 key)'} 缺少 key 或 baseUrl`)
   }
 
+  // ollama:* 动态解析，不要求预先声明（见 config.ts 的 dynamicOllamaModel）
+  const knownModel = (k: string) => modelKeys.has(k) || k.startsWith('ollama:')
+
   for (const chainKey of cfg.defaults.modelChain) {
-    if (!modelKeys.has(chainKey)) {
+    if (!knownModel(chainKey)) {
       errors.push(`defaults.modelChain 引用了不存在的模型 ${chainKey}`)
     }
   }
@@ -113,7 +116,7 @@ function validate(cfg: NucleusConfig, path: string): void {
     if (!a.identity?.trim()) errors.push(`agent ${a.id} 缺少 identity`)
     if (!Array.isArray(a.toolsAllow)) errors.push(`agent ${a.id} 缺少 toolsAllow`)
     for (const chainKey of a.modelChain ?? []) {
-      if (!modelKeys.has(chainKey)) {
+      if (!knownModel(chainKey)) {
         errors.push(`agent ${a.id} 的 modelChain 引用了不存在的模型 ${chainKey}`)
       }
     }

@@ -200,14 +200,19 @@ async function handleCommand(n: Nucleus, session: ChatSession, input: string): P
       if (!arg) {
         line(`当前模型链：${c.cyan((session.modelChain ?? n.config.defaults.modelChain).join(', '))}`)
         line(c.gray(`可用：${n.config.models.map((m) => m.key).join(', ')}`))
+        line(c.gray('本地模型可直接写 ollama:<模型名>，无需预先配置'))
         return false
       }
       const chain = arg
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean)
-      // 先校验再生效：写错模型名要立刻知道，而不是下一轮才炸
-      const unknown = chain.filter((k) => !n.config.models.some((m) => m.key === k))
+      // 先校验再生效：写错模型名要立刻知道，而不是下一轮才炸。
+      // `ollama:*` 放行 —— 本地模型动态解析，猜错最多报「模型不存在」，
+      // 不像云端 provider 拼错会变成一次真实的付费调用。
+      const unknown = chain.filter(
+        (k) => !k.startsWith('ollama:') && !n.config.models.some((m) => m.key === k),
+      )
       if (unknown.length) {
         line(`${ICON.fail} 未知模型：${unknown.join(', ')}`)
         line(c.gray(`可用：${n.config.models.map((m) => m.key).join(', ')}`))

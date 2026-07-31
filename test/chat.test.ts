@@ -248,3 +248,58 @@ describe('会话延续', () => {
     expect(msgs.map((m) => m.content)).toContain('记住数字 42')
   })
 })
+
+// ═══════════════════════════════════════════════════════
+// 本地模型动态解析
+// ═══════════════════════════════════════════════════════
+
+describe('ollama 模型动态解析', () => {
+  let n: Nucleus
+
+  beforeEach(async () => {
+    n = await boot({
+      config: structuredClone(defaultConfig),
+      deps: { clock: new FakeClock(), ids: new FakeIds() },
+      mock: SCRIPT,
+    })
+  })
+
+  afterEach(async () => {
+    await n.close()
+  })
+
+  it('未声明的 ollama:* 也能解析 —— 本地模型换得勤，不该每个都写配置', async () => {
+    const { modelMap } = await import('../src/config.js')
+    const models = modelMap(n.config)
+
+    const gemma = models.get('ollama:gemma3')
+    expect(gemma).toBeDefined()
+    expect(gemma!.model).toBe('gemma3')
+    expect(gemma!.provider).toBe('ollama')
+    expect(gemma!.baseUrl).toContain('11434')
+  })
+
+  it('模型名里的冒号被保留（ollama 的 tag 语法）', async () => {
+    const { modelMap } = await import('../src/config.js')
+    const m = modelMap(n.config).get('ollama:deepseek-r1:7b')
+    expect(m!.model).toBe('deepseek-r1:7b')
+  })
+
+  it('非 ollama 的未知模型仍然拒绝 —— 云端拼错会变成真实付费调用', async () => {
+    const { modelMap } = await import('../src/config.js')
+    expect(modelMap(n.config).get('openai:typo-model')).toBeUndefined()
+    expect(modelMap(n.config).get('nonsense')).toBeUndefined()
+  })
+
+  it('/model 接受未声明的 ollama 模型', async () => {
+    const session: ChatSession = { conversationId: null, modelChain: null }
+    await runChatCommand(n, session, '/model ollama:gemma3')
+    expect(session.modelChain).toEqual(['ollama:gemma3'])
+  })
+
+  it('/model 仍然拒绝拼错的云端模型', async () => {
+    const session: ChatSession = { conversationId: null, modelChain: null }
+    await runChatCommand(n, session, '/model openai:gpt-typo')
+    expect(session.modelChain).toBeNull()
+  })
+})

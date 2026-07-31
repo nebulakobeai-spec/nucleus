@@ -122,8 +122,55 @@ export function configHash(cfg: NucleusConfig): string {
   return createHash('sha256').update(JSON.stringify(stable)).digest('hex').slice(0, 16)
 }
 
+/** ollama 的默认端点；本地模型全部共用 */
+export function ollamaBaseUrl(): string {
+  return process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1'
+}
+
+/**
+ * 为任意 `ollama:<模型名>` 动态生成配置。
+ *
+ * 本地模型换得勤（拉一个新的就想试），为每个都写一条配置不现实。
+ * 只对 ollama 这么做 —— 它在本机、零成本、没有凭据，猜错了最多是一次
+ * 「模型不存在」的报错；云端 provider 必须显式配置，否则拼错模型名
+ * 会变成一次真实的付费调用。
+ */
+export function dynamicOllamaModel(key: string): ModelConfig | null {
+  if (!key.startsWith('ollama:')) return null
+  const model = key.slice('ollama:'.length)
+  if (!model) return null
+  return {
+    key,
+    provider: 'ollama',
+    model,
+    baseUrl: ollamaBaseUrl(),
+    billing: 'usage',
+    costPerMTokIn: 0,
+    costPerMTokOut: 0,
+  }
+}
+
+/**
+ * 模型表。
+ *
+ * 未显式配置的 `ollama:*` 动态生成，其余一律要求配置里有声明。
+ *
+ * 实现上包一层子类而不是改写实例方法 —— 后者会把动态模型 `set` 回
+ * Map，而 config 常常是共享对象（模块级 `defaultConfig`），
+ * 于是一次查询会污染其他调用方看到的模型表。
+ */
+class ModelRegistry extends Map<string, ModelConfig> {
+  override get(key: string): ModelConfig | undefined {
+    return super.get(key) ?? dynamicOllamaModel(key) ?? undefined
+  }
+
+  override has(key: string): boolean {
+    return super.has(key) || dynamicOllamaModel(key) !== null
+  }
+}
+
 export function modelMap(cfg: NucleusConfig): Map<string, ModelConfig> {
-  return new Map(cfg.models.map((m) => [m.key, m]))
+  return new ModelRegistry(cfg.models.map((m) => [m.key, m] as const))
 }
 
 export function agentMap(cfg: NucleusConfig): Map<string, AgentSpec> {
@@ -206,6 +253,12 @@ export const defaultConfig: NucleusConfig = {
       costPerMTokIn: 0,
       costPerMTokOut: 0,
     },
+    // 本地 ollama 模型。
+    //
+    // `ollama:<任意模型名>` 会被动态解析（见 modelMap），不必为每个
+    // 本地模型写一条配置 —— 本地模型换得勤，写死会一直追着改。
+    //   nucleus chat --model ollama:gemma3
+    //   nucleus ask "..." --model ollama:deepseek-r1:7b
     {
       key: 'ollama:llama',
       provider: 'ollama',
