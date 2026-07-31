@@ -585,7 +585,9 @@ Niche 需删除：`pg` / `drizzle-orm` / `drizzle-kit` / `@types/pg` / `drizzle.
    在人类终端或部署机上直接用 `npm run test:record`。
 
 2. **agent 无法跑需要监听端口的测试**（OAuth 回调服务器，7 个）。
-   测试里用 `canListen` 探测并自动 `describe.skipIf`，在能监听的环境会正常执行。
+   测试里用 `canListen` 探测并自动 `describe.skipIf`。
+   **已在人类终端验证会正常执行**：`309 passed`（无 skipped），
+   覆盖端口绑定、state 校验返回 400、其它路径 404、端口被占时降级、close 后端口释放。
 
 3. **agent 无法连真 Postgres**，所有自动化测试跑在 **PGlite**（进程内 WASM，PG 18.3）上。
    已验证可用：`pg_trgm` / `uuid-ossp` / tsvector 全文检索 / `LISTEN·NOTIFY` /
@@ -598,7 +600,11 @@ Niche 需删除：`pg` / `drizzle-orm` / `drizzle-kit` / `@types/pg` / `drizzle.
 ### 真 Postgres 验证状态
 
 **已在 PostgreSQL 14.17 上验证通过**（2026-07-31，人类终端）：
-`migrate` 建成 17 张表、`doctor` 全绿、trigger 与外键生效。
+
+- `migrate` 建成 17 张表并显示 `(postgres)`、`doctor` 全绿
+- **真库上跑完整编排链路**：委派 → wake 同事务触发 → attempt 2 → 结果回流
+  （即 §3.5 的核心路径，此前只在 PGlite 上验证过）
+- `verify` 8 项全过
 
 14.x 正好是声明的最低支持版本，比部署机可能用的 16/17 更严格 ——
 SQL 里若混进新版特性会在这里暴露。
