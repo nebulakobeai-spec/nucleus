@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { boot, ask, type Nucleus } from '../boot.js'
 import { defaultConfig } from '../config.js'
 import { recoveryOf } from '../errors.js'

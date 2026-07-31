@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { createInterface } from 'node:readline/promises'
 import { defaultConfig, type NucleusConfig } from '../config.js'
+import { loadConfig } from '../config-file.js'
 import { CredentialStore, redact } from '../auth/credentials.js'
 import { needsRefresh, OAuthClient, type OAuthProviderConfig } from '../auth/oauth.js'
 import {
@@ -38,13 +39,16 @@ interface Ctx {
   config: NucleusConfig
 }
 
-function ctx(flags: Record<string, string | true>): Ctx {
+async function ctx(flags: Record<string, string | true>): Promise<Ctx> {
+  const { config: loaded } = await loadConfig(
+    typeof flags['config'] === 'string' ? flags['config'] : undefined,
+  )
   return {
     store: new CredentialStore({
       ...(typeof flags['credentials'] === 'string' ? { filePath: flags['credentials'] } : {}),
       ...(flags['no-keychain'] ? { useKeychain: false } : {}),
     }),
-    config: defaultConfig,
+    config: loaded,
   }
 }
 
@@ -106,7 +110,7 @@ async function prompt(question: string, opts: { silent?: boolean } = {}): Promis
 // ── auth login ───────────────────────────────────────────
 
 export async function authLogin(argv: string[], flags: Record<string, string | true>): Promise<number> {
-  const { store, config } = ctx(flags)
+  const { store, config } = await ctx(flags)
   const ref = argv[0]
 
   if (!ref) {
@@ -122,7 +126,7 @@ export async function authLogin(argv: string[], flags: Record<string, string | t
     return 1
   }
 
-  return flags['oauth'] ? oauthLogin(store, ref, flags) : apiKeyLogin(store, ref, flags)
+  return flags['oauth'] ? oauthLogin(store, ref, flags, config) : apiKeyLogin(store, ref, flags)
 }
 
 /** API key：交互式静默录入，或从 --value / stdin 读取（便于脚本化） */
@@ -168,9 +172,10 @@ async function oauthLogin(
   store: CredentialStore,
   ref: string,
   flags: Record<string, string | true>,
+  config: NucleusConfig = defaultConfig,
 ): Promise<number> {
   const providerId = typeof flags['provider'] === 'string' ? flags['provider'] : ref
-  const registry = oauthRegistry()
+  const registry = oauthRegistry(config)
   let entry = registry.get(providerId)
 
   // --method 显式覆盖 flow 类型（xAI 两种都支持）
@@ -404,7 +409,7 @@ async function openBrowser(url: string): Promise<void> {
 // ── auth list ────────────────────────────────────────────
 
 export async function authList(_argv: string[], flags: Record<string, string | true>): Promise<number> {
-  const { store, config } = ctx(flags)
+  const { store, config } = await ctx(flags)
   const refs = knownRefs(config)
   const items = await store.list(refs.map((r) => r.ref))
 
@@ -473,7 +478,7 @@ export async function authList(_argv: string[], flags: Record<string, string | t
  * 光看有没有设置是不够的。
  */
 export async function authTest(argv: string[], flags: Record<string, string | true>): Promise<number> {
-  const { store, config } = ctx(flags)
+  const { store, config } = await ctx(flags)
   const target = argv[0]
   const refs = knownRefs(config).filter((r) => !target || r.ref === target)
 
@@ -523,7 +528,7 @@ export async function authTest(argv: string[], flags: Record<string, string | tr
 // ── auth refresh ─────────────────────────────────────────
 
 export async function authRefresh(argv: string[], flags: Record<string, string | true>): Promise<number> {
-  const { store } = ctx(flags)
+  const { store, config } = await ctx(flags)
   const ref = argv[0]
   if (!ref) {
     line(c.red('用法：nucleus auth refresh <REF>'))
@@ -547,7 +552,7 @@ export async function authRefresh(argv: string[], flags: Record<string, string |
   // 优先用凭据里记录的 provider —— 登录时用哪个刷新时就该用哪个
   const providerId =
     (typeof flags['provider'] === 'string' ? flags['provider'] : null) ?? cred.providerId ?? ref
-  const entry = oauthRegistry().get(providerId)
+  const entry = oauthRegistry(config).get(providerId)
   if (!entry) {
     line(c.red(`没有配置名为 ${providerId} 的 OAuth provider`))
     line(c.gray(`  刷新需要 clientId 与 token 端点，请在 nucleus.config.json 的 oauthProviders 里配置`))
@@ -582,7 +587,7 @@ export async function refreshWith(entry: OAuthFlowConfig, refreshToken: string) 
 // ── auth logout ──────────────────────────────────────────
 
 export async function authLogout(argv: string[], flags: Record<string, string | true>): Promise<number> {
-  const { store } = ctx(flags)
+  const { store } = await ctx(flags)
   const ref = argv[0]
   if (!ref) {
     line(c.red('用法：nucleus auth logout <REF>'))
