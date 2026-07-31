@@ -135,13 +135,18 @@ export class Worker {
     })
 
     try {
-      const messages = await this.#buildMessages(run.id, run.conversationId, run.input)
+      const { history, input: turnInput } = await this.#buildMessages(
+        run.id,
+        run.conversationId,
+        run.input,
+      )
       const out = await this.runner.execute({
         attemptId: attempt.id,
         fenceToken: attempt.fenceToken!,
         runId: run.id,
         agent,
-        messages,
+        history,
+        input: turnInput,
         workdir: `${this.opts.workdirRoot ?? '/tmp/nucleus'}/${run.id}`,
       })
 
@@ -246,15 +251,19 @@ export class Worker {
     runId: string,
     conversationId: string | null,
     input: unknown,
-  ): Promise<ChatMessage[]> {
-    const messages: ChatMessage[] = []
+  ): Promise<{ history: ChatMessage[]; input: ChatMessage[] }> {
+    // history 与本回合输入必须分开返回 —— 装配器只裁剪 history，
+    // 本回合的任务与专家结果是不能被裁掉的（裁了这一轮就没意义了）
+    const history: ChatMessage[] = []
+    const turn: ChatMessage[] = []
 
     if (conversationId) {
-      const history = await this.#conversations.recent(conversationId, 50)
-      messages.push(...this.#conversations.toChatMessages(history))
+      // 取 50 条只是上限，真正的约束是装配器的 token 预算
+      const recent = await this.#conversations.recent(conversationId, 50)
+      history.push(...this.#conversations.toChatMessages(recent))
     } else {
       const task = (input as { task?: string })?.task
-      messages.push({ role: 'user', content: task ?? JSON.stringify(input ?? {}) })
+      turn.push({ role: 'user', content: task ?? JSON.stringify(input ?? {}) })
     }
 
     // 已完成的子 run：把结果作为信封的一部分传上来（引用而非全文）
@@ -276,9 +285,9 @@ export class Worker {
               c.result?.artifacts?.length ? `\n产出：${c.result.artifacts.join(', ')}` : ''
             }`
           : `执行失败（${c.error_code ?? 'unknown'}）`
-      messages.push({ role: 'user', content: `[专家结果 · ${c.agent_id}] ${body}` })
+      turn.push({ role: 'user', content: `[专家结果 · ${c.agent_id}] ${body}` })
     }
 
-    return messages
+    return { history, input: turn }
   }
 }

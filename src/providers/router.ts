@@ -60,6 +60,22 @@ export class ModelRouter {
    *
    * @param chainKeys 形如 ['zai:glm-4.7', 'kimi:k2', 'ollama:llama3.2']
    */
+  /**
+   * 一条降级链能安全使用的上下文窗口。
+   *
+   * 取**链上最小**的那个，不是第一个 —— attempt 中途可能降级到窗口更小的
+   * 模型，按第一个模型的窗口装配的上下文到那时就放不进去了。
+   *
+   * 未声明窗口的模型按 `assumed` 计（见 defaults.assumedContextWindow）。
+   */
+  contextWindowFor(chain: string[], assumed: number): number {
+    let min = Infinity
+    for (const k of chain) {
+      min = Math.min(min, this.models.get(k)?.contextWindow ?? assumed)
+    }
+    return Number.isFinite(min) ? min : assumed
+  }
+
   async chat(chainKeys: string[], req: Omit<ChatRequest, 'model'>): Promise<RouteResult> {
     const chain = chainKeys.map((k) => {
       const m = this.models.get(k)

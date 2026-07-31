@@ -97,6 +97,27 @@ export function renderEvent(e: RunEvent, indent: string): string | null {
     case 'rule.violation':
       return br + c.yellow(`${q['tool']} 被规则拦下`) + c.gray(` ${q['rule'] ?? ''}`)
 
+    // 只在**发生了降级**时才占一行。没裁东西时这条是噪音，
+    // 但历史被裁掉必须说出来 —— 否则「模型突然失忆」会变成谜案
+    case 'context.assembled': {
+      const degs = (q['degradations'] as string[] | undefined) ?? []
+      if (degs.length === 0) return null
+      const dropped = Number(q['droppedMessages'] ?? 0)
+      const names: Record<string, string> = {
+        trim_history: dropped ? `裁掉 ${dropped} 条历史` : '裁剪历史',
+        shrink_summary: '压缩摘要',
+        drop_summary: '丢弃摘要',
+        shrink_constraints: '收缩约束',
+        needs_checkpoint: '仍然超出窗口',
+      }
+      return (
+        br +
+        c.yellow('上下文降级：') +
+        degs.map((d) => names[d] ?? d).join(' → ') +
+        c.gray(` （窗口 ${compactTokens(Number(q['window'] ?? 0))}）`)
+      )
+    }
+
     case 'wake.armed':
       return br + c.gray(`挂起，等 ${q['waitOn']} 个专家 —— 本轮 attempt 到此结束`)
 
@@ -138,7 +159,7 @@ export async function runTurn(n: Nucleus, conversationId: string, text: string):
         case 'llm.call.finished':
           pet.addTokens(Number(q['tokensIn'] ?? 0) + Number(q['tokensOut'] ?? 0))
           break
-        case 'wake.armed':
+            case 'wake.armed':
           pet.mood('wait')
           break
       }

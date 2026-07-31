@@ -67,7 +67,8 @@ function exec(runner: Runner, ctx: { run: { id: string }; attempt: { id: string;
     fenceToken: ctx.attempt.fenceToken!,
     runId: ctx.run.id,
     agent,
-    messages: [{ role: 'user', content: '做这件事' }],
+    history: [],
+    input: [{ role: 'user', content: '做这件事' }],
     workdir: '/tmp/nucleus-test',
   })
 }
@@ -260,7 +261,8 @@ describe('能力边界', () => {
       fenceToken: ctx.attempt.fenceToken!,
       runId: ctx.run.id,
       agent: { ...AGENT, toolsAllow: ['read'] },
-      messages: [{ role: 'user', content: 'go' }],
+      history: [],
+      input: [{ role: 'user', content: 'go' }],
       workdir: '/tmp',
     })
 
@@ -473,7 +475,8 @@ describe('预算护栏', () => {
       fenceToken: ctx.attempt.fenceToken!,
       runId: ctx.run.id,
       agent: { ...AGENT, maxSteps: 3 },
-      messages: [{ role: 'user', content: 'go' }],
+      history: [],
+      input: [{ role: 'user', content: 'go' }],
       workdir: '/tmp',
     })
     expect(out.status).toBe('failed')
@@ -567,7 +570,8 @@ describe('失败即终态', () => {
       fenceToken: ctx.attempt.fenceToken!,
       runId: ctx.run.id,
       agent: AGENT,
-      messages: [{ role: 'user', content: 'go' }],
+      history: [],
+      input: [{ role: 'user', content: 'go' }],
       workdir: '/tmp',
       signal: ctl.signal,
     })

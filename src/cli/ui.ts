@@ -172,6 +172,22 @@ const BOOLEAN_FLAGS = new Set([
   'help',
 ])
 
+/**
+ * 取一个带值参数。
+ *
+ * `--conv` 这类写了名字却没给值时，flags 里存的是布尔 `true`。
+ * 直接 `as string` 会让它一路流到 `.slice()` 才炸成
+ * 「convId.slice is not a function」—— 错误信息完全指不到参数上。
+ * 这里统一把「没给值」归成 undefined，由调用方决定默认值或报错。
+ */
+export function strFlag(
+  flags: Record<string, string | true>,
+  name: string,
+): string | undefined {
+  const v = flags[name]
+  return typeof v === 'string' ? v : undefined
+}
+
 /** 参数解析：--key value / --key=value / --flag */
 export function parseArgv(argv: string[]): { positional: string[]; flags: Record<string, string | true> } {
   const positional: string[] = []

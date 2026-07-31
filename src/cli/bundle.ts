@@ -5,7 +5,7 @@ import { boot } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { redactText } from '../auth/credentials.js'
 import { errorSpec } from '../errors.js'
-import { c, heading, ICON, line } from './ui.js'
+import { c, heading, ICON, line, strFlag } from './ui.js'
 
 /**
  * `nucleus bundle` —— 故障诊断包。
@@ -104,7 +104,7 @@ function gitDirty(): { dirty: boolean; files: string[] } {
 }
 
 export async function bundleCmd(argv: string[], flags: Record<string, string | true>): Promise<number> {
-  const runPrefix = (flags['run'] as string) ?? argv[0]
+  const runPrefix = strFlag(flags, 'run') ?? argv[0]
   const { config, path: configPath, overrides } = await loadConfig(
     typeof flags['config'] === 'string' ? flags['config'] : undefined,
   )
@@ -112,8 +112,8 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
 
   const n = await boot({
     config,
-    databaseUrl: (flags['db'] as string) ?? process.env['NUCLEUS_DATABASE_URL'] ?? null,
-    dataDir: (flags['data'] as string) ?? '.nucleus-data/pglite',
+    databaseUrl: strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null,
+    dataDir: strFlag(flags, 'data') ?? '.nucleus-data/pglite',
     // 诊断时不要真去连 MCP —— 那可能正是出问题的地方，会拖慢或挂住
     skipMcp: true,
   })

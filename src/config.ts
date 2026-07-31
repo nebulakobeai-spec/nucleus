@@ -44,6 +44,17 @@ export interface NucleusConfig {
     maxSteps: number
     maxCostUsd: number
     /**
+     * 未声明 contextWindow 的模型按这个值做预算。
+     *
+     * 为什么不给每个模型编一个数：窗口大小是模型的事实，不知道就该留空
+     * （config.ts 一贯的规矩：宁可不填，不编造数字）。但预算总得有个数，
+     * 所以把「假设」显式命名在这里，而不是散落在代码里的魔数。
+     *
+     * 宁可偏小 —— 假设偏小只是历史被多裁一点，假设偏大会直接溢出，
+     * 而 ollama 的默认 num_ctx 常常只有 4096。
+     */
+    assumedContextWindow: number
+    /**
      * 委派链的最大深度。编排者是 0，它派出的专家是 1。
      *
      * 没有这道闸门时，只要有一个 agent 能委派给自己（或形成环），
@@ -290,6 +301,7 @@ export const defaultConfig: NucleusConfig = {
   ],
   defaults: {
     entryAgent: 'orchestrator',
+    assumedContextWindow: 32_768,
     // 3 层足够「编排者 → 专家 → 子专家」，再深通常是模型在兜圈子
     maxDelegationDepth: 3,
     maxRunsPerRoot: 32,

@@ -132,6 +132,7 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
   const runner = new Runner(db, deps, router, tools, events, {
     heartbeatMs: config.runtime.heartbeatMs,
     leaseMs: config.runtime.leaseMs,
+    assumedContextWindow: config.defaults.assumedContextWindow,
   })
 
   const worker = new Worker(db, deps, runner, agentMap(config), events, {

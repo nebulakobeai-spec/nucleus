@@ -1,6 +1,6 @@
 import { boot } from '../boot.js'
 import { defaultConfig } from '../config.js'
-import { c, heading, ICON, line, table } from './ui.js'
+import { c, heading, ICON, line, table, strFlag } from './ui.js'
 
 /**
  * `nucleus mcp` 命令组。
@@ -14,7 +14,7 @@ import { c, heading, ICON, line, table } from './ui.js'
 async function open(flags: Record<string, string | true>) {
   return boot({
     config: defaultConfig,
-    dataDir: (flags['data'] as string) ?? '.nucleus-data/pglite',
+    dataDir: strFlag(flags, 'data') ?? '.nucleus-data/pglite',
     onMcpEvent: (e) => {
       if (e.kind === 'mcp.auto_disabled') {
         line(`${ICON.warn} ${e.serverId} 已被自动禁用：${JSON.stringify(e.detail)}`)

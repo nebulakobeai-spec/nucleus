@@ -162,7 +162,8 @@ describe('端到端：编排者 → 专家 → 结果回流', () => {
       fenceToken: a1.fenceToken!,
       runId: root.id,
       agent: { ...ORCHESTRATOR, maxSteps: 1 },
-      messages: [{ role: 'user', content: '帮我调研一下 X' }],
+      history: [],
+      input: [{ role: 'user', content: '帮我调研一下 X' }],
       workdir: '/tmp',
     })
 
@@ -188,7 +189,8 @@ describe('端到端：编排者 → 专家 → 结果回流', () => {
       fenceToken: a2.fenceToken!,
       runId: childId,
       agent: ALBERT,
-      messages: [{ role: 'user', content: '调研 X' }],
+      history: [],
+      input: [{ role: 'user', content: '调研 X' }],
       workdir: '/tmp',
     })
     expect(childOut.status).toBe('succeeded')
@@ -218,7 +220,8 @@ describe('端到端：编排者 → 专家 → 结果回流', () => {
       fenceToken: a3.fenceToken!,
       runId: root.id,
       agent: ORCHESTRATOR,
-      messages: [
+      history: [],
+      input: [
         { role: 'user', content: '帮我调研一下 X' },
         { role: 'user', content: `[专家结果] albert: ${childResult.summary}` },
       ],
@@ -296,7 +299,8 @@ describe('端到端：kill -9 后自动恢复', () => {
       fenceToken: fresh.fenceToken!,
       runId: run.id,
       agent: ORCHESTRATOR,
-      messages: [{ role: 'user', content: 'go' }],
+      history: [],
+      input: [{ role: 'user', content: 'go' }],
       workdir: '/tmp',
     })
 

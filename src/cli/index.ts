@@ -10,7 +10,7 @@ import { authList, authLogin, authLogout, authRefresh, authTest, credentialStatu
 import { mcpCall, mcpEnable, mcpList, mcpTools } from './mcp.js'
 import { bundleCmd, replayCmd } from './bundle.js'
 import { loadConfig } from '../config-file.js'
-import { c, duration, heading, ICON, line, money, parseArgv, recoveryHint, statusColor, table } from './ui.js'
+import { c, duration, heading, ICON, line, money, parseArgv, recoveryHint, statusColor, table, strFlag } from './ui.js'
 
 /**
  * Nucleus CLI。
@@ -57,8 +57,8 @@ const DEMO_SCRIPT: MockScript = {
 }
 
 async function open(flags: Record<string, string | true>): Promise<Nucleus> {
-  const dbUrl = (flags['db'] as string) ?? process.env['NUCLEUS_DATABASE_URL'] ?? null
-  const dataDir = (flags['data'] as string) ?? process.env['NUCLEUS_PGLITE_DIR'] ?? null
+  const dbUrl = strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null
+  const dataDir = strFlag(flags, 'data') ?? process.env['NUCLEUS_PGLITE_DIR'] ?? null
   const useMock = flags['mock'] === true || !!flags['mock'] || process.env['NUCLEUS_MOCK'] === '1'
 
   const { config: loaded } = await loadConfig(
@@ -215,7 +215,7 @@ async function askCmd(argv: string[], flags: Record<string, string | true>): Pro
   const n = await open(flags)
   try {
     const convId =
-      (flags['conv'] as string) ??
+      strFlag(flags, 'conv') ??
       (await n.conversations.create({
         // 与 chat 同一个来源 —— 过去这里硬编码 orchestrator、chat 取 agents[0]，
         // 同一份配置两条命令的入口 agent 不同

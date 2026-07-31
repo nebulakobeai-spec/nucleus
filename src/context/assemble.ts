@@ -26,7 +26,13 @@ export interface AssembleInput {
 
   /** ③ 动态 */
   summary?: string | null
-  /** 由新到旧传入；装配器负责按预算从新往旧填，输出时恢复时间顺序 */
+  /**
+   * 会话历史，**按时间顺序传入（最旧的在前）**。
+   *
+   * 装配器从末尾往前填（即优先保留最新的），填不下就丢弃更旧的。
+   * 顺序传反的后果是静默丢掉**最新**的消息 —— 不会报错，只会让模型
+   * 看起来突然失忆，所以这条由测试钉住。
+   */
   history: ChatMessage[]
   /** 末尾约束块（active constraints），已由规则层筛好 */
   constraints?: string[]

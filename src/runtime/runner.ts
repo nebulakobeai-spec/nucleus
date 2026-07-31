@@ -23,6 +23,7 @@ import {
   type ResultSchemaSpec,
   type ValidationFailure,
 } from './result-schema.js'
+import { assemble, DEFAULT_BUDGET } from '../context/assemble.js'
 import type { RunEventSink } from './events.js'
 
 export interface AgentSpec {
@@ -52,6 +53,8 @@ export interface RunnerOptions {
   noProgressSteps?: number
   /** schema 校验失败的重写次数上限 */
   schemaRetries?: number
+  /** 模型未声明 contextWindow 时按这个值预算 */
+  assumedContextWindow?: number
   heartbeatMs?: number
   leaseMs?: number
 }
@@ -65,6 +68,8 @@ interface UsageAcc {
   costUsd: number
   /** 最后一次成功调用的模型键 */
   modelKey: string | null
+  /** 上下文装配的分段用量，落库用于事后判断「是不是被裁掉了关键信息」 */
+  contextBreakdown?: unknown
 }
 
 export interface RunOutcome {
@@ -81,6 +86,8 @@ export interface RunOutcome {
   costUsd: number
   /** 实际产出结果的模型键，如 `zai:glm-5.2`；一次都没调成功时为 null */
   modelKey?: string | null
+  /** 上下文装配的分段用量 */
+  contextBreakdown?: unknown
 }
 
 /**
@@ -98,6 +105,7 @@ export class Runner {
   #loopThreshold: number
   #noProgressSteps: number
   #schemaRetries: number
+  #assumedContextWindow: number
   #heartbeatMs: number
   #leaseMs: number
 
@@ -113,6 +121,7 @@ export class Runner {
     this.#loopThreshold = opts.loopThreshold ?? 3
     this.#noProgressSteps = opts.noProgressSteps ?? 6
     this.#schemaRetries = opts.schemaRetries ?? 2
+    this.#assumedContextWindow = opts.assumedContextWindow ?? 32_768
     this.#heartbeatMs = opts.heartbeatMs ?? 15_000
     this.#leaseMs = opts.leaseMs ?? 60_000
   }
@@ -128,7 +137,10 @@ export class Runner {
     fenceToken: string
     runId: string
     agent: AgentSpec
-    messages: ChatMessage[]
+    /** 会话历史，按时间顺序（最旧在前）。装配器按 token 预算从旧往新裁 */
+    history: ChatMessage[]
+    /** 本回合输入（任务信封 / 专家结果）。不参与裁剪 */
+    input: ChatMessage[]
     workdir: string
     signal?: AbortSignal
   }): Promise<RunOutcome> {
@@ -178,7 +190,8 @@ export class Runner {
       attemptId: string
       runId: string
       agent: AgentSpec
-      messages: ChatMessage[]
+      history: ChatMessage[]
+      input: ChatMessage[]
       workdir: string
       signal: AbortSignal
     },
@@ -198,10 +211,49 @@ export class Runner {
       },
     ]
 
-    const messages: ChatMessage[] = [
-      { role: 'system', content: agent.systemPrompt },
-      ...input.messages,
-    ]
+    // ── 上下文装配（DESIGN.md §5）────────────────────────
+    //
+    // 过去这里是「system prompt + 会话历史」的裸拼接，历史只按**条数**
+    // 截到 50 条，没有任何 token 预算 —— 也就是说「context 会不会爆」
+    // 全靠每条消息都短。装配器一直存在但没接上线。
+    //
+    // systemPrompt 整体当作不可变前缀传入：它由 buildSystemPrompt 拼成
+    // （契约 + identity + policy），本身已经逐字节稳定，这是 prompt cache
+    // 命中的前提，不能在这里掺入任何随回合变化的东西。
+    const window = this.router.contextWindowFor(agent.modelChain, this.#assumedContextWindow)
+    const assembled = assemble({
+      contract: agent.systemPrompt,
+      identity: '',
+      policy: '',
+      history: input.history,
+      input: input.input,
+      budget: { ...DEFAULT_BUDGET, contextWindow: window },
+    })
+
+    await this.events.emit(attemptId, runId, 'context.assembled', {
+      window,
+      breakdown: assembled.breakdown,
+      degradations: assembled.degradations,
+      droppedMessages: assembled.droppedMessages,
+    })
+    acc.contextBreakdown = { window, ...assembled.breakdown, degradations: assembled.degradations }
+
+    // 连本回合输入都放不进去 —— 裁剪救不回来，早失败比发一个必然被拒的请求好
+    if (assembled.degradations.includes('needs_checkpoint')) {
+      throw new NucleusError(
+        'budget.context_overflow',
+        `本回合输入超出模型窗口（${window} tokens），已无可降级项`,
+        {
+          detail: {
+            window,
+            breakdown: assembled.breakdown,
+            hint: '减少本轮输入，或换用窗口更大的模型（在 nucleus.config.json 里声明 contextWindow）',
+          },
+        },
+      )
+    }
+
+    const messages: ChatMessage[] = assembled.messages
 
     const callCounts = new Map<string, number>()
     let invocationSeq = 0
@@ -584,6 +636,8 @@ export class Runner {
       // 落库「谁真的干了这活」：链上降级时这是唯一的事后凭据，
       // 也是「订阅制显示订阅而不是 $0」的依据
       ...(o.modelKey ? { modelKey: o.modelKey } : {}),
+      // 分段用量：事后判断「模型是不是因为历史被裁掉才答错」的唯一依据
+      ...(o.contextBreakdown !== undefined ? { contextBreakdown: o.contextBreakdown } : {}),
     })
   }
 }

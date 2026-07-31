@@ -7,7 +7,7 @@ import { defaultConfig, isMockOnly, modelMap } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import { loadEnvFile, parseEnv } from '../src/env.js'
 import { runChatCommand, type ChatSession } from '../src/cli/chat.js'
-import { parseArgv } from '../src/cli/ui.js'
+import { parseArgv, strFlag } from '../src/cli/ui.js'
 import { loadConfig, stripJsonComments } from '../src/config-file.js'
 import type { MockScript } from '../src/providers/mock.js'
 
@@ -468,5 +468,24 @@ describe('模型必须自己配', () => {
   it('内置工具里没有 web_search —— 注册一个必然失败的工具等于宣告不存在的能力', () => {
     const names = defaultConfig.agents.flatMap((a) => a.toolsAllow)
     expect(names).not.toContain('web_search')
+  })
+})
+
+describe('strFlag', () => {
+  it('写了名字没给值时当作「没给」，不是布尔 true 当字符串用', () => {
+    // 真实撞过的坑：nucleus ask "..." --conv 会一路流到 .slice() 才炸成
+    // 「convId.slice is not a function」，错误信息完全指不到参数上
+    const { flags } = parseArgv(['ask', '问题', '--conv'])
+    expect(flags['conv']).toBe(true)
+    expect(strFlag(flags, 'conv')).toBeUndefined()
+  })
+
+  it('正常给值时原样返回', () => {
+    const { flags } = parseArgv(['--conv', 'abc123'])
+    expect(strFlag(flags, 'conv')).toBe('abc123')
+  })
+
+  it('没出现过的参数是 undefined', () => {
+    expect(strFlag(parseArgv([]).flags, 'conv')).toBeUndefined()
   })
 })

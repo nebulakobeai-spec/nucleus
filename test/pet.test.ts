@@ -328,3 +328,39 @@ describe('TeeEventSink', () => {
     expect(inner.events).toEqual([{ attemptId: 'a1', runId: 'r1', kind: 'k', payload: { v: 1 } }])
   })
 })
+
+describe('上下文降级的显示', () => {
+  it('没有降级时不占一行 —— 每轮都报一遍是噪音', () => {
+    expect(
+      renderEvent(ev('context.assembled', { window: 32768, degradations: [], breakdown: {} }), ''),
+    ).toBeNull()
+  })
+
+  it('裁掉历史时必须说出来，并报出条数', () => {
+    const l = renderEvent(
+      ev('context.assembled', {
+        window: 8000,
+        degradations: ['trim_history'],
+        droppedMessages: 12,
+        breakdown: {},
+      }),
+      '',
+    )
+    // 不说的话「模型突然失忆」会变成谜案
+    expect(l).toContain('裁掉 12 条历史')
+    expect(l).toContain('8.0k')
+  })
+
+  it('多项降级按施加顺序显示', () => {
+    const l = renderEvent(
+      ev('context.assembled', {
+        window: 4000,
+        degradations: ['trim_history', 'drop_summary', 'shrink_constraints'],
+        droppedMessages: 3,
+        breakdown: {},
+      }),
+      '',
+    )
+    expect(l).toMatch(/裁掉 3 条历史.*丢弃摘要.*收缩约束/)
+  })
+})
