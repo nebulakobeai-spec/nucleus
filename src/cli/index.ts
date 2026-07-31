@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { ask, boot, type Nucleus } from '../boot.js'
 import { defaultConfig } from '../config.js'
 import { loadEnvFile } from '../env.js'

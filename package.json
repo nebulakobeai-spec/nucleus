@@ -6,9 +6,11 @@
   "engines": {
     "node": ">=20"
   },
-  "bin": { "nucleus": "dist/cli/index.js" },
+  "bin": {
+    "nucleus": "dist/cli/index.js"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
