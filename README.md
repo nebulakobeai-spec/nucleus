@@ -65,7 +65,7 @@ node dist/cli/index.js ask "帮我调研一下向量数据库选型" --mock
 
 ```bash
 node dist/cli/index.js auth login ZAI_API_KEY      # 输入不回显
-node dist/cli/index.js ask "..." --model zai:glm-4.7
+node dist/cli/index.js ask "..." --model zai:glm-5.2
 ```
 
 ---
@@ -151,14 +151,14 @@ src/
   seams.ts             注入接缝（clock / ids）
   db/                  PGlite（本地）+ Postgres（生产）+ migration
   store/               runs / attempts / wake / conversations
-  providers/           OpenAI 兼容 client + 熔断 + 预检选路
+  providers/           OpenAI 兼容 + anthropic-messages 双协议 + 熔断 + 预检选路
   runtime/             runner / worker / reconciler / 工具层
   context/             三段装配 + 预算降级
   mcp/                 MCP client（stdio + http）
   auth/                凭据存储 + OAuth device flow
   cli/                 终端界面
 migrations/            forward-only SQL
-test/                  213 个测试，全离线
+test/                  238 个测试，全离线
 ```
 
 ---
@@ -166,7 +166,7 @@ test/                  213 个测试，全离线
 ## 开发
 
 ```bash
-npm test          # 213 个测试，全离线：不需要数据库、网络、API key
+npm test          # 238 个测试，全离线：不需要数据库、网络、API key
 npm run typecheck
 npm run build
 ```
@@ -206,6 +206,7 @@ tier 2 的 fixture 由真实模型产生，不是手写的 —— 手写 stub �
 **已知风险**：
 - 真 Postgres 连接路径**尚未在真实环境验证**（开发机连不上数据库，所有测试跑在 PGlite 上）
 - 前沿模型对输出 schema 的实际遵守率未知（本地只有小模型的真实响应）
+- 四个订阅模型的 `baseUrl` / `contextWindow` / `maxTokens` **需要部署方自行确认**（它们比开发方的知识截止更新）—— 见 [部署指南 阶段 0.5](./docs/DEPLOYMENT.md#-阶段-05你需要自己搞清楚的事)
 
 ---
 

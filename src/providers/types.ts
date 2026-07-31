@@ -89,12 +89,37 @@ export interface Provider {
 
 // ── 配置 ────────────────────────────────────────────────
 
+/**
+ * 线路协议。
+ *
+ * 不是所有 provider 都是 OpenAI 兼容形态 —— Kimi 的 coding 端点和
+ * Anthropic 官方 API 用的是 messages 协议，请求体、流式事件、usage
+ * 字段全都不同，必须走独立适配器。
+ */
+export type WireApi = 'openai-completions' | 'anthropic-messages'
+
+/**
+ * 计费方式。
+ *
+ * 订阅制下按 token 算钱没有意义（月费已付），真正的约束是配额与限流。
+ * 成本显示为「订阅」而非 $0 —— 后者看起来像数据缺失。
+ */
+export type Billing = 'usage' | 'subscription'
+
 export interface ModelConfig {
   /** 'provider:model'，全系统唯一键 */
   key: string
   provider: string
   model: string
   baseUrl: string
+  /** 默认 openai-completions */
+  api?: WireApi
+  /** 默认 usage */
+  billing?: Billing
+  /** 订阅月费，仅用于展示 */
+  subscriptionUsdPerMonth?: number
+  /** anthropic-messages 专用 */
+  anthropicVersion?: string
   /** env 变量名；值不进 config、不进 git */
   apiKeyRef?: string
   /** 每分钟请求数上限；无 rate-limit 响应头的家靠这个本地令牌桶 */
@@ -109,11 +134,29 @@ export interface ModelConfig {
   supportsTools?: boolean
 }
 
+/**
+ * 单次调用的边际成本。
+ *
+ * 订阅制返回 0 —— 这一次调用确实不产生额外费用。
+ * 但**不要**把它当作「免费」展示：用 `isSubscription()` 区分，
+ * UI 显示「订阅」而不是 $0（见 DATA-INTEGRITY：不编造数字，
+ * 也不让真实的 0 被误读成数据缺失）。
+ */
 export function costOf(cfg: ModelConfig, u: Usage): number {
+  if (cfg.billing === 'subscription') return 0
   const m = 1_000_000
   return (
     ((u.tokensIn - u.cacheRead) * (cfg.costPerMTokIn ?? 0)) / m +
     (u.cacheRead * (cfg.costPerMTokCacheRead ?? cfg.costPerMTokIn ?? 0)) / m +
     (u.tokensOut * (cfg.costPerMTokOut ?? 0)) / m
   )
+}
+
+export function isSubscription(cfg: ModelConfig): boolean {
+  return cfg.billing === 'subscription'
+}
+
+/** 是否有可用的单价数据；没有就不该显示金额 */
+export function hasPricing(cfg: ModelConfig): boolean {
+  return cfg.costPerMTokIn !== undefined || cfg.costPerMTokOut !== undefined
 }

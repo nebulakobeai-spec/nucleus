@@ -89,10 +89,13 @@ nucleus ask "接着刚才的说" --conv 39774043-...   # 需要完整 id
 ### 换模型
 
 ```bash
-nucleus ask "..." --model zai:glm-4.7
-nucleus ask "..." --model zai:glm-4.7,openai:gpt-5    # fallback 链
+nucleus ask "..." --model zai:glm-5.2
+nucleus ask "..." --model zai:glm-5.2,kimi:k3         # fallback 链
 nucleus ask "..." --mock                              # 离线，不烧 token
 ```
+
+内置模型：`zai:glm-5.2` · `kimi:k3` · `openai:gpt-5.6-sol` · `xai:grok-4.5`
+（均为订阅制）· `zai:glm-4.7`（按量）· `mock:local` / `ollama:llama`（本地）
 
 链上前面的不可用（限流 / 熔断 / 额度耗尽）就自动切后面的。切换会记进时间轴的 `llm.retry`。
 
@@ -139,7 +142,7 @@ nucleus events dc1996e0
 ```
      0ms dc1996 attempt.started      orchestrator #1
      2ms dc1996 llm.call.started     {"step":1,...}
-    11ms dc1996 llm.call.finished    zai:glm-4.7 200+40 tok $0.0002
+    11ms dc1996 llm.call.finished    zai:glm-5.2 200+40 tok $0.0002
     11ms dc1996 tool.intent          delegate idempotent
     14ms dc1996 tool.outcome         delegate ✓ 2ms
     17ms dc1996 wake.armed           {"waitOn":1}
@@ -183,8 +186,8 @@ nucleus auth list
 ```
 REF               类型     来源      值                过期  用于
 ────────────────  ───────  ────────  ────────────────  ────  ────────────
-OPENAI_API_KEY    api_key  env       ************DOkA        openai:gpt-5
-ZAI_API_KEY       api_key  keychain  ************1234        zai:glm-4.7
+OPENAI_API_KEY    api_key  env       ************DOkA        openai:gpt-5.6-sol
+ZAI_API_KEY       api_key  keychain  ************1234        zai:glm-5.2
 
 解析优先级：环境变量 > keychain > ~/.nucleus/credentials.json
 ```
@@ -406,12 +409,16 @@ per-agent 可覆盖。触顶落终态（`budget.steps_exceeded` / `budget.cost_e
 nucleus runs <id>      # run 树里每个节点都带成本
 ```
 
+**订阅制模型显示「订阅」而不是 `$0`** —— 月费已付，单次调用没有边际成本，
+但 `$0` 看起来像数据缺失。token 用量照常记录：**订阅制下真正的约束是配额和限流**，
+不是钱。撞到限流时看 `doctor` 的 provider 健康面板与恢复时间。
+
 ---
 
 ## 开发时
 
 ```bash
-npm test              # 213 个测试，全离线
+npm test              # 238 个测试，全离线
 npm run test:watch
 npm run typecheck
 npm run build

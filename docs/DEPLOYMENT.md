@@ -39,6 +39,189 @@ git --version
 
 ---
 
+## ⚠️ 阶段 0.5：你需要自己搞清楚的事
+
+**开发方不知道这些，必须由你在部署机上确认。** 有些会导致明确的报错，有些会**静默地降低效果** —— 后者更危险，所以逐项确认。
+
+### A. 模型的真实参数（必须确认）
+
+以下字段在 `src/config.ts` 里是**空的或猜的**，因为开发方无法访问网络、且这些模型比其知识截止更新：
+
+| 模型 | `baseUrl` | `contextWindow` | `maxTokens` |
+|---|---|---|---|
+| `zai:glm-5.2` | `https://api.z.ai/api/coding/paas/v4` ⚠️沿用旧版路径 | **缺失** | **缺失** |
+| `kimi:k3` | `https://api.kimi.com/coding` ⚠️沿用旧版路径 | **缺失** | `32768`（猜的） |
+| `openai:gpt-5.6-sol` | `https://api.openai.com/v1` | **缺失** | **缺失** |
+| `xai:grok-4.5` | `https://api.x.ai/v1` ⚠️未验证 | **缺失** | **缺失** |
+
+**`contextWindow` 缺失的后果是静默的**：context 装配会用默认预算（128k 窗口，16k 留给输出）。
+
+- 实际窗口更大 → 白白浪费容量，长会话被过早裁剪
+- 实际窗口更小 → 装配出超窗的请求，被 provider 拒绝
+
+**你要做的**：查各家文档拿到准确值，写进 `nucleus.config.json`：
+
+```json
+{
+  "models": [
+    {
+      "key": "zai:glm-5.2", "provider": "zai", "model": "glm-5.2",
+      "baseUrl": "<确认后的地址>",
+      "api": "openai-completions",
+      "apiKeyRef": "ZAI_API_KEY",
+      "billing": "subscription",
+      "contextWindow": 200000,
+      "maxTokens": 131072
+    }
+    // …其余三个同理。models 是整体替换，要写全
+  ]
+}
+```
+
+**验证 baseUrl 是否正确**（在配置之前就能查）：
+
+```bash
+# OpenAI 兼容的三家：列模型
+curl -s -H "Authorization: Bearer $ZAI_API_KEY" \
+  https://api.z.ai/api/coding/paas/v4/models | head -c 300
+
+curl -s -H "Authorization: Bearer $XAI_API_KEY" \
+  https://api.x.ai/v1/models | head -c 300
+
+curl -s -H "Authorization: Bearer $OPENAI_API_KEY" \
+  https://api.openai.com/v1/models | head -c 300
+```
+
+返回 JSON 模型列表 = baseUrl 对。返回 404 / HTML = 路径错了。
+**同时确认返回的列表里真的有你配置的那个 model id**（比如 `glm-5.2`、`grok-4.5`）——
+model id 写错的报错通常很含糊。
+
+Kimi 走 anthropic-messages 协议，端点不同：
+
+```bash
+curl -s -X POST https://api.kimi.com/coding/v1/messages \
+  -H "Authorization: Bearer $KIMI_API_KEY" \
+  -H "content-type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"k3","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+期望返回带 `content` 数组的 JSON。如果报错，**先确认 Kimi 的订阅端点到底是不是这个路径以及是不是 anthropic 协议** —— 开发方是从你 4 月的旧配置里读到的，可能已经变了。若实际是 OpenAI 兼容，把配置改成 `"api": "openai-completions"` 并换 baseUrl 即可，两个适配器都在。
+
+### B. 订阅制的配额边界（强烈建议摸清）
+
+四个模型都是订阅制。**订阅制下真正会卡住你的不是钱，是配额和限流。** 但每家的配额口径不同（按请求数？按 token？按小时还是按天？），开发方无从得知。
+
+**你要做的**：
+
+1. 查各家订阅页面的速率限制说明，记下来
+2. 如果某家**没有** rate-limit 响应头（z.ai 和 Kimi 大概率没有），在配置里设本地令牌桶兜底：
+
+```json
+{ "key": "zai:glm-5.2", "rpm": 60, "...": "..." }
+```
+
+不设的话，撞限流只能靠 429 被动发现 —— 能工作，但会浪费调用、拖慢响应。
+
+3. 跑几轮真实任务后看：
+
+```bash
+node dist/cli/index.js doctor      # provider 健康：谁在熔断、何时恢复
+```
+
+### C. 数据库连接细节
+
+| 要确认的 | 怎么确认 |
+|---|---|
+| 连接串格式（是否需要 `?sslmode=require`） | 托管数据库通常需要；本地 docker 不需要 |
+| 数据库用户是否有建表权限 | `migrate` 会直接报错，很明确 |
+| Postgres 主版本 | `psql -c 'select version()'`，必须 ≥ 14 |
+
+> ⚠️ **真 Postgres 路径尚未在真实环境验证过** —— 开发方的机器连不上数据库，
+> 所有测试跑在 PGlite 上。这是整个部署中最大的未知数。
+> 如果 `migrate` 或 `doctor` 在这里失败，**这是预期内的风险**，直接导出诊断包。
+
+### D. 工作目录
+
+`NUCLEUS_WORKDIR` 默认 `/tmp/nucleus` —— **重启会丢**。生产要改成持久路径，并确认：
+
+```bash
+mkdir -p /var/lib/nucleus/work && touch /var/lib/nucleus/work/.probe && rm $_
+```
+
+能写入即可。agent 产出的文件都落在这里。
+
+### E. MCP server 的可用性（若要用）
+
+每个 MCP server 都是**独立的第三方进程**，开发方不知道你的机器上能不能跑起来。逐个确认：
+
+```bash
+# 命令本身存在吗
+npx -y mcp-searxng --help 2>&1 | head -3
+
+# 它依赖的服务在吗（比如 searxng 需要一个本地实例）
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8888
+```
+
+**尤其注意**：有些 MCP server 需要额外的后端服务（searxng 要 searxng 实例、postgres MCP 要数据库、browserless 要浏览器容器）。这些**不在 Nucleus 的职责范围内**，要你自己部署。
+
+配好之后必看这一项：
+
+```bash
+node dist/cli/index.js mcp tools
+```
+
+**逐个确认副作用等级**（见阶段 8）。分级错了的后果：把「发邮件」标成 `pure` → 崩溃后会自动重发。
+
+### F. 网络出站
+
+```bash
+# 确认能连到各家 API（如果在受限网络里，这一步会暴露问题）
+curl -s -o /dev/null -w 'z.ai %{http_code}\n'   https://api.z.ai
+curl -s -o /dev/null -w 'openai %{http_code}\n' https://api.openai.com
+curl -s -o /dev/null -w 'xai %{http_code}\n'    https://api.x.ai
+curl -s -o /dev/null -w 'kimi %{http_code}\n'   https://api.kimi.com
+```
+
+任何一家连不通，对应的模型就不可用 —— 在 `modelChain` 里把它移到后面或去掉，
+否则每次都会先浪费一次超时。
+
+> 如果需要代理，Node 的 `fetch` **不会自动读 `HTTP_PROXY`**。目前 Nucleus
+> 没有代理配置项 —— 如果你的环境必须走代理，导出诊断包告知，这需要开发方加支持。
+
+### G. 前沿模型的 schema 遵守率（跑起来才知道）
+
+Nucleus 要求模型用 `submit_result` 工具提交结构化结果。本地只用小模型（llama3.2）验证过协议管道，**前沿模型的实际遵守率是未知的**。
+
+跑几轮真实任务后：
+
+```bash
+node dist/cli/index.js events <run-id> | grep contract.rejected
+```
+
+- 偶尔出现 = 正常，系统会让它重写
+- **每次都出现** = prompt 或 schema 需要调整，**导出诊断包，需要开发方介入**
+
+---
+
+### 阶段 0.5 检查清单
+
+```
+[ ] 四个模型的 baseUrl 用 curl 验证过，且模型列表里有对应 model id
+[ ] Kimi 的协议确认过（anthropic-messages 还是 OpenAI 兼容）
+[ ] 四个模型的 contextWindow / maxTokens 已查到并写进配置
+[ ] 各家订阅的速率限制已了解；无响应头的家已设 rpm
+[ ] 数据库连接串格式确认（sslmode 等），用户有建表权限
+[ ] NUCLEUS_WORKDIR 指向持久路径且可写
+[ ] （若用 MCP）每个 server 的命令与依赖服务都能跑
+[ ] 出站网络到四家 API 都通
+```
+
+**这些不做也能启动**，但 A 和 B 不做会让系统在长会话和高负载下表现明显变差，而且症状不明显。
+
+---
+
+
 ## 阶段 1：数据库
 
 Nucleus 需要 **PostgreSQL ≥ 14**。
@@ -82,10 +265,7 @@ psql "postgresql://nucleus:<密码>@localhost:5432/nucleus" -c 'select version()
 
 能打印出版本号，且主版本 ≥ 14。
 
-> ⚠️ **这是当前最大的未知数。** Nucleus 的所有自动化测试都跑在 PGlite（进程内
-> WASM Postgres）上，**真 Postgres 连接路径尚未在真实环境验证过** ——
-> 开发机的网络策略连不上数据库。如果阶段 4 的 `migrate` 或 `doctor` 在这里失败，
-> 那是预期内的风险，请直接导出诊断包。
+> ⚠️ 真 Postgres 路径尚未在真实环境验证过，见 [阶段 0.5 C](#c-数据库连接细节)。
 
 ---
 
@@ -112,7 +292,7 @@ ls dist/cli/index.js && node dist/cli/index.js --help | head -3
 npm test
 ```
 
-**判据**：`Tests  213 passed (213)`。
+**判据**：`Tests  238 passed (238)`。
 
 这一步不需要数据库、网络、API key。**如果这里就失败了，说明是环境问题（node 版本、依赖安装），不要继续。**
 
@@ -153,7 +333,7 @@ cp nucleus.config.example.json nucleus.config.json
 ```json
 {
   "defaults": {
-    "modelChain": ["zai:glm-4.7", "openai:gpt-5"],
+    "modelChain": ["zai:glm-5.2", "kimi:k3", "openai:gpt-5.6-sol", "xai:grok-4.5"],
     "maxSteps": 12,
     "maxCostUsd": 1.0
   }
@@ -162,7 +342,26 @@ cp nucleus.config.example.json nucleus.config.json
 
 `modelChain` 是 fallback 顺序：前面的不可用（限流/熔断/额度耗尽）就自动切后面的。
 
-**可用的模型 key** 在 `src/config.ts` 的 `defaultConfig.models` 里：`mock:local`、`ollama:llama`、`zai:glm-4.7`、`openai:gpt-5`。要加别的模型，在配置文件里写完整的 `models` 数组（会整体替换默认值）。
+**内置的模型 key**：
+
+| key | 协议 | 计费 | 凭据 |
+|---|---|---|---|
+| `zai:glm-5.2` | openai-completions | 订阅 $30/月 | `ZAI_API_KEY` |
+| `kimi:k3` | **anthropic-messages** | 订阅 $39/月 | `KIMI_API_KEY` |
+| `openai:gpt-5.6-sol` | openai-completions | 订阅 $20/月 | `OPENAI_API_KEY` |
+| `xai:grok-4.5` | openai-completions | 订阅 $30/月 | `XAI_API_KEY` |
+| `zai:glm-4.7` | openai-completions | 按量（有单价） | `ZAI_API_KEY` |
+| `mock:local` / `ollama:llama` | — | 本地/测试 | — |
+
+要加别的模型，在配置文件里写完整的 `models` 数组（**整体替换**默认值）。
+
+> **Kimi 走的是 anthropic-messages 协议**，不是 OpenAI 兼容 —— 请求体、
+> 流式事件、usage 字段都不同。配置里 `"api": "anthropic-messages"` 决定走哪个适配器，
+> 写错会得到 400。
+
+> **订阅制的成本显示**：这四个模型都是订阅，单次调用无边际成本，
+> UI 显示「订阅」而不是 `$0`（后者容易被误读成数据缺失）。
+> token 用量仍然照常记录 —— **配额和限流才是订阅制下真正的约束**。
 
 > 配置文件支持 `//` 和 `/* */` 注释。
 > 数组是**整体替换**语义，不是合并 —— 你列了 3 个 MCP server 就是 3 个。
@@ -273,7 +472,7 @@ node dist/cli/index.js verify
 ### 7.2 真模型
 
 ```bash
-node dist/cli/index.js ask "用一句话介绍你自己" --model zai:glm-4.7
+node dist/cli/index.js ask "用一句话介绍你自己" --model zai:glm-5.2
 ```
 
 **判据**：打印出助手回复，末尾显示 run 数 / token 数 / 成本。
@@ -281,7 +480,7 @@ node dist/cli/index.js ask "用一句话介绍你自己" --model zai:glm-4.7
 ### 7.3 真实编排
 
 ```bash
-node dist/cli/index.js ask "帮我调研一下 X，要有来源" --model zai:glm-4.7
+node dist/cli/index.js ask "帮我调研一下 X，要有来源" --model zai:glm-5.2
 ```
 
 **这一步是真正的验收。** 期望看到：
@@ -490,10 +689,11 @@ node dist/cli/index.js verify      # 离线冒烟
 给自动化 agent 用的顺序清单，每项都有判据：
 
 ```
+[ ] 阶段 0.5 的清单全部确认（模型参数 / 配额 / 数据库 / 工作目录 / MCP / 网络）
 [ ] node -v ≥ 20
 [ ] Postgres ≥ 14 可连接（psql 能 select version()）
 [ ] npm ci && npm run build 成功
-[ ] npm test → 213 passed
+[ ] npm test → 238 passed
 [ ] .env 已配置 NUCLEUS_DATABASE_URL
 [ ] nucleus.config.json 已创建，modelChain 已设置
 [ ] migrate → 显示 (postgres)，不是 (pglite)
@@ -504,6 +704,7 @@ node dist/cli/index.js verify      # 离线冒烟
 [ ] ask "..." --model <真模型> → 有回复
 [ ] ask 一个需要委派的任务 → 看到 waiting_children → 专家 → attempt 2
 [ ] （若配 MCP）mcp list → ready；mcp tools → 副作用等级已逐个确认
+[ ] 跑几轮后 events | grep contract.rejected → 不是每次都出现
 ```
 
 任何一项失败：`bundle` → 提交 → 停止。

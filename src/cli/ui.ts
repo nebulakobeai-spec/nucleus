@@ -107,7 +107,17 @@ export function duration(ms: number): string {
   return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
 }
 
-export function money(usd: number): string {
+/**
+ * 金额显示。
+ *
+ * 三种语义必须区分开（DATA-INTEGRITY：不编造数字，也不让真实值被误读）：
+ *   有单价且花了钱 → $0.0123
+ *   订阅制         → 「订阅」，不是 $0
+ *   无单价数据     → N/A，不是 $0
+ */
+export function money(usd: number | null | undefined, opts: { subscription?: boolean } = {}): string {
+  if (opts.subscription) return c.gray('订阅')
+  if (usd === null || usd === undefined) return c.gray('N/A')
   if (usd === 0) return '$0'
   if (usd < 0.01) return `$${usd.toFixed(5)}`
   return `$${usd.toFixed(4)}`

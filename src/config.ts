@@ -126,11 +126,60 @@ export function envSecrets(ref: string | undefined): string | null {
 
 export const defaultConfig: NucleusConfig = {
   models: [
+    // ── 你的订阅模型 ────────────────────────────────────
+    // 全部为订阅制（月费已付），单次调用无边际成本 ——
+    // 真正的约束是配额与限流，不是 token 单价。
+    // 上下文窗口留空表示未知：宁可不填，也不编造数字。
+    {
+      key: 'zai:glm-5.2',
+      provider: 'zai',
+      model: 'glm-5.2',
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      api: 'openai-completions',
+      apiKeyRef: 'ZAI_API_KEY',
+      billing: 'subscription',
+      subscriptionUsdPerMonth: 30,
+    },
+    {
+      key: 'openai:gpt-5.6-sol',
+      provider: 'openai',
+      model: 'gpt-5.6-sol',
+      baseUrl: 'https://api.openai.com/v1',
+      api: 'openai-completions',
+      apiKeyRef: 'OPENAI_API_KEY',
+      billing: 'subscription',
+      subscriptionUsdPerMonth: 20,
+    },
+    {
+      key: 'xai:grok-4.5',
+      provider: 'xai',
+      model: 'grok-4.5',
+      baseUrl: 'https://api.x.ai/v1',
+      api: 'openai-completions',
+      apiKeyRef: 'XAI_API_KEY',
+      billing: 'subscription',
+      subscriptionUsdPerMonth: 30,
+    },
+    {
+      // Kimi 的 coding 端点走 anthropic-messages 协议，不是 OpenAI 兼容
+      key: 'kimi:k3',
+      provider: 'kimi',
+      model: 'k3',
+      baseUrl: 'https://api.kimi.com/coding',
+      api: 'anthropic-messages',
+      apiKeyRef: 'KIMI_API_KEY',
+      billing: 'subscription',
+      subscriptionUsdPerMonth: 39,
+      maxTokens: 32768,
+    },
+
+    // ── 本地与测试 ──────────────────────────────────────
     {
       key: 'mock:local',
       provider: 'mock',
       model: 'mock',
       baseUrl: 'http://mock.invalid/v1',
+      billing: 'usage',
       costPerMTokIn: 0,
       costPerMTokOut: 0,
     },
@@ -139,28 +188,26 @@ export const defaultConfig: NucleusConfig = {
       provider: 'ollama',
       model: 'llama3.2',
       baseUrl: process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1',
+      billing: 'usage',
       costPerMTokIn: 0,
       costPerMTokOut: 0,
     },
+
+    // ── 按量计费的备选（有可靠单价数据）────────────────
     {
       key: 'zai:glm-4.7',
       provider: 'zai',
       model: 'glm-4.7',
       baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      api: 'openai-completions',
       apiKeyRef: 'ZAI_API_KEY',
+      billing: 'usage',
       rpm: 60,
       costPerMTokIn: 0.6,
       costPerMTokOut: 2.2,
       costPerMTokCacheRead: 0.11,
-      contextWindow: 200_000,
-    },
-    {
-      key: 'openai:gpt-5',
-      provider: 'openai',
-      model: 'gpt-5',
-      baseUrl: 'https://api.openai.com/v1',
-      apiKeyRef: 'OPENAI_API_KEY',
-      contextWindow: 400_000,
+      contextWindow: 204_800,
+      maxTokens: 131_072,
     },
   ],
   agents: [
@@ -191,7 +238,8 @@ export const defaultConfig: NucleusConfig = {
     },
   ],
   defaults: {
-    modelChain: ['mock:local'],
+    // 全订阅制，切换不产生额外费用 —— fallback 链可以放宽
+    modelChain: ['zai:glm-5.2', 'kimi:k3', 'openai:gpt-5.6-sol', 'xai:grok-4.5'],
     maxSteps: 12,
     maxCostUsd: 1.0,
   },

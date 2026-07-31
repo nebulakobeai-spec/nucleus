@@ -3,7 +3,8 @@ import type { Deps } from '../seams.js'
 import type { Db } from '../db/types.js'
 import { ProviderHealth } from './health.js'
 import { OpenAICompatProvider, type FetchLike } from './openai-compat.js'
-import { costOf, type ChatRequest, type ChatResponse, type ModelConfig } from './types.js'
+import { AnthropicProvider } from './anthropic.js'
+import { costOf, type ChatRequest, type ChatResponse, type ModelConfig, type Provider } from './types.js'
 
 export interface RouterOptions {
   fetch?: FetchLike
@@ -131,11 +132,19 @@ export class ModelRouter {
   /** 同一模型上的就地重试：只对可重试错误，按 retry-after 退避。 */
   async #callWithRetry(cfg: ModelConfig, req: Omit<ChatRequest, 'model'>): Promise<ChatResponse> {
     const key = this.secrets(cfg.apiKeyRef)
-    const provider = new OpenAICompatProvider(cfg, key, {
-      clock: this.deps.clock,
-      ...(this.#fetch ? { fetch: this.#fetch } : {}),
-      ...(this.#timeoutMs ? { timeoutMs: this.#timeoutMs } : {}),
-    })
+    // 按线路协议分派：Kimi coding 端点与 Anthropic 官方 API 不是 OpenAI 兼容形态
+    const provider: Provider =
+      cfg.api === 'anthropic-messages'
+        ? new AnthropicProvider(cfg, key, {
+            clock: this.deps.clock,
+            ...(this.#fetch ? { fetch: this.#fetch } : {}),
+            ...(this.#timeoutMs ? { timeoutMs: this.#timeoutMs } : {}),
+          })
+        : new OpenAICompatProvider(cfg, key, {
+            clock: this.deps.clock,
+            ...(this.#fetch ? { fetch: this.#fetch } : {}),
+            ...(this.#timeoutMs ? { timeoutMs: this.#timeoutMs } : {}),
+          })
 
     let lastError: unknown
     for (let i = 0; i <= this.#retries; i++) {

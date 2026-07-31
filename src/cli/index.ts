@@ -215,8 +215,21 @@ async function askCmd(argv: string[], flags: Record<string, string | true>): Pro
         tokens += (a.tokensIn ?? 0) + (a.tokensOut ?? 0)
       }
     }
+    // 订阅制显示「订阅」而不是 $0 —— 后者看起来像数据缺失
+    const usedKeys = new Set<string>()
+    for (const r of tree) {
+      for (const a of await n.runs.listAttempts(r.id)) if (a.provider) usedKeys.add(`${a.provider}:${a.model}`)
+    }
+    const allSubscription =
+      usedKeys.size > 0 &&
+      [...usedKeys].every((k) => n.config.models.find((m) => m.key === k)?.billing === 'subscription')
+
     line()
-    line(c.gray(`${tree.length} 个 run · ${tokens} tokens · ${money(cost)} · ${duration(Date.now() - t0)}`))
+    line(
+      c.gray(
+        `${tree.length} 个 run · ${tokens} tokens · ${money(cost, { subscription: allSubscription })} · ${duration(Date.now() - t0)}`,
+      ),
+    )
     line(c.gray(`详情：nucleus runs ${runId.slice(0, 8)}`))
     return 0
   } finally {
