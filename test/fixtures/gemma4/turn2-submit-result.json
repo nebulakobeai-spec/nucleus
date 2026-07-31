@@ -1,0 +1,38 @@
+{
+  "note": "gemma4:31b 的真实响应，经 curl 采集（Node 在开发 agent 沙箱内无法出网）",
+  "model": "gemma4:31b",
+  "response": {
+    "id": "chatcmpl-646",
+    "object": "chat.completion",
+    "created": 1785524100,
+    "model": "gemma4:31b",
+    "system_fingerprint": "fp_ollama",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning": "The researcher has already completed the comprehensive report on vector database selection. The report covers classifications (native, enhanced traditional, libraries), detailed analysis of popular products (Milvus, Pinecone, Qdrant, Weaviate, pgvector, Elasticsearch), technical dimensions, and a decision tree for selection. It also includes sources within the table and text.\n\nI can now summarize these findings and call `submit_result`.\n\nSummary structure:\n1.  Overview of types (Native vs Enhanced Traditional).\n2.  Key product recommendations based on use case (e.g., Milvus for large scale, pgvector for simplicity/smaller datasets, Pinecone for serverless/fast start).\n3.  Reference to the full report artifact.",
+          "tool_calls": [
+            {
+              "id": "call_nwg42xpa",
+              "index": 0,
+              "type": "function",
+              "function": {
+                "name": "submit_result",
+                "arguments": "{\"artifacts\":[\"runs/abc/reports/向量数据库选型.md\"],\"confidence\":1,\"findings\":[{\"claim\":\"向量数据库分为原生（如 Milvus, Pinecone）、增强型传统数据库（如 pgvector, Elasticsearch）以及轻量级库（如 FAISS）。\",\"sources\":[\"Milvus Documentation, pgvector GitHub, FAISS Meta\"]},{\"claim\":\"针对超大规模、企业级生产环境且具备 K8s 运维能力，建议选择 Milvus。\",\"sources\":[\"Milvus Documentation\"]},{\"claim\":\"对于已有 PostgreSQL 且数据量规模较小（百万级以下）的用户，pgvector 是最低成本的方案。\",\"sources\":[\"pgvector GitHub\"]},{\"claim\":\"需要兼顾传统全文检索（BM25）和向量语义搜索时，Elasticsearch 具有显著优势。\",\"sources\":[\"Elastic Blog\"]},{\"claim\":\"追求快速上线、无需运维且预算充足的项目建议选择 Pinecone (Serverless)。\",\"sources\":[\"Pinecone Official Site\"]}],\"status\":\"ok\",\"summary\":\"向量数据库选型应基于数据规模、运维能力和检索需求。原生库（Milvus, Qdrant, Pinecone）适合海量数据，增强型（pgvector, Elasticsearch）适合降低成本或需要混合搜索的场景。具体建议见详述报告：runs/abc/reports/向量数据库选型.md。\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 1588,
+      "completion_tokens": 467,
+      "total_tokens": 2055
+    }
+  }
+}

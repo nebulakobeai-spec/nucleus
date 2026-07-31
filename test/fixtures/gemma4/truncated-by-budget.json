@@ -1,0 +1,27 @@
+{
+  "note": "gemma4:31b 的真实响应，经 curl 采集（Node 在开发 agent 沙箱内无法出网）",
+  "model": "gemma4:31b",
+  "response": {
+    "id": "chatcmpl-358",
+    "object": "chat.completion",
+    "created": 1785523190,
+    "model": "gemma4:31b",
+    "system_fingerprint": "fp_ollama",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning": "The user is asking for the sum of 2 + 2.\n\n    *   Constraint: \"Answer in one short sentence.\"\n    *   Calculation: 2 + 2 = 4.\n\"2 + 2 equals 4.\" or \"The answer is 4.\""
+        },
+        "finish_reason": "length"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 29,
+      "completion_tokens": 64,
+      "total_tokens": 93
+    }
+  }
+}
