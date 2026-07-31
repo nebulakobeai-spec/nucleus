@@ -14,7 +14,8 @@ npm link          # 之后可以直接敲 nucleus
 
 ```
 对话与诊断
-  ask <文本>                    发起一轮对话并执行到静止
+  chat                          交互式 REPL，连续对话（推荐）
+  ask <文本>                    一次性对话，脚本友好
   runs [id 前缀]                列出 run / 查看 run 树
   events <id 前缀>              查看时间轴
 
@@ -52,20 +53,66 @@ MCP
 
 ## 对话
 
-### 发起一轮
+### 交互式（推荐）
+
+```bash
+nucleus chat
+nucleus chat --model zai:glm-5.2          # 指定模型链
+nucleus chat --conv <id>                  # 接着已有会话聊
+```
+
+```
+╭─ nucleus ──────────────────────────────╮
+│ 会话 （下一轮创建）                     │
+│ 模型 zai:glm-5.2, kimi:k3              │
+╰────────────────────────────────────────╯
+/help 查看命令 · /exit 退出
+
+> 帮我调研一下向量数据库选型
+新会话 8f29f2f3
+▸ orchestrator attempt 1 · run 04c8a001
+  · waiting_children（挂起，等待专家）
+▸ researcher attempt 1 · run ea38c03e
+  ✓ succeeded
+▸ orchestrator attempt 2 · run 04c8a001
+  ✓ succeeded
+
+助手 调研完成：专家确认方向可行……
+
+2 个 run · 1400 tokens · 订阅 · 2.3s
+
+> 接着说
+```
+
+**会话 id 自动记住**，不用手抄。
+
+#### 斜杠命令
+
+| 命令 | 作用 |
+|---|---|
+| `/new` | 开新会话（下一轮生成新 id） |
+| `/model a,b,c` | 换模型链，对后续轮次生效；写错模型名会当场拒绝 |
+| `/model` | 显示当前模型链与可用模型 |
+| `/runs [id 前缀]` | 查看最近的 run 或某个 run 树，不退出 REPL |
+| `/help` | 列命令 |
+| `/exit` | 退出（Ctrl-D 同效） |
+
+#### 出错时不会退出
+
+模型报错（429 / 熔断 / 超时）只打印信息，REPL 继续等下一次输入。
+`contract.rejected` 反复出现时会提示导出诊断包的命令。
+
+Ctrl-C 的行为分两种：**有请求在跑时取消该请求**，空闲时才退出 ——
+避免误触丢掉整个会话。
+
+### 一次性（脚本用）
 
 ```bash
 nucleus ask "帮我调研一下向量数据库选型"
-```
-
-会话是**一次性**的（每次 `ask` 新建），要延续对话用 `--conv`：
-
-```bash
-nucleus ask "第一个问题"
-# 输出里有：会话 39774043
-
 nucleus ask "接着刚才的说" --conv 39774043-...   # 需要完整 id
 ```
+
+`ask` 与 `chat` 走同一条管线、同一套渲染，输出格式一致。
 
 ### 读懂输出
 
@@ -367,6 +414,21 @@ nucleus replay diagnostics/2026-07-30-19-30-00-a1b2c3d.json
 ---
 
 ## 配置
+
+### .env 自动加载
+
+CLI 启动时自动读取当前目录的 `.env`，不必每次 `source`：
+
+```bash
+NUCLEUS_DATABASE_URL=postgresql://...
+```
+
+**已存在的环境变量优先** —— 容器/CI 注入的值不会被文件覆盖，
+这与凭据存储的优先级一致（env > keychain > 文件）。
+
+用 `NUCLEUS_ENV_FILE` 可以指定别的路径。
+
+### 配置文件
 
 配置文件是 `nucleus.config.json`（支持注释），与代码内的 `defaultConfig` 合并。
 

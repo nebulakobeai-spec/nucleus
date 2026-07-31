@@ -56,6 +56,16 @@ export class Worker {
     this.#stopped = true
   }
 
+  /**
+   * 已生效的 agent spec。
+   *
+   * 暴露出来是为了让运行中的进程能改模型链（chat 的 /model）——
+   * spec 在构造时已固化，只改 config 对已启动的 worker 无效。
+   */
+  get agentSpecs(): Map<string, AgentSpec> {
+    return this.agents
+  }
+
   /** 跑到队列空为止。测试与一次性任务用。 */
   async drain(maxLoops = 100, hooks: WorkerHooks = {}): Promise<number> {
     let done = 0

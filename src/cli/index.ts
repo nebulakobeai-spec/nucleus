@@ -1,5 +1,8 @@
-import { boot, ask, type Nucleus } from '../boot.js'
+import { ask, boot, type Nucleus } from '../boot.js'
 import { defaultConfig } from '../config.js'
+import { loadEnvFile } from '../env.js'
+import { chatLoop } from './chat.js'
+import { printRunList, printRunTree, printTurn, runTurn } from './turn.js'
 import { recoveryOf } from '../errors.js'
 import type { MockScript } from '../providers/mock.js'
 import { authList, authLogin, authLogout, authRefresh, authTest, credentialStatus } from './auth.js'
@@ -165,72 +168,43 @@ async function doctor(flags: Record<string, string | true>): Promise<number> {
 
 // ── ask：跑一轮对话 ──────────────────────────────────────
 
+async function chatCmd(flags: Record<string, string | true>): Promise<number> {
+  const n = await open(flags)
+  try {
+    return await chatLoop(n, {
+      conversationId: typeof flags['conv'] === 'string' ? flags['conv'] : null,
+      modelChain:
+        typeof flags['model'] === 'string' ? String(flags['model']).split(',').map((x) => x.trim()) : null,
+    })
+  } finally {
+    await n.close()
+  }
+}
+
 async function askCmd(argv: string[], flags: Record<string, string | true>): Promise<number> {
   const text = argv.join(' ')
   if (!text) {
     line(c.red('用法：nucleus ask "你的问题" [--mock] [--conv <id>]'))
+    line(c.gray('  连续对话用 nucleus chat'))
     return 1
   }
 
   const n = await open(flags)
   try {
-    const convId = (flags['conv'] as string) ?? (await n.conversations.create({ agentId: 'orchestrator', title: text.slice(0, 40) })).id
+    const convId =
+      (flags['conv'] as string) ??
+      (await n.conversations.create({ agentId: 'orchestrator', title: text.slice(0, 40) })).id
 
     heading(`会话 ${convId.slice(0, 8)}`)
     line(`${c.bold('你')}  ${text}`)
     line()
 
-    const t0 = Date.now()
-    const { runId } = await ask(n, convId, text, {
-      onAttemptStart: (i) =>
-        line(`${ICON.run} ${c.cyan(i.agentId)} ${c.gray(`attempt ${i.attemptNo} · run ${i.runId.slice(0, 8)}`)}`),
-      onAttemptEnd: (i) => {
-        const icon = i.status === 'succeeded' ? ICON.ok : i.status === 'waiting_children' ? ICON.info : ICON.fail
-        const note = i.status === 'waiting_children' ? c.gray('（挂起，等待专家）') : ''
-        line(
-          `  ${icon} ${statusColor(i.status)}${note}` +
-            (i.errorCode ? ` ${c.gray(i.errorCode)} ${recoveryHint(recoveryOf(i.errorCode))}` : ''),
-        )
-      },
-    })
+    // 与 chat 共用同一套渲染，避免两条命令的输出漂移
+    const result = await runTurn(n, convId, text)
+    const tree = await n.runs.tree(result.runId)
+    printTurn(result, { runCount: tree.length })
 
-    line()
-    const msgs = await n.conversations.recent(convId, 5)
-    const last = msgs[msgs.length - 1]
-    if (last?.role === 'assistant') {
-      line(`${c.bold('助手')} ${last.content}`)
-      if (last.artifacts.length) line(c.gray(`产出：${last.artifacts.join(', ')}`))
-    } else {
-      const run = await n.runs.getRun(runId)
-      line(`${ICON.warn} 未产生回复；run 状态 ${statusColor(run?.status ?? '?')} ${c.gray(run?.errorCode ?? '')}`)
-    }
-
-    // 成本与耗时
-    const tree = await n.runs.tree(runId)
-    let cost = 0
-    let tokens = 0
-    for (const r of tree) {
-      for (const a of await n.runs.listAttempts(r.id)) {
-        cost += Number(a.costUsd ?? 0)
-        tokens += (a.tokensIn ?? 0) + (a.tokensOut ?? 0)
-      }
-    }
-    // 订阅制显示「订阅」而不是 $0 —— 后者看起来像数据缺失
-    const usedKeys = new Set<string>()
-    for (const r of tree) {
-      for (const a of await n.runs.listAttempts(r.id)) if (a.provider) usedKeys.add(`${a.provider}:${a.model}`)
-    }
-    const allSubscription =
-      usedKeys.size > 0 &&
-      [...usedKeys].every((k) => n.config.models.find((m) => m.key === k)?.billing === 'subscription')
-
-    line()
-    line(
-      c.gray(
-        `${tree.length} 个 run · ${tokens} tokens · ${money(cost, { subscription: allSubscription })} · ${duration(Date.now() - t0)}`,
-      ),
-    )
-    line(c.gray(`详情：nucleus runs ${runId.slice(0, 8)}`))
+    line(c.gray(`详情：nucleus runs ${result.runId.slice(0, 8)}`))
     return 0
   } finally {
     await n.close()
@@ -244,52 +218,12 @@ async function runsCmd(argv: string[], flags: Record<string, string | true>): Pr
   try {
     const prefix = argv[0]
     if (!prefix) {
-      const r = await n.db.query<{ id: string; agent_id: string; status: string; error_code: string | null; created_at: Date }>(
-        `select id, agent_id, status, error_code, created_at from runs
-          where parent_run_id is null order by created_at desc limit 20`,
-      )
-      heading('最近的 run')
-      table(
-        r.rows.map((x) => [
-          x.id.slice(0, 8),
-          x.agent_id,
-          statusColor(x.status),
-          x.error_code ? `${c.gray(x.error_code)} ${recoveryHint(recoveryOf(x.error_code))}` : '',
-          c.gray(new Date(x.created_at).toLocaleString()),
-        ]),
-        ['ID', 'AGENT', '状态', '错误', '时间'],
-      )
+      await printRunList(n)
       return 0
     }
-
-    const found = await n.db.query<{ id: string }>(`select id from runs where id::text like $1 limit 1`, [`${prefix}%`])
-    const rootId = found.rows[0]?.id
-    if (!rootId) {
+    if (!(await printRunTree(n, prefix))) {
       line(c.red(`未找到 run ${prefix}`))
       return 1
-    }
-
-    const root = (await n.runs.getRun(rootId))!
-    const tree = await n.runs.tree(root.rootRunId)
-
-    heading(`run 树 ${root.rootRunId.slice(0, 8)}`)
-    for (const r of tree) {
-      const attempts = await n.runs.listAttempts(r.id)
-      const cost = attempts.reduce((s, a) => s + Number(a.costUsd ?? 0), 0)
-      const indent = '  '.repeat(r.depth)
-      line(
-        `${indent}${r.depth === 0 ? '●' : '└─'} ${c.cyan(r.agentId)} ${statusColor(r.status)} ` +
-          c.gray(`${r.id.slice(0, 8)} · ${attempts.length} attempt · ${money(cost)}`),
-      )
-      if (r.errorCode) {
-        line(`${indent}   ${ICON.warn} ${c.gray(r.errorCode)} ${recoveryHint(recoveryOf(r.errorCode))}`)
-      }
-      const summary = (r.result as { summary?: string } | null)?.summary
-      if (summary) line(`${indent}   ${c.gray(summary.slice(0, 100))}`)
-      for (const a of attempts) {
-        if (attempts.length === 1 && a.status === 'succeeded') continue
-        line(`${indent}   ${c.gray(`#${a.attemptNo}`)} ${statusColor(a.status)} ${c.gray(a.errorCode ?? '')}`)
-      }
     }
     return 0
   } finally {
@@ -427,7 +361,8 @@ async function verify(flags: Record<string, string | true>): Promise<number> {
 const HELP = `${c.bold('nucleus')} — 多 agent 编排运行时
 
 ${c.bold('对话与诊断')}
-  ask <文本>          发起一轮对话并执行到静止
+  chat                交互式 REPL，连续对话（推荐）
+  ask <文本>          一次性对话，脚本友好
   runs [id 前缀]      列出 run / 查看 run 树
   events <id 前缀>    查看 timeline
 
@@ -462,6 +397,8 @@ ${c.bold('通用参数')}
   --config <file>     指定配置文件（默认找 ./nucleus.config.json）
 
 ${c.bold('示例')}
+  nucleus chat
+  nucleus chat --model zai:glm-5.2
   nucleus auth login ZAI_API_KEY
   echo "$KEY" | nucleus auth login ZAI_API_KEY --stdin
   nucleus auth test
@@ -477,6 +414,8 @@ export async function main(argv: string[]): Promise<number> {
   switch (cmd) {
     case 'ask':
       return askCmd(rest, flags)
+    case 'chat':
+      return chatCmd(flags)
     case 'runs':
       return runsCmd(rest, flags)
     case 'events':
@@ -545,6 +484,10 @@ export async function main(argv: string[]): Promise<number> {
       return 1
   }
 }
+
+// 启动即加载 .env —— 部署时不必每次 source。
+// 已存在的环境变量优先，容器注入的值不会被文件覆盖。
+loadEnvFile()
 
 const entry = process.argv[1] ?? ''
 const isMain = /(?:cli[/\\]index\.(?:ts|js)|[/\\]nucleus)$/.test(entry)

@@ -35,8 +35,8 @@ npm run build
 # 端到端冒烟，全离线、不需要数据库、不烧 token
 node dist/cli/index.js verify
 
-# 跑一轮完整编排（内置 mock 模型）
-node dist/cli/index.js ask "帮我调研一下向量数据库选型" --mock
+# 交互式对话（内置 mock 模型，离线可跑）
+node dist/cli/index.js chat --mock
 ```
 
 输出：
@@ -61,6 +61,9 @@ node dist/cli/index.js ask "帮我调研一下向量数据库选型" --mock
 
 注意第一行的 `waiting_children` —— 编排者委派后**当轮就结束了**，没有空转等待。子任务完成时它会被唤醒，起第二次 attempt 来整合。
 
+`chat` 是连续对话的 REPL —— 会话 id 自动记住，`/model` 可随时换模型链，
+`/runs` 可以不退出就查执行详情。脚本场景用 `ask`（一次性，两者走同一条管线）。
+
 接真模型 —— **两种凭据形态**：
 
 ```bash
@@ -70,7 +73,7 @@ node dist/cli/index.js auth login ZAI_API_KEY      # 输入不回显
 # OpenAI / Grok 的订阅不发 API key，只能走 OAuth
 node dist/cli/index.js auth login OPENAI_OAUTH --oauth --provider openai
 
-node dist/cli/index.js ask "..." --model zai:glm-5.2
+node dist/cli/index.js chat --model zai:glm-5.2
 ```
 
 OAuth 需要先在配置里给出 `clientId`，见[凭据与 OAuth](#凭据与-oauth)。
@@ -216,9 +219,10 @@ src/
   context/             三段装配 + 预算降级
   mcp/                 MCP client（stdio + http）
   auth/                凭据存储 + OAuth（device flow / authorization code + PKCE）
-  cli/                 终端界面
+  env.ts               .env 加载（无第三方依赖）
+  cli/                 终端界面（chat REPL / ask / 运维命令）
 migrations/            forward-only SQL
-test/                  275 个测试，全离线
+test/                  299 个测试，全离线
 ```
 
 ---
@@ -226,7 +230,7 @@ test/                  275 个测试，全离线
 ## 开发
 
 ```bash
-npm test          # 275 个测试，全离线：不需要数据库、网络、API key
+npm test          # 299 个测试，全离线：不需要数据库、网络、API key
 npm run typecheck
 npm run build
 ```

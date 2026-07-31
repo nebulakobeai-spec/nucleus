@@ -348,7 +348,7 @@ ls dist/cli/index.js && node dist/cli/index.js --help | head -3
 npm test
 ```
 
-**判据**：`Tests  275 passed | 7 skipped (282)`。
+**判据**：`Tests  299 passed | 7 skipped (306)`。
 
 这一步不需要数据库、网络、API key。**如果这里就失败了，说明是环境问题（node 版本、依赖安装），不要继续。**
 
@@ -377,6 +377,9 @@ NUCLEUS_DATABASE_URL=postgresql://nucleus:<密码>@localhost:5432/nucleus
 | `OLLAMA_BASE_URL` | 有本地 ollama 才需要 |
 
 **API key 不要写进 `.env`**，用阶段 5 的 `auth login`。（写进去也能工作，环境变量优先级最高，但那样它就进了一个容易被误提交的文件。）
+
+> CLI 启动时会自动加载当前目录的 `.env`，不需要手动 `source`。
+> 已存在的环境变量优先，所以容器注入的值不会被文件覆盖。
 
 ### 3.2 配置文件
 
@@ -568,6 +571,9 @@ node dist/cli/index.js verify
 
 ```bash
 node dist/cli/index.js ask "用一句话介绍你自己" --model zai:glm-5.2
+
+# 或用交互式 REPL 连续测几轮
+node dist/cli/index.js chat --model zai:glm-5.2
 ```
 
 **判据**：打印出助手回复，末尾显示 run 数 / token 数 / 成本。
@@ -794,7 +800,7 @@ node dist/cli/index.js verify      # 离线冒烟
 [ ] node -v ≥ 20
 [ ] Postgres ≥ 14 可连接（psql 能 select version()）
 [ ] npm ci && npm run build 成功
-[ ] npm test → 275 passed
+[ ] npm test → 299 passed
 [ ] .env 已配置 NUCLEUS_DATABASE_URL
 [ ] nucleus.config.json 已创建，modelChain 已设置
 [ ] migrate → 显示 (postgres)，不是 (pglite)
