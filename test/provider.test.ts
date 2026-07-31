@@ -448,3 +448,117 @@ describe('重试与取消', () => {
     expect(h.consecutiveErrors).toBe(0)
   })
 })
+
+// ═══════════════════════════════════════════════════════
+// 推理模型：thinking 与最终回复分离
+// ═══════════════════════════════════════════════════════
+
+describe('推理模型的 reasoning 字段', () => {
+  /** ollama 对 gemma4 / deepseek-r1 这类模型的真实响应形状 */
+  function reasoningResponse(opts: {
+    content?: string
+    reasoning?: string
+    toolCalls?: Array<{ name: string; args: unknown }>
+    finish?: string
+  }): () => Response {
+    return () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: opts.content ?? '',
+                ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
+                ...(opts.toolCalls
+                  ? {
+                      tool_calls: opts.toolCalls.map((t, i) => ({
+                        id: `call_${i}`,
+                        type: 'function',
+                        function: { name: t.name, arguments: JSON.stringify(t.args) },
+                      })),
+                    }
+                  : {}),
+              },
+              finish_reason: opts.finish ?? (opts.toolCalls ? 'tool_calls' : 'stop'),
+            },
+          ],
+          usage: { prompt_tokens: 29, completion_tokens: 132 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+  }
+
+  it('reasoning 与 content 分开解析，不混进 content', async () => {
+    const f = scriptedFetch([
+      reasoningResponse({ content: '最终答案是 4', reasoning: '用户问 2+2，计算得 4。' }),
+    ])
+    const res = await router(f).chat(CHAIN, { messages: [] })
+
+    expect(res.content).toBe('最终答案是 4')
+    expect(res.reasoning).toBe('用户问 2+2，计算得 4。')
+    // 关键：思考不能出现在 content 里，否则会被存入会话历史
+    expect(res.content).not.toContain('用户问')
+  })
+
+  it('也识别 reasoning_content（部分实现用这个名字）', async () => {
+    const f = scriptedFetch([
+      () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              { message: { role: 'assistant', content: 'ok', reasoning_content: '思考中' }, finish_reason: 'stop' },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    ])
+    const res = await router(f).chat(CHAIN, { messages: [] })
+    expect(res.reasoning).toBe('思考中')
+  })
+
+  it('content 为空但有 tool_calls 时正常工作 —— gemma4 的典型形状', async () => {
+    const f = scriptedFetch([
+      reasoningResponse({
+        content: '',
+        reasoning: '应该调用 get_weather 工具。',
+        toolCalls: [{ name: 'get_weather', args: { city: 'Tokyo' } }],
+      }),
+    ])
+    const res = await router(f).chat(CHAIN, { messages: [] })
+
+    expect(res.content).toBe('')
+    expect(res.toolCalls).toHaveLength(1)
+    expect(res.finishReason).toBe('tool_calls')
+    expect(res.reasoning).toContain('get_weather')
+  })
+
+  it('非推理模型不产生 reasoning 字段', async () => {
+    const f = scriptedFetch([stubCompletion({ content: 'plain' })])
+    const res = await router(f).chat(CHAIN, { messages: [] })
+    expect(res.reasoning).toBeUndefined()
+  })
+
+  it('流式下 reasoning 增量单独累积，不推给 UI', async () => {
+    const seen: string[] = []
+    const f = scriptedFetch([
+      stubStream([
+        { choices: [{ delta: { reasoning: '先想' } }] },
+        { choices: [{ delta: { reasoning: '一想' } }] },
+        { choices: [{ delta: { content: '答案' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ]),
+    ])
+    const res = await router(f).chat(CHAIN, {
+      messages: [],
+      onDelta: (d) => d.text && seen.push(d.text),
+    })
+
+    expect(res.content).toBe('答案')
+    expect(res.reasoning).toBe('先想一想')
+    // 思考不属于最终回复，不该推给前端渲染
+    expect(seen).toEqual(['答案'])
+  })
+})

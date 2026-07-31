@@ -36,6 +36,13 @@ export interface AgentSpec {
   maxSteps?: number
   maxCostUsd?: number
   temperature?: number
+  /**
+   * 单次调用的输出上限。
+   *
+   * 推理模型需要给足 —— 思考过程会消耗这份预算，不够就会在给出
+   * 答案前被截断（见 provider.output_truncated）。留空则用 provider 默认。
+   */
+  maxTokens?: number
 }
 
 export interface RunnerOptions {
@@ -197,6 +204,7 @@ export class Runner {
         messages,
         tools: wire,
         ...(agent.temperature !== undefined ? { temperature: agent.temperature } : {}),
+        ...(agent.maxTokens !== undefined ? { maxTokens: agent.maxTokens } : {}),
         signal,
       })
       acc.tokensIn += res.usage.tokensIn
@@ -211,16 +219,55 @@ export class Runner {
         cacheRead: res.usage.cacheRead,
         costUsd: res.costUsd,
         latencyMs: res.latencyMs,
+        finishReason: res.finishReason,
         switched: res.attempts,
       })
+
+      // 推理模型的思考过程只进事件流，**不进 messages** ——
+      // 它不属于最终回复，放进历史会违反多轮规范并浪费 context
+      // （Gemma 4 的最佳实践明确要求历史里不含 thinking）。
+      if (res.reasoning) {
+        await this.events.emit(attemptId, runId, 'llm.reasoning', {
+          step,
+          chars: res.reasoning.length,
+          // 只留开头，完整思考过程可能很长
+          excerpt: res.reasoning.slice(0, 500),
+        })
+      }
 
       if (agent.maxCostUsd !== undefined && acc.costUsd > agent.maxCostUsd) {
         throw new NucleusError('budget.cost_exceeded', `成本 ${acc.costUsd.toFixed(4)} 超出上限 ${agent.maxCostUsd}`)
       }
 
+      /**
+       * 输出被截断。
+       *
+       * 推理模型（gemma4 / deepseek-r1）会先输出思考再给答案，思考本身
+       * 消耗输出预算。预算不足时 content 与 tool_calls 都是空的 ——
+       * 若按「模型没调工具」处理，会一路走到 budget.no_progress，
+       * 而那个错误码完全指不到真实原因（预算不够）。
+       */
+      if (res.finishReason === 'length' && res.toolCalls.length === 0) {
+        throw new NucleusError(
+          'provider.output_truncated',
+          `${res.modelKey} 输出在完成前被截断（tokens_out=${res.usage.tokensOut}）` +
+            (res.reasoning ? '；思考过程占满了输出预算' : ''),
+          {
+            detail: {
+              model: res.modelKey,
+              tokensOut: res.usage.tokensOut,
+              maxTokens: agent.maxTokens ?? null,
+              reasoningChars: res.reasoning?.length ?? 0,
+              hint: '提高该 agent 的 maxTokens，或改用非推理模型',
+            },
+          },
+        )
+      }
+
       // 没有工具调用 = 模型想直接结束，但它必须走 submit_result
       if (res.toolCalls.length === 0) {
-        messages.push({ role: 'assistant', content: res.content })
+        // content 为空时给个占位：多数 provider 拒绝空 assistant 消息
+        messages.push({ role: 'assistant', content: res.content || '(无输出)' })
         messages.push({
           role: 'user',
           content: '请调用 submit_result 提交结果来结束任务，不要直接用文本回复。',

@@ -41,6 +41,7 @@ export const ERRORS = new Map<string, ErrorSpec>([
   spec('provider.timeout', 'automatic', true, '模型响应超时，正在重试'),
   spec('provider.degenerate_output', 'automatic', true, '模型输出退化（重复），已中断并重试'),
   spec('provider.bad_request', 'terminal', false, '请求不被模型接受'),
+  spec('provider.output_truncated', 'needs_user', false, '模型输出被截断，需要提高 maxTokens'),
 
   // ── tool ──────────────────────────────────────────────
   spec('tool.not_found', 'terminal', false, '工具不存在'),

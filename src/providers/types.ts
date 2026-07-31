@@ -63,6 +63,16 @@ export interface Usage {
 
 export interface ChatResponse {
   content: string
+  /**
+   * 推理模型的思考过程（如 gemma4 / deepseek-r1）。
+   *
+   * **刻意与 content 分开**：Gemma 4 的最佳实践明确要求多轮对话的历史里
+   * 不能包含 thinking 内容。放进 content 就会被存入会话并在下一轮回放，
+   * 违反这条规范且浪费 context。
+   *
+   * 只用于可观测（写入 run_events），永不进入会话历史。
+   */
+  reasoning?: string
   toolCalls: ToolCall[]
   finishReason: 'stop' | 'tool_calls' | 'length' | 'content_filter' | 'aborted' | 'other'
   usage: Usage

@@ -575,3 +575,115 @@ describe('失败即终态', () => {
     expect(out.errorCode).toBe('runtime.cancelled')
   })
 })
+
+// ═══════════════════════════════════════════════════════
+// 推理模型：截断诊断与 thinking 隔离
+// ═══════════════════════════════════════════════════════
+
+describe('推理模型', () => {
+  /** 模拟 gemma4 的响应形状：思考在 reasoning，content 可能为空 */
+  function reasoning(opts: {
+    content?: string
+    reasoning?: string
+    submit?: Record<string, unknown>
+    finish?: string
+  }): Response {
+    const message: Record<string, unknown> = {
+      role: 'assistant',
+      content: opts.content ?? '',
+      ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
+    }
+    if (opts.submit) {
+      message['tool_calls'] = [
+        {
+          id: 'c1',
+          type: 'function',
+          function: { name: 'submit_result', arguments: JSON.stringify(opts.submit) },
+        },
+      ]
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            index: 0,
+            message,
+            finish_reason: opts.finish ?? (opts.submit ? 'tool_calls' : 'stop'),
+          },
+        ],
+        usage: { prompt_tokens: 29, completion_tokens: 132 },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+  }
+
+  it('思考过程写进事件流，不进 messages —— 否则会污染会话历史', async () => {
+    const ctx = await startRun()
+    await exec(
+      runnerWith([
+        reasoning({
+          reasoning: '这是内部推理，不该出现在历史里',
+          submit: { status: 'ok', summary: '完成' },
+        }),
+      ]),
+      ctx,
+    )
+
+    const emitted = events.find('llm.reasoning') as { excerpt: string; chars: number } | undefined
+    expect(emitted).toBeDefined()
+    expect(emitted!.excerpt).toContain('内部推理')
+    expect(emitted!.chars).toBeGreaterThan(0)
+  })
+
+  it('输出截断报 output_truncated，而不是误报 no_progress', async () => {
+    const ctx = await startRun()
+    const truncated = reasoning({
+      content: '',
+      reasoning: '思考占满了预算…',
+      finish: 'length',
+    })
+
+    const out = await exec(runnerWith([truncated, truncated, truncated]), ctx)
+
+    // 真实原因是预算不够；报 no_progress 会让人查错方向
+    expect(out.errorCode).toBe('provider.output_truncated')
+    expect(out.status).toBe('failed')
+  })
+
+  it('截断错误带上诊断信息与可操作提示', async () => {
+    const ctx = await startRun()
+    const out = await exec(
+      runnerWith([reasoning({ finish: 'length', reasoning: 'x'.repeat(100) })]),
+      ctx,
+    )
+
+    const detail = out.errorDetail as { hint: string; reasoningChars: number; tokensOut: number }
+    expect(detail.hint).toContain('maxTokens')
+    expect(detail.reasoningChars).toBe(100)
+    expect(detail.tokensOut).toBeGreaterThan(0)
+  })
+
+  it('截断但仍给出了工具调用时不算失败', async () => {
+    const ctx = await startRun()
+    const out = await exec(
+      runnerWith([
+        reasoning({ finish: 'length', submit: { status: 'ok', summary: '赶在截断前提交了' } }),
+      ]),
+      ctx,
+    )
+    expect(out.status).toBe('succeeded')
+  })
+
+  it('content 为空且无工具调用时不发空 assistant 消息', async () => {
+    // 多数 provider 拒绝空 content 的 assistant 消息
+    const ctx = await startRun()
+    const out = await exec(
+      runnerWith([
+        reasoning({ content: '', reasoning: '想了但没说' }),
+        reasoning({ submit: { status: 'ok', summary: '第二次说了' } }),
+      ]),
+      ctx,
+    )
+    expect(out.status).toBe('succeeded')
+  })
+})

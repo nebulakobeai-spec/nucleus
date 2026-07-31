@@ -147,8 +147,11 @@ export class OpenAICompatProvider implements Provider {
   async #readJson(res: Response): Promise<Omit<ChatResponse, 'model' | 'latencyMs'>> {
     const j = (await res.json()) as OpenAIChatCompletion
     const choice = j.choices?.[0]
+    // reasoning 单独取出，不并入 content —— 见 ChatResponse.reasoning 的说明
+    const reasoning = choice?.message?.reasoning ?? choice?.message?.reasoning_content
     return {
       content: choice?.message?.content ?? '',
+      ...(reasoning ? { reasoning } : {}),
       toolCalls: (choice?.message?.tool_calls ?? []).map(toToolCall),
       finishReason: mapFinish(choice?.finish_reason),
       usage: mapUsage(j.usage),
@@ -168,6 +171,7 @@ export class OpenAICompatProvider implements Provider {
     if (!res.body) throw new NucleusError('provider.server_error', '流式响应没有 body')
 
     let content = ''
+    let reasoning = ''
     const partial = new Map<number, { id: string; name: string; args: string }>()
     let finish: string | undefined
     let usage: Usage = { tokensIn: 0, tokensOut: 0, cacheRead: 0 }
@@ -206,6 +210,9 @@ export class OpenAICompatProvider implements Provider {
           content += text
           req.onDelta?.({ text })
         }
+        // 思考增量不进 content，也不推给 UI —— 它不属于最终回复
+        const think = d.delta?.reasoning ?? d.delta?.reasoning_content
+        if (think) reasoning += think
 
         for (const tc of d.delta?.tool_calls ?? []) {
           const idx = tc.index ?? 0
@@ -232,6 +239,7 @@ export class OpenAICompatProvider implements Provider {
 
     return {
       content,
+      ...(reasoning ? { reasoning } : {}),
       toolCalls,
       finishReason: mapFinish(finish ?? (toolCalls.length ? 'tool_calls' : 'stop')),
       usage,
@@ -278,7 +286,13 @@ interface OpenAIUsage {
 
 interface OpenAIChatCompletion {
   choices?: Array<{
-    message?: { content?: string | null; tool_calls?: OpenAIToolCall[] }
+    message?: {
+      content?: string | null
+      /** ollama 用这个字段承载 thinking；有的实现叫 reasoning_content */
+      reasoning?: string
+      reasoning_content?: string
+      tool_calls?: OpenAIToolCall[]
+    }
     finish_reason?: string
   }>
   usage?: OpenAIUsage
@@ -288,6 +302,8 @@ interface OpenAIChatChunk {
   choices?: Array<{
     delta?: {
       content?: string
+      reasoning?: string
+      reasoning_content?: string
       tool_calls?: Array<OpenAIToolCall & { index?: number }>
     }
     finish_reason?: string

@@ -72,6 +72,13 @@ export interface AgentConfig {
   requiredFields?: string[]
   maxSteps?: number
   maxCostUsd?: number
+  /**
+   * 单次调用的输出上限。留空则用 provider 默认。
+   *
+   * **推理模型要给足** —— 思考过程消耗这份预算，不够会在给出答案前
+   * 被截断（错误码 provider.output_truncated）。
+   */
+  maxTokens?: number
 }
 
 /** 所有 agent 共享的运行时契约（prefix 第一段） */
@@ -90,6 +97,7 @@ export function agentSpec(cfg: AgentConfig, defaults: NucleusConfig['defaults'])
     maxSteps: cfg.maxSteps ?? defaults.maxSteps,
     maxCostUsd: cfg.maxCostUsd ?? defaults.maxCostUsd,
   }
+  if (cfg.maxTokens !== undefined) spec.maxTokens = cfg.maxTokens
   if (cfg.toolsDeny) spec.toolsDeny = cfg.toolsDeny
   if (cfg.capabilities || cfg.requiredFields) {
     spec.resultSpec = {
@@ -267,6 +275,22 @@ export const defaultConfig: NucleusConfig = {
       billing: 'usage',
       costPerMTokIn: 0,
       costPerMTokOut: 0,
+    },
+    {
+      // Gemma 4 31B（dense）。原生 function calling + system role，
+      // 256K 上下文。是推理模型：ollama 把思考放在响应的 reasoning 字段，
+      // 我们只写进事件流、不进会话历史（Gemma 4 的多轮规范要求如此）。
+      //
+      // 采样参数用 ollama modelfile 里的默认值（temperature=1 / top_p=0.95
+      // / top_k=64，即 Gemma 4 的推荐配置），所以这里不覆盖 temperature。
+      key: 'ollama:gemma4',
+      provider: 'ollama',
+      model: 'gemma4:31b',
+      baseUrl: process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1',
+      billing: 'usage',
+      costPerMTokIn: 0,
+      costPerMTokOut: 0,
+      contextWindow: 256_000,
     },
 
     // ── 按量计费的备选（有可靠单价数据）────────────────
