@@ -202,6 +202,39 @@ node dist/cli/index.js events <run-id> | grep contract.rejected
 - 偶尔出现 = 正常，系统会让它重写
 - **每次都出现** = prompt 或 schema 需要调整，**导出诊断包，需要开发方介入**
 
+### H. OAuth clientId（必须自己解决）
+
+**OpenAI 和 Grok 的订阅不发 API key，只能走 OAuth，而 OAuth 需要 client_id。**
+Nucleus 不内置任何第三方的 client_id，所以这一项不解决，这两个模型就用不了。
+
+需要查清三件事：
+
+1. **各家是否开放个人注册 OAuth 客户端？**
+   - OpenAI：platform.openai.com → Settings → 找 OAuth / Applications
+   - xAI：console.x.ai → 开发者设置
+   - 关注 redirect URI 能否填 `http://localhost:1455/auth/callback`（loopback）
+
+2. **走 OAuth 的用量算订阅额度还是 API 计价？**
+   这条很重要 —— 如果算 API 计价，会产生**订阅之外的费用**。
+   订阅制的前提是"月费已付、调用无边际成本"，这个假设不成立的话
+   `billing: "subscription"` 的配置就该改回 `"usage"` 并填单价。
+
+3. **注册本身是否收费？**
+   OAuth 客户端注册通常免费（它只是应用标识），但要确认。
+
+可能的三种情形：
+
+| 情形 | 表现 | 处理 |
+|---|---|---|
+| 开放注册 | 门户里能直接创建拿到 client_id | 最干净，用自己的 |
+| 需审核 / 仅企业 | 要提交申请说明用途 | 走流程，或暂时不用这两家 |
+| 完全不开放 | 只有官方 CLI 内置的 id 能用 | 需要向仓库所有者确认怎么处理 |
+
+**如果是第三种情形，不要自行决定填别人的 client_id** —— 导出诊断包或直接反馈，
+这是产品定位问题，不是部署问题。
+
+在此期间 GLM 和 Kimi 可以正常工作，把 `modelChain` 里的 OpenAI / Grok 去掉即可。
+
 ---
 
 ### 阶段 0.5 检查清单
@@ -215,6 +248,8 @@ node dist/cli/index.js events <run-id> | grep contract.rejected
 [ ] NUCLEUS_WORKDIR 指向持久路径且可写
 [ ] （若用 MCP）每个 server 的命令与依赖服务都能跑
 [ ] 出站网络到四家 API 都通
+[ ] OpenAI / Grok 的 OAuth clientId 已解决（或已确认暂时不用这两家）
+[ ] 已确认走 OAuth 的用量算订阅额度而非 API 计价
 ```
 
 **这些不做也能启动**，但 A 和 B 不做会让系统在长会话和高负载下表现明显变差，而且症状不明显。
@@ -292,7 +327,7 @@ ls dist/cli/index.js && node dist/cli/index.js --help | head -3
 npm test
 ```
 
-**判据**：`Tests  238 passed (238)`。
+**判据**：`Tests  275 passed | 7 skipped (282)`。
 
 这一步不需要数据库、网络、API key。**如果这里就失败了，说明是环境问题（node 版本、依赖安装），不要继续。**
 
@@ -416,11 +451,50 @@ node dist/cli/index.js auth test
 | `[fail] 凭据被拒绝` | key 错了或过期 | 重新 `auth login` |
 | `[warn] 无法连接` | **网络不通，无法判断凭据是否有效** | 先解决出网，不是凭据问题 |
 
-### 关于 OAuth
+### 两种凭据形态
 
-`auth login <REF> --oauth` 的机制（device flow + PKCE）完整可用，但**目前没有任何 provider 配置它** —— Kimi / GLM / OpenAI / Grok 对 API 访问都只提供 API key。
+| Provider | 订阅是否发 API key | 怎么配 |
+|---|---|---|
+| GLM（z.ai） | ✅ 有 | `auth login ZAI_API_KEY` |
+| Kimi | ✅ 有 | `auth login KIMI_API_KEY` |
+| **OpenAI** | ❌ **无** | **OAuth**，见下 |
+| **Grok（xAI）** | ❌ **无** | **OAuth**，见下 |
 
-除非你要接的服务确实支持 OAuth，否则**一律用 API key**。运行 `--oauth` 会得到明确提示而不是含糊的错误。
+### OAuth（OpenAI / Grok 必须）
+
+**先决条件：你必须自己提供 `clientId`。** Nucleus 不内置任何第三方产品的
+client_id —— 内置的只有端点模板（公开的协议事实），应用标识借用别人的
+等于把本程序声明成对方，配额与审计都记在人家头上。
+
+```json
+{
+  "oauthProviders": {
+    "openai": { "clientId": "<你申请到的 client_id>" },
+    "xai": { "clientId": "<你申请到的 client_id>" }
+  }
+}
+```
+
+⚠️ **这一项需要你先搞清楚**（见 [阶段 0.5 H](#h-oauth-clientid必须自己解决)）：
+各家是否开放个人注册 OAuth 客户端、走 OAuth 的用量算订阅额度还是 API 计费。
+
+配好后：
+
+```bash
+node dist/cli/index.js auth login OPENAI_OAUTH --oauth --provider openai
+node dist/cli/index.js auth login XAI_OAUTH --oauth --provider xai
+```
+
+流程：启动本地回调服务器（`localhost:1455`，只绑 loopback）→ 打开浏览器授权
+→ 回调服务器与手动粘贴**同时等待，先到的赢**。
+
+**远程 SSH 部署时**：浏览器在你本地、服务器收不到回调，这时把重定向后的
+完整 URL 粘回终端即可。端口被占也会自动降级到这条路径。
+
+**判据**：`auth list` 里对应 ref 显示 `oauth` 类型和过期时间。
+
+> access token 通常 1 小时过期，运行时会自动刷新。
+> xAI 两种 flow 都支持，加 `--method device` 可切到不需要回调端口的那种。
 
 ---
 
@@ -693,7 +767,7 @@ node dist/cli/index.js verify      # 离线冒烟
 [ ] node -v ≥ 20
 [ ] Postgres ≥ 14 可连接（psql 能 select version()）
 [ ] npm ci && npm run build 成功
-[ ] npm test → 238 passed
+[ ] npm test → 275 passed
 [ ] .env 已配置 NUCLEUS_DATABASE_URL
 [ ] nucleus.config.json 已创建，modelChain 已设置
 [ ] migrate → 显示 (postgres)，不是 (pglite)

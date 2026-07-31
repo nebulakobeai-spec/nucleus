@@ -1,7 +1,14 @@
+import { execFile } from 'node:child_process'
 import { createInterface } from 'node:readline/promises'
 import { defaultConfig, type NucleusConfig } from '../config.js'
 import { CredentialStore, redact } from '../auth/credentials.js'
 import { needsRefresh, OAuthClient, type OAuthProviderConfig } from '../auth/oauth.js'
+import {
+  AuthCodeClient,
+  parseOAuthCallbackInput,
+  type AuthCodeProviderConfig,
+} from '../auth/oauth-auth-code.js'
+import { OAuthRegistry, type OAuthFlowConfig } from '../auth/providers.js'
 import { c, heading, ICON, line, table } from './ui.js'
 
 /**
@@ -16,13 +23,15 @@ import { c, heading, ICON, line, table } from './ui.js'
  */
 
 /**
- * OAuth provider 注册表。
+ * OAuth provider 注册表，从配置构建。
  *
- * 目前为空：Kimi / GLM / OpenAI / Grok 对 API 访问都只提供 API key，
- * 没有面向自用的 OAuth 流程。这里留给将来的订阅型登录或自建网关 ——
- * 填一条配置即可用，无需改代码。
+ * **不内置任何第三方产品的 client_id** —— 那是别人向 provider 注册的应用标识，
+ * 拿来用等于把自己声明成对方。端点模板内置（那是公开的协议事实），
+ * clientId 由部署方在 nucleus.config.json 的 oauthProviders 里填。
  */
-export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {}
+export function oauthRegistry(config: NucleusConfig = defaultConfig): OAuthRegistry {
+  return new OAuthRegistry(config.oauthProviders ?? {})
+}
 
 interface Ctx {
   store: CredentialStore
@@ -154,36 +163,83 @@ async function apiKeyLogin(
   return 0
 }
 
-/** OAuth：device flow + PKCE */
+/** OAuth 登录：按 provider 的 flow 类型分派 */
 async function oauthLogin(
   store: CredentialStore,
   ref: string,
   flags: Record<string, string | true>,
 ): Promise<number> {
   const providerId = typeof flags['provider'] === 'string' ? flags['provider'] : ref
-  const cfg = OAUTH_PROVIDERS[providerId]
+  const registry = oauthRegistry()
+  let entry = registry.get(providerId)
 
-  if (!cfg) {
-    line(`${ICON.fail} 没有名为 ${c.bold(providerId)} 的 OAuth provider`)
-    line()
-    const ids = Object.keys(OAUTH_PROVIDERS)
-    if (ids.length === 0) {
-      line(c.gray('当前没有配置任何 OAuth provider。'))
-      line(c.gray('Kimi / GLM / OpenAI / Grok 对 API 访问只提供 API key，'))
-      line(c.gray('请改用：') + c.bold(`nucleus auth login ${ref}`))
-      line()
-      line(c.gray('要接入支持 OAuth 的服务，在 src/cli/auth.ts 的 OAUTH_PROVIDERS 中加一条配置。'))
-    } else {
-      line(c.gray(`可用：${ids.join(', ')}`))
+  // --method 显式覆盖 flow 类型（xAI 两种都支持）
+  const method = typeof flags['method'] === 'string' ? flags['method'] : null
+  if (entry && method && entry.kind !== method) {
+    const alt = registry.get(method === 'device' ? `${providerId}-device` : providerId)
+    if (alt?.kind === method) entry = alt
+    else {
+      line(`${ICON.fail} provider ${providerId} 不支持 ${method} flow`)
+      return 1
     }
+  }
+
+  if (!entry) {
+    printMissingProvider(providerId, ref, registry)
     return 1
   }
 
-  heading(`OAuth 登录 · ${cfg.id}`)
+  return entry.kind === 'device'
+    ? deviceFlowLogin(store, ref, entry.config)
+    : authCodeFlowLogin(store, ref, entry.config, flags)
+}
+
+function printMissingProvider(providerId: string, ref: string, registry: OAuthRegistry): void {
+  line(`${ICON.fail} 没有配置名为 ${c.bold(providerId)} 的 OAuth provider`)
+  line()
+
+  if (registry.size > 0) {
+    line(c.gray(`已配置：${registry.ids().join(', ')}`))
+    line()
+  }
+
+  const tpl = OAuthRegistry.availableTemplates().find((t) => t.id === providerId)
+  if (tpl) {
+    // 有模板但缺 clientId —— 这是最常见的情形，给出可直接抄的配置
+    line(`${ICON.info} ${providerId} 有内置端点模板，但缺少 ${c.bold('clientId')}。`)
+    line(c.gray(`   ${tpl.note}`))
+    line()
+    line('在 nucleus.config.json 里加：')
+    line(
+      c.gray(`  {
+    "oauthProviders": {
+      "${providerId}": { "clientId": "<你申请到的 client_id>" }
+    }
+  }`),
+    )
+    line()
+    line(c.gray('不内置 clientId 是有意的：那是各家颁发给具体应用的标识，'))
+    line(c.gray('借用别人的等于把本程序声明成对方。'))
+  } else {
+    const ids = OAuthRegistry.availableTemplates().map((t) => `${t.id}(${t.kind})`)
+    line(c.gray(`内置端点模板：${ids.join(', ')}`))
+    line(c.gray('其余 provider 需要在配置里给出完整端点。'))
+    line()
+    line(c.gray(`只用 API key 的话：`) + c.bold(`nucleus auth login ${ref}`))
+  }
+  return
+}
+
+/** Device Flow（RFC 8628）：不需要回调端口 */
+async function deviceFlowLogin(
+  store: CredentialStore,
+  ref: string,
+  cfg: OAuthProviderConfig,
+): Promise<number> {
+  heading(`OAuth 登录 · ${cfg.id}（device flow）`)
 
   const client = new OAuthClient(cfg)
   const pkce = cfg.usePkce !== false ? client.createPkce() : null
-
   const auth = await client.requestDeviceCode(pkce?.challenge)
 
   line()
@@ -195,13 +251,102 @@ async function oauthLogin(
   line(c.gray('等待授权中…（Ctrl-C 取消）'))
 
   const token = await client.pollForToken(auth, pkce?.verifier)
+  return saveToken(store, ref, token)
+}
 
+/**
+ * Authorization Code Flow + PKCE。
+ *
+ * 本地回调服务器与手动粘贴**同时**等待，先到的赢：
+ *  - 本机有浏览器 → 打开链接后自动完成
+ *  - 远程 SSH / 端口被占 → 用户把重定向后的 URL 粘回来
+ *
+ * 两条路径不互斥，避免在 VPS 上完全无法登录。
+ */
+async function authCodeFlowLogin(
+  store: CredentialStore,
+  ref: string,
+  cfg: AuthCodeProviderConfig,
+  flags: Record<string, string | true>,
+): Promise<number> {
+  heading(`OAuth 登录 · ${cfg.id}`)
+
+  let client: AuthCodeClient
+  try {
+    client = new AuthCodeClient(cfg)
+  } catch (e) {
+    line(`${ICON.fail} ${(e as Error).message}`)
+    return 1
+  }
+
+  // discovery（如果配了）会校验端点落在信任域内
+  const endpoints = await client.resolveEndpoints()
+
+  const pkce = cfg.usePkce !== false ? client.createPkce() : null
+  const state = client.createState()
+  const authorizeUrl = client.buildAuthorizeUrl(pkce?.challenge ?? null, state, endpoints.authorizeUrl)
+
+  const server = await client.startCallbackServer(state)
+
+  line()
+  if (server.listeningOn) {
+    line(c.gray(`回调服务器已启动：http://${server.listeningOn}${cfg.callbackPath}`))
+  } else {
+    line(`${ICON.warn} 端口 ${cfg.callbackPort} 不可用，将只能手动粘贴`)
+  }
+  line()
+  line('在浏览器打开：')
+  line(`  ${c.cyan(authorizeUrl)}`)
+  line()
+
+  if (!flags['no-browser']) void openBrowser(authorizeUrl)
+
+  line(c.gray('授权后：'))
+  if (server.listeningOn) line(c.gray('  · 本机浏览器会自动完成，无需操作'))
+  line(c.gray('  · 远程环境请把重定向后的完整 URL 粘贴到这里，回车'))
+  line(c.gray('  （Ctrl-C 取消）'))
+  line()
+
+  // 两条路径竞速
+  const manual = promptForCallback(state)
+  let code: string
+  try {
+    code = await Promise.race([server.waitForCode, manual.promise])
+  } catch (e) {
+    server.close()
+    manual.cancel()
+    line(`${ICON.fail} ${(e as Error).message}`)
+    return 1
+  } finally {
+    server.close()
+    manual.cancel()
+  }
+
+  line(c.gray('正在换取 token…'))
+  let token
+  try {
+    token = await client.exchangeCode(code, pkce?.verifier ?? null, endpoints.tokenUrl)
+  } catch (e) {
+    line(`${ICON.fail} ${(e as Error).message}`)
+    return 1
+  }
+
+  return saveToken(store, ref, token, cfg.id)
+}
+
+async function saveToken(
+  store: CredentialStore,
+  ref: string,
+  token: { accessToken: string; refreshToken?: string; expiresAt: number | null; scope?: string; tokenType?: string },
+  providerId?: string,
+): Promise<number> {
   const source = await store.setOAuth(ref, {
     accessToken: token.accessToken,
     ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
     expiresAt: token.expiresAt,
     ...(token.scope ? { scope: token.scope } : {}),
     ...(token.tokenType ? { tokenType: token.tokenType } : {}),
+    ...(providerId ? { providerId } : {}),
   })
 
   line()
@@ -209,9 +354,51 @@ async function oauthLogin(
   line(c.gray(`  ${ref} = ${redact(token.accessToken)}`))
   if (token.expiresAt) {
     line(c.gray(`  过期：${new Date(token.expiresAt).toLocaleString()}`))
-    line(c.gray(token.refreshToken ? '  带 refresh token，将自动续期' : '  无 refresh token，过期后需重新登录'))
+    line(
+      c.gray(
+        token.refreshToken
+          ? '  带 refresh token，运行时会自动续期'
+          : '  无 refresh token，过期后需重新登录',
+      ),
+    )
   }
   return 0
+}
+
+/** 手动粘贴：可取消，避免与回调竞速时留下悬挂的 readline */
+function promptForCallback(expectedState: string): { promise: Promise<string>; cancel: () => void } {
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  let cancelled = false
+
+  const promise = (async () => {
+    for (;;) {
+      const input = await rl.question('粘贴回调 URL（或直接等待）> ')
+      if (cancelled) return new Promise<string>(() => {}) // 已被回调抢先，永不 resolve
+      try {
+        return parseOAuthCallbackInput(input, expectedState).code
+      } catch (e) {
+        if (cancelled) return new Promise<string>(() => {})
+        line(`${ICON.warn} ${(e as Error).message}，请重试`)
+      }
+    }
+  })()
+
+  return {
+    promise,
+    cancel: () => {
+      cancelled = true
+      rl.close()
+    },
+  }
+}
+
+/** 尽力打开浏览器；失败不影响流程（用户可以自己复制链接） */
+async function openBrowser(url: string): Promise<void> {
+  const cmd =
+    process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
+  await new Promise<void>((resolve) => {
+    execFile(cmd, [url], () => resolve())
+  })
 }
 
 // ── auth list ────────────────────────────────────────────
@@ -223,6 +410,9 @@ export async function authList(_argv: string[], flags: Record<string, string | t
 
   heading('凭据')
   const usedBy = new Map(refs.map((r) => [r.ref, r.models.join(', ')]))
+  // 未配置的 ref 无从判断类型，按命名约定猜 —— 否则会显示成 api_key，
+  // 引导用户用错命令（OAuth-only 的 provider 用 auth login 是配不上的）
+  const looksOAuth = (ref: string) => /_OAUTH$|_TOKEN$/i.test(ref)
 
   table(
     items.map((i) => {
@@ -240,9 +430,11 @@ export async function authList(_argv: string[], flags: Record<string, string | t
           : i.expiresAt < Date.now()
             ? c.red('已过期')
             : c.gray(new Date(i.expiresAt).toLocaleString())
+      const kind =
+        i.source === 'none' && looksOAuth(i.ref) ? 'oauth?' : i.kind === 'oauth' ? 'oauth' : 'api_key'
       return [
         i.source === 'none' ? c.gray(i.ref) : i.ref,
-        i.kind === 'oauth' ? c.magenta('oauth') : 'api_key',
+        kind.startsWith('oauth') ? c.magenta(kind) : kind,
         sourceLabel,
         i.source === 'none' ? c.gray('—') : c.gray(i.hint),
         expiry,
@@ -256,8 +448,17 @@ export async function authList(_argv: string[], flags: Record<string, string | t
   line(c.gray(`解析优先级：环境变量 > keychain > ${store.filePath}`))
   const missing = items.filter((i) => i.source === 'none')
   if (missing.length) {
-    line(c.gray(`未配置：${missing.map((m) => m.ref).join(', ')}`))
-    line(c.gray(`配置：nucleus auth login <REF>`))
+    const oauthRefs = missing.filter((m) => looksOAuth(m.ref)).map((m) => m.ref)
+    const keyRefs = missing.filter((m) => !looksOAuth(m.ref)).map((m) => m.ref)
+    if (keyRefs.length) {
+      line(c.gray(`未配置（API key）：${keyRefs.join(', ')}`))
+      line(c.gray(`  nucleus auth login <REF>`))
+    }
+    if (oauthRefs.length) {
+      line(c.gray(`未配置（OAuth）：${oauthRefs.join(', ')}`))
+      line(c.gray(`  nucleus auth login <REF> --oauth --provider <openai|xai>`))
+      line(c.gray(`  需先在 nucleus.config.json 的 oauthProviders 里配置 clientId`))
+    }
   }
   return 0
 }
@@ -343,24 +544,39 @@ export async function authRefresh(argv: string[], flags: Record<string, string |
     return 1
   }
 
-  const providerId = typeof flags['provider'] === 'string' ? flags['provider'] : ref
-  const cfg = OAUTH_PROVIDERS[providerId]
-  if (!cfg) {
-    line(c.red(`没有名为 ${providerId} 的 OAuth provider 配置`))
+  // 优先用凭据里记录的 provider —— 登录时用哪个刷新时就该用哪个
+  const providerId =
+    (typeof flags['provider'] === 'string' ? flags['provider'] : null) ?? cred.providerId ?? ref
+  const entry = oauthRegistry().get(providerId)
+  if (!entry) {
+    line(c.red(`没有配置名为 ${providerId} 的 OAuth provider`))
+    line(c.gray(`  刷新需要 clientId 与 token 端点，请在 nucleus.config.json 的 oauthProviders 里配置`))
     return 1
   }
 
-  const token = await new OAuthClient(cfg).refresh(cred.refreshToken)
+  const token = await refreshWith(entry, cred.refreshToken)
   await store.setOAuth(ref, {
     accessToken: token.accessToken,
+    // rotation：provider 可能发新的 refresh_token 并作废旧的，必须立刻覆盖
     ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
     expiresAt: token.expiresAt,
     ...(token.scope ? { scope: token.scope } : {}),
+    providerId,
   })
 
   line(`${ICON.ok} 已刷新 ${ref}`)
   if (token.expiresAt) line(c.gray(`  新的过期时间：${new Date(token.expiresAt).toLocaleString()}`))
   return 0
+}
+
+/** 按 flow 类型刷新 */
+export async function refreshWith(entry: OAuthFlowConfig, refreshToken: string) {
+  if (entry.kind === 'device') {
+    return new OAuthClient(entry.config).refresh(refreshToken)
+  }
+  const client = new AuthCodeClient(entry.config)
+  const endpoints = await client.resolveEndpoints()
+  return client.refresh(refreshToken, endpoints.tokenUrl)
 }
 
 // ── auth logout ──────────────────────────────────────────
@@ -413,24 +629,76 @@ export async function credentialStatus(
   return out
 }
 
-/** 供运行时解析密钥：处理 OAuth 过期提示 */
-export function makeSecretResolver(store: CredentialStore) {
-  const cache = new Map<string, string>()
-  return async (ref: string | undefined): Promise<string | null> => {
-    if (!ref) return null
-    const hit = cache.get(ref)
-    if (hit) return hit
+/**
+ * 供运行时解析密钥，**OAuth token 快过期时自动刷新**。
+ *
+ * 长时间运行的前提：access token 通常只有 1 小时有效期，
+ * 不自动刷新的话跑到一半就全部 401。
+ *
+ * 并发安全：同一 ref 的刷新只跑一次，其余调用共享同一个 promise ——
+ * 否则并发的 run 会各自刷新，而 rotation 型 provider（如 OpenAI）
+ * 只认最后一个 refresh_token，前面的全部作废。
+ */
+export function makeSecretResolver(
+  store: CredentialStore,
+  opts: { config?: NucleusConfig; onEvent?: (msg: string) => void } = {},
+) {
+  const registry = oauthRegistry(opts.config ?? defaultConfig)
+  const inflight = new Map<string, Promise<string | null>>()
+  const notify = opts.onEvent ?? ((m: string) => line(c.gray(m)))
 
-    const cred = await store.get(ref)
-    if (cred?.kind === 'oauth' && needsRefresh(cred, Date.now())) {
-      // 刷新需要 provider 配置与网络；这里只提示，由 auth refresh 处理
-      line(c.yellow(`${ICON.warn} ${ref} 的 token 即将过期，运行 nucleus auth refresh ${ref}`))
+  const doRefresh = async (ref: string, cred: import('../auth/credentials.js').OAuthCredential) => {
+    const providerId = cred.providerId ?? ref
+    const entry = registry.get(providerId)
+    if (!entry) {
+      notify(`${ref} 的 token 即将过期，但没有配置 provider ${providerId}，无法自动刷新`)
+      return cred.accessToken
+    }
+    if (!cred.refreshToken) {
+      notify(`${ref} 的 token 即将过期且无 refresh token，需要重新登录`)
+      return cred.accessToken
     }
 
-    const resolved = await store.resolve(ref)
-    if (!resolved) return null
-    cache.set(ref, resolved.secret)
-    return resolved.secret
+    try {
+      const token = await refreshWith(entry, cred.refreshToken)
+      await store.setOAuth(ref, {
+        accessToken: token.accessToken,
+        // rotation：必须立刻写新值，否则下次刷新会用作废的 token
+        ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
+        expiresAt: token.expiresAt,
+        ...(token.scope ? { scope: token.scope } : {}),
+        providerId,
+      })
+      notify(`${ref} 的 token 已自动刷新`)
+      return token.accessToken
+    } catch (e) {
+      // 刷新失败不阻断：旧 token 可能还能用一会儿，让请求自己去撞 401
+      notify(`${ref} 自动刷新失败：${(e as Error).message}`)
+      return cred.accessToken
+    }
+  }
+
+  return async (ref: string | undefined): Promise<string | null> => {
+    if (!ref) return null
+
+    const pending = inflight.get(ref)
+    if (pending) return pending
+
+    const task = (async () => {
+      const cred = await store.get(ref)
+      if (cred?.kind === 'oauth' && needsRefresh(cred, Date.now())) {
+        return doRefresh(ref, cred)
+      }
+      const resolved = await store.resolve(ref)
+      return resolved?.secret ?? null
+    })()
+
+    inflight.set(ref, task)
+    try {
+      return await task
+    } finally {
+      inflight.delete(ref)
+    }
   }
 }
 

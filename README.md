@@ -61,12 +61,19 @@ node dist/cli/index.js ask "帮我调研一下向量数据库选型" --mock
 
 注意第一行的 `waiting_children` —— 编排者委派后**当轮就结束了**，没有空转等待。子任务完成时它会被唤醒，起第二次 attempt 来整合。
 
-接真模型：
+接真模型 —— **两种凭据形态**：
 
 ```bash
+# GLM / Kimi 的订阅发 API key
 node dist/cli/index.js auth login ZAI_API_KEY      # 输入不回显
+
+# OpenAI / Grok 的订阅不发 API key，只能走 OAuth
+node dist/cli/index.js auth login OPENAI_OAUTH --oauth --provider openai
+
 node dist/cli/index.js ask "..." --model zai:glm-5.2
 ```
+
+OAuth 需要先在配置里给出 `clientId`，见[凭据与 OAuth](#凭据与-oauth)。
 
 ---
 
@@ -139,6 +146,59 @@ runner 每 15 秒一条 `UPDATE run_attempts SET heartbeat_at = now()`。零 tok
 
 ---
 
+## 凭据与 OAuth
+
+四个订阅模型分成两类：
+
+| Provider | 订阅是否发 API key | 接入方式 |
+|---|---|---|
+| GLM（z.ai） | ✅ 有 | `auth login ZAI_API_KEY` |
+| Kimi | ✅ 有 | `auth login KIMI_API_KEY` |
+| **OpenAI** | ❌ 无 | **OAuth**（authorization code + PKCE） |
+| **Grok（xAI）** | ❌ 无 | **OAuth**（authorization code 或 device flow） |
+
+凭据统一存储，解析优先级 **环境变量 > macOS keychain > `~/.nucleus/credentials.json`（0600）**。
+API key 与 OAuth access token 在 HTTP 层都作为 `Bearer` 发送，运行时不区分。
+
+### OAuth 需要你自己的 clientId
+
+**Nucleus 不内置任何第三方产品的 `client_id`。** 内置的只有端点模板
+（authorize/token URL、scope、回调端口）—— 那些是公开的协议事实；
+而 `client_id` 是各家颁发给**具体应用**的标识，借用别人的等于把本程序声明成对方，
+配额与审计都记在人家头上。
+
+```json
+{
+  "oauthProviders": {
+    "openai": { "clientId": "<你申请到的 client_id>" },
+    "xai": { "clientId": "<你申请到的 client_id>" }
+  }
+}
+```
+
+不配置就用不了 —— `auth login ... --oauth` 会给出可直接抄的配置片段和这条理由。
+把别人的 id 填进去技术上能跑，代码没有封死这条路，但那是你的决定。
+
+### 登录流程
+
+```bash
+nucleus auth login OPENAI_OAUTH --oauth --provider openai
+```
+
+1. 启动本地回调服务器（默认 `localhost:1455`，只绑 loopback）
+2. 打开浏览器到 authorize URL（带 PKCE challenge + state）
+3. **回调服务器与手动粘贴同时等待，先到的赢**
+   - 本机有浏览器 → 授权后自动完成
+   - 远程 SSH / 端口被占 → 把重定向后的 URL 粘回终端
+4. 用 code + verifier 换 token，存入凭据库
+
+access token 通常 1 小时过期，运行时**自动刷新**（同一 ref 的刷新并发去重 ——
+rotation 型 provider 只认最后一个 refresh token）。
+
+xAI 两种 flow 都支持，`--method device` 可切到不需要回调端口的那种。
+
+---
+
 ## 项目结构
 
 ```
@@ -155,10 +215,10 @@ src/
   runtime/             runner / worker / reconciler / 工具层
   context/             三段装配 + 预算降级
   mcp/                 MCP client（stdio + http）
-  auth/                凭据存储 + OAuth device flow
+  auth/                凭据存储 + OAuth（device flow / authorization code + PKCE）
   cli/                 终端界面
 migrations/            forward-only SQL
-test/                  238 个测试，全离线
+test/                  275 个测试，全离线
 ```
 
 ---
@@ -166,7 +226,7 @@ test/                  238 个测试，全离线
 ## 开发
 
 ```bash
-npm test          # 238 个测试，全离线：不需要数据库、网络、API key
+npm test          # 275 个测试，全离线：不需要数据库、网络、API key
 npm run typecheck
 npm run build
 ```

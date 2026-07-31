@@ -3,6 +3,7 @@ import type { ModelConfig } from './providers/types.js'
 import type { AgentSpec } from './runtime/runner.js'
 import type { McpServerConfig } from './mcp/protocol.js'
 import type { McpRegisterOptions } from './mcp/registry.js'
+import type { OAuthProviderDeclaration } from './auth/providers.js'
 
 /**
  * 统一配置（DESIGN.md §12）。
@@ -10,7 +11,12 @@ import type { McpRegisterOptions } from './mcp/registry.js'
  * T3 能力边界（工具/MCP 白名单）活在这里 —— 它的载体不是规则文本，
  * 而是「给不给」，所以天然属于配置。
  *
- * **secrets 不进这里、不进 git**：只写 `apiKeyRef`，值从 env 取。
+ * **secrets 不进这里、不进 git**：只写 `apiKeyRef`（凭据引用名），
+ * 值从环境变量 / keychain / 0600 文件解析。
+ *
+ * 注意 `apiKeyRef` 是历史命名，它引用的可能是 API key，
+ * 也可能是 OAuth access token —— 两者在 HTTP 层都作为 Bearer 发送。
+ * OpenAI 与 Grok 的订阅不发 API key，只能走 OAuth。
  */
 
 export interface NucleusConfig {
@@ -23,6 +29,16 @@ export interface NucleusConfig {
    * MCP 协议本身不表达副作用等级，但崩溃恢复完全依赖它 —— 必须显式配置。
    */
   mcpPolicies?: McpRegisterOptions
+  /**
+   * OAuth provider 声明。
+   *
+   * **必须自己提供 clientId** —— 内置只有端点模板（公开的协议事实），
+   * 不含任何第三方产品的应用标识。借用别人的 clientId 等于把本程序
+   * 声明成对方，配额与审计都记在人家头上。
+   *
+   * 不配置就用不了 OAuth；四家 provider 都支持 API key，OAuth 非必需。
+   */
+  oauthProviders?: Record<string, OAuthProviderDeclaration>
   defaults: {
     modelChain: string[]
     maxSteps: number
@@ -136,27 +152,33 @@ export const defaultConfig: NucleusConfig = {
       model: 'glm-5.2',
       baseUrl: 'https://api.z.ai/api/coding/paas/v4',
       api: 'openai-completions',
+      // GLM 订阅提供 API key
       apiKeyRef: 'ZAI_API_KEY',
       billing: 'subscription',
       subscriptionUsdPerMonth: 30,
     },
     {
+      // 订阅制**不发 API key**，只能走 OAuth：
+      //   nucleus auth login OPENAI_OAUTH --oauth --provider openai
+      // 凭据里存的是 access token，运行时按 Bearer 发送（与 key 同形）
       key: 'openai:gpt-5.6-sol',
       provider: 'openai',
       model: 'gpt-5.6-sol',
       baseUrl: 'https://api.openai.com/v1',
       api: 'openai-completions',
-      apiKeyRef: 'OPENAI_API_KEY',
+      apiKeyRef: 'OPENAI_OAUTH',
       billing: 'subscription',
       subscriptionUsdPerMonth: 20,
     },
     {
+      // 同 OpenAI：订阅制无 API key，走 OAuth
+      //   nucleus auth login XAI_OAUTH --oauth --provider xai
       key: 'xai:grok-4.5',
       provider: 'xai',
       model: 'grok-4.5',
       baseUrl: 'https://api.x.ai/v1',
       api: 'openai-completions',
-      apiKeyRef: 'XAI_API_KEY',
+      apiKeyRef: 'XAI_OAUTH',
       billing: 'subscription',
       subscriptionUsdPerMonth: 30,
     },
@@ -167,6 +189,7 @@ export const defaultConfig: NucleusConfig = {
       model: 'k3',
       baseUrl: 'https://api.kimi.com/coding',
       api: 'anthropic-messages',
+      // Kimi 订阅提供 API key
       apiKeyRef: 'KIMI_API_KEY',
       billing: 'subscription',
       subscriptionUsdPerMonth: 39,

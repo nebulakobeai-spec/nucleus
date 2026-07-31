@@ -7,6 +7,17 @@
   // ⛔ 不要在这里写密钥。用 apiKeyRef / envRefs 引用凭据名，
   //    值通过 `nucleus auth login <REF>` 或环境变量提供。
 
+  // OAuth provider。OpenAI 与 Grok 的订阅不发 API key，只能走 OAuth。
+  //
+  // ⛔ clientId 必须自己提供 —— Nucleus 不内置任何第三方产品的应用标识。
+  //    内置的只有端点模板（authorize/token URL、scope、回调端口）。
+  //    借用别人的 client_id 等于把本程序声明成对方。
+  //
+  // "oauthProviders": {
+  //   "openai": { "clientId": "<你申请到的 client_id>" },
+  //   "xai":    { "clientId": "<你申请到的 client_id>" }
+  // },
+
   "defaults": {
     "modelChain": ["zai:glm-5.2", "kimi:k3", "openai:gpt-5.6-sol", "xai:grok-4.5"],
     "maxSteps": 12,

@@ -36,6 +36,8 @@ export interface OAuthCredential {
   expiresAt: number | null
   scope?: string
   tokenType?: string
+  /** 用哪个 provider 登录的 —— 刷新时要用同一个 clientId 与端点 */
+  providerId?: string
   createdAt: string
 }
 

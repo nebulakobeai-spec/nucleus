@@ -215,14 +215,66 @@ nucleus auth test ZAI_API_KEY  # 单个
 
 ### OAuth
 
+**OpenAI 与 Grok 的订阅不发 API key，只能走 OAuth。** GLM 与 Kimi 有 key，不需要这一节。
+
 ```bash
-nucleus auth login <REF> --oauth
-nucleus auth refresh <REF>
+nucleus auth login OPENAI_OAUTH --oauth --provider openai
+nucleus auth login XAI_OAUTH --oauth --provider xai
+nucleus auth login XAI_OAUTH --oauth --provider xai --method device   # 无回调端口时
 ```
 
-机制完整（device flow + PKCE + 自动续期），但**目前没有 provider 配置它** ——
-Kimi / GLM / OpenAI / Grok 对 API 访问都只提供 API key。要接支持 OAuth 的服务，在
-`src/cli/auth.ts` 的 `OAUTH_PROVIDERS` 加一条配置即可，不需要改其他代码。
+#### 先配置 clientId
+
+**Nucleus 不内置任何第三方产品的 client_id。** 端点模板是内置的（公开的协议事实），
+但应用标识必须自己提供：
+
+```json
+{
+  "oauthProviders": {
+    "openai": { "clientId": "<你申请到的>" },
+    "xai": { "clientId": "<你申请到的>" }
+  }
+}
+```
+
+没配置时 `--oauth` 会打印可直接抄的配置片段，并说明为什么不给默认值 ——
+借用别人的 client_id 等于把本程序声明成对方，配额与审计都记在人家头上。
+
+#### 登录时会发生什么
+
+1. 启动本地回调服务器（默认 `localhost:1455`，**只绑 loopback**）
+2. 打开浏览器到 authorize URL（PKCE challenge + state）
+3. **回调服务器与手动粘贴同时等待，先到的赢**
+4. 换 token 并存入凭据库
+
+第 3 步是为远程环境设计的：SSH 到 VPS 时浏览器在你本地、服务器收不到回调，
+这时把重定向后的完整 URL 粘回终端即可。端口被占也会自动降级到这条路径。
+
+#### 自动刷新
+
+access token 通常 1 小时过期。运行时检测到快过期会**自动刷新**，无需手动干预。
+
+并发去重：同一 ref 的刷新只跑一次，其余调用共享结果 ——
+OpenAI 这类 rotation 型 provider 每次刷新会作废旧的 refresh token，
+并发刷新会让先返回的那个失效。
+
+手动刷新：
+
+```bash
+nucleus auth refresh OPENAI_OAUTH
+```
+
+凭据里记着用哪个 provider 登录的，刷新时自动用同一套 clientId 与端点。
+
+#### 安全约束
+
+| | |
+|---|---|
+| PKCE | verifier 256 位随机，challenge 为 S256，token 交换时校验 |
+| state | 128 位随机，回调时**定长比较**（避免时序侧信道） |
+| redirect_uri | **只允许 loopback**（`localhost` / `127.0.0.1` / `::1`） |
+| OIDC discovery | 返回的端点必须落在信任域内，否则拒绝（防篡改劫持） |
+| refresh token | 与 access token 同存，不进日志、不进诊断包 |
 
 ---
 
@@ -418,7 +470,7 @@ nucleus runs <id>      # run 树里每个节点都带成本
 ## 开发时
 
 ```bash
-npm test              # 238 个测试，全离线
+npm test              # 275 个测试，全离线
 npm run test:watch
 npm run typecheck
 npm run build
