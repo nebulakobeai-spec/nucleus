@@ -231,6 +231,10 @@ npm run typecheck
 npm run build
 ```
 
+**部署机上也可以直接改代码。** 唯一的要求是开分支并推回 ——
+诊断包记录 git sha，工作区不干净时 sha 与实际运行的代码对不上，
+基于它的分析会指向错误的地方。`bundle` 会检测并在包里标注这一点。
+
 本地用 **PGlite**（进程内 WASM Postgres），所以 `npm test` 不需要装任何东西。SQL 按 **PG 14 基线**写。
 
 **测试分层**：

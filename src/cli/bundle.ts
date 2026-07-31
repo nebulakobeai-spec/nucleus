@@ -21,6 +21,10 @@ export interface Bundle {
   meta: {
     createdAt: string
     gitSha: string | null
+    gitBranch: string | null
+    /** 工作区有未提交改动时为 true —— gitSha 与实际运行的代码不一致 */
+    gitDirty: boolean
+    gitDirtyFiles: string[]
     nodeVersion: string
     platform: string
     configPath: string | null
@@ -61,11 +65,50 @@ function gitSha(): string | null {
   }
 }
 
+function gitBranch(): string | null {
+  try {
+    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 工作区是否有未提交的改动。
+ *
+ * 部署机允许改代码，但改动没提交时 gitSha 就对不上实际运行的代码 ——
+ * 基于诊断包的分析会指向错误的地方。这里如实记录，让读包的人知道。
+ */
+function gitDirty(): { dirty: boolean; files: string[] } {
+  try {
+    const out = execFileSync('git', ['status', '--porcelain'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    if (!out.trim()) return { dirty: false, files: [] }
+    const files = out
+      .split('\n')
+      .filter((l) => l.length > 3)
+      // porcelain 格式是 `XY<space>path`，X/Y 可能是空格 ——
+      // 不能先 trim 整行，否则会连状态列一起吃掉路径首字符
+      .map((l) => l.slice(3).trim())
+      // 诊断包自己和本地数据不算代码漂移
+      .filter((f) => f && !f.startsWith('diagnostics/') && !f.startsWith('.nucleus-data'))
+    return { dirty: files.length > 0, files }
+  } catch {
+    return { dirty: false, files: [] }
+  }
+}
+
 export async function bundleCmd(argv: string[], flags: Record<string, string | true>): Promise<number> {
   const runPrefix = (flags['run'] as string) ?? argv[0]
   const { config, path: configPath, overrides } = await loadConfig(
     typeof flags['config'] === 'string' ? flags['config'] : undefined,
   )
+  const dirty = gitDirty()
 
   const n = await boot({
     config,
@@ -85,6 +128,9 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
       meta: {
         createdAt: new Date().toISOString(),
         gitSha: gitSha(),
+        gitBranch: gitBranch(),
+        gitDirty: dirty.dirty,
+        gitDirtyFiles: dirty.files,
         nodeVersion: process.versions.node,
         platform: `${process.platform} ${process.arch}`,
         configPath,
@@ -194,7 +240,19 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
 
     heading('诊断包')
     line(`${ICON.ok} ${outPath}`)
-    line(c.gray(`  ${(json.length / 1024).toFixed(1)} KB · git ${bundle.meta.gitSha ?? '?'} · ${bundle.meta.dbKind}`))
+    line(
+      c.gray(
+        `  ${(json.length / 1024).toFixed(1)} KB · git ${bundle.meta.gitSha ?? '?'}` +
+          `${bundle.meta.gitBranch ? `@${bundle.meta.gitBranch}` : ''} · ${bundle.meta.dbKind}`,
+      ),
+    )
+    if (dirty.dirty) {
+      line()
+      line(`${ICON.warn} 工作区有 ${dirty.files.length} 个未提交的改动`)
+      line(c.gray(`  ${dirty.files.slice(0, 5).join(', ')}${dirty.files.length > 5 ? ' …' : ''}`))
+      line(c.gray('  诊断包里的 git sha 对应的不是实际运行的代码。'))
+      line(c.gray('  一并附上 diff 才能让分析可信：git diff > diagnostics/local-changes.patch'))
+    }
     if (bundle.run) {
       const r = bundle.run
       line(
@@ -238,7 +296,17 @@ export async function replayCmd(argv: string[], _flags: Record<string, string | 
   heading('诊断包')
   const m = bundle.meta
   line(`${c.gray('生成于')} ${m.createdAt}`)
-  line(`${c.gray('git')}    ${m.gitSha ?? '(无)'}  ${c.gray('node')} ${m.nodeVersion}  ${c.gray('平台')} ${m.platform}`)
+  line(
+    `${c.gray('git')}    ${m.gitSha ?? '(无)'}${m.gitBranch ? `@${m.gitBranch}` : ''}` +
+      `  ${c.gray('node')} ${m.nodeVersion}  ${c.gray('平台')} ${m.platform}`,
+  )
+  if (m.gitDirty) {
+    line(
+      `${ICON.warn} ${c.yellow('工作区有未提交改动')} ${c.gray(`(${m.gitDirtyFiles?.length ?? 0} 个文件)`)}`,
+    )
+    line(c.gray(`  ${(m.gitDirtyFiles ?? []).slice(0, 8).join(', ')}`))
+    line(c.gray('  上面的 git sha 与实际运行的代码不一致，需要对方提供 diff'))
+  }
   line(`${c.gray('数据库')} ${m.dbKind}  ${c.gray('schema')} ${m.schemaHash ?? '?'}`)
   line(`${c.gray('配置')}   ${m.configPath ?? '(内置默认)'}${m.configOverrides.length ? ` 覆盖 ${m.configOverrides.join(', ')}` : ''}`)
 
