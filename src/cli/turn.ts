@@ -1,5 +1,7 @@
 import { ask, type Nucleus } from '../boot.js'
 import { recoveryOf } from '../errors.js'
+import { TeeEventSink, type RunEvent } from '../runtime/events.js'
+import { compactTokens, Pet, petStill } from './pet.js'
 import { c, duration, heading, ICON, line, money, recoveryHint, statusColor, table } from './ui.js'
 
 /**
@@ -7,6 +9,10 @@ import { c, duration, heading, ICON, line, money, recoveryHint, statusColor, tab
  *
  * 抽出来是为了避免两条命令的输出格式漂移 —— 用户在 chat 里看到的
  * 和在脚本里看到的应该是同一套。
+ *
+ * 过程渲染读的是**事件流**（DESIGN.md §9：事件流是可视化的唯一数据源），
+ * 不是另开一套回调 —— 否则终端看到的过程和诊断包里记录的过程会各说一套，
+ * 不一致时谁也不知道该信哪个。
  */
 
 export interface TurnResult {
@@ -24,6 +30,81 @@ export interface TurnResult {
   errorCode: string | null
 }
 
+const p = (e: RunEvent) => (e.payload ?? {}) as Record<string, unknown>
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+/**
+ * 把一条事件渲染成一行永久输出。返回 null 表示这条事件不值得占一行。
+ *
+ * 拆成纯函数是为了能不起 worker 就测渲染 —— 过去改这里只能靠肉眼看。
+ */
+export function renderEvent(e: RunEvent, indent: string): string | null {
+  const q = p(e)
+  const br = `${indent}  ${c.gray(ICON.branch)} `
+
+  switch (e.kind) {
+    case 'attempt.started':
+      return `${indent}${ICON.step} ${c.cyan(String(q['agent']))} ${c.gray(`#${q['attemptNo']}`)}`
+
+    case 'llm.call.finished': {
+      const tok = Number(q['tokensIn'] ?? 0) + Number(q['tokensOut'] ?? 0)
+      const cached = Number(q['cacheRead'] ?? 0)
+      return (
+        br +
+        c.gray(
+          `${q['model']} · ${compactTokens(tok)} tok` + (cached ? ` · 缓存命中 ${compactTokens(cached)}` : ''),
+        )
+      )
+    }
+
+    // 推理模型的思考只报个量 —— 内容不进历史也不进终端，需要时去事件流查
+    case 'llm.reasoning':
+      return br + c.gray(`想了 ${compactTokens(Number(q['chars'] ?? 0))} 字`)
+
+    case 'tool.outcome':
+      return (
+        br +
+        `${q['tool']} ${q['ok'] ? ICON.ok : ICON.fail} ` +
+        c.gray(duration(Number(q['ms'] ?? 0))) +
+        (q['errorCode'] ? ` ${c.red(String(q['errorCode']))}` : '')
+      )
+
+    case 'artifact.written': {
+      // 老事件没有 path，退回 ref
+      const where = String(q['path'] ?? q['ref'] ?? '')
+      const bytes = Number(q['bytes'] ?? 0)
+      return br + c.gray('产出 ') + where + (bytes ? c.gray(` ${formatBytes(bytes)}`) : '')
+    }
+
+    // 契约与规则的违反必须显式可见 —— 「prompt 规则被忽略」是我们要修的问题，
+    // 藏在事件流里等人去查等于没修
+    case 'contract.rejected': {
+      const fails = (q['failures'] as Array<{ path?: string }> | undefined) ?? []
+      const where = fails.map((f) => f.path).filter(Boolean).join(', ')
+      return (
+        br +
+        c.yellow(`结果被退回（第 ${q['retry']} 次）`) +
+        (where ? c.gray(` 缺 ${where}`) : '') +
+        c.gray(' → 已把缺项告知模型')
+      )
+    }
+
+    case 'rule.violation':
+      return br + c.yellow(`${q['tool']} 被规则拦下`) + c.gray(` ${q['rule'] ?? ''}`)
+
+    case 'wake.armed':
+      return br + c.gray(`挂起，等 ${q['waitOn']} 个专家 —— 本轮 attempt 到此结束`)
+
+    default:
+      return null
+  }
+}
+
 /**
  * 跑一轮对话并把执行过程实时打印出来。
  *
@@ -31,20 +112,61 @@ export interface TurnResult {
  */
 export async function runTurn(n: Nucleus, conversationId: string, text: string): Promise<TurnResult> {
   const t0 = Date.now()
+  const pet = new Pet().hint('Ctrl-C 取消')
 
-  const { runId } = await ask(n, conversationId, text, {
-    onAttemptStart: (i) =>
-      line(`${ICON.run} ${c.cyan(i.agentId)} ${c.gray(`attempt ${i.attemptNo} · run ${i.runId.slice(0, 8)}`)}`),
-    onAttemptEnd: (i) => {
-      const icon =
-        i.status === 'succeeded' ? ICON.ok : i.status === 'waiting_children' ? ICON.info : ICON.fail
-      const note = i.status === 'waiting_children' ? c.gray('（挂起，等待专家）') : ''
-      line(
-        `  ${icon} ${statusColor(i.status)}${note}` +
-          (i.errorCode ? ` ${c.gray(i.errorCode)} ${recoveryHint(recoveryOf(i.errorCode))}` : ''),
-      )
-    },
-  })
+  // runId → depth，用于缩进；从 attempt.started 的 payload 学到
+  const depth = new Map<string, number>()
+  const indentOf = (runId: string) => '  '.repeat(depth.get(runId) ?? 0)
+
+  const tee = n.events instanceof TeeEventSink ? n.events : null
+  const unsubscribe =
+    tee?.subscribe((e) => {
+      const q = p(e)
+      if (e.kind === 'attempt.started') depth.set(e.runId, Number(q['depth'] ?? 0))
+
+      // 猫的情绪跟着事件走，这样「在想 / 在干活 / 挂起等人」一眼能分清
+      switch (e.kind) {
+        case 'attempt.started':
+          pet.mood('think', String(q['agent']))
+          break
+        case 'llm.call.started':
+          pet.mood('think')
+          break
+        case 'tool.intent':
+          pet.mood('work', String(q['tool']))
+          break
+        case 'llm.call.finished':
+          pet.addTokens(Number(q['tokensIn'] ?? 0) + Number(q['tokensOut'] ?? 0))
+          break
+        case 'wake.armed':
+          pet.mood('wait')
+          break
+      }
+
+      const l = renderEvent(e, indentOf(e.runId))
+      // say() 会先擦掉动画行再打印 —— 直接 console.log 会和动画撞在一起
+      if (l !== null) pet.say(l)
+    }) ?? (() => {})
+
+  pet.start('think')
+  let runId: string
+  try {
+    ;({ runId } = await ask(n, conversationId, text, {
+      // 事件流没覆盖到的只有「attempt 以失败收尾」——
+      // attempt.finished 不带恢复性，这里补上「系统会不会自己重试」
+      onAttemptEnd: (i) => {
+        if (i.status === 'succeeded' || i.status === 'waiting_children') return
+        pet.mood('sad')
+        pet.say(
+          `${indentOf(i.runId)}  ${c.gray(ICON.branch)} ${statusColor(i.status)}` +
+            (i.errorCode ? ` ${c.gray(i.errorCode)} ${recoveryHint(recoveryOf(i.errorCode))}` : ''),
+        )
+      },
+    }))
+  } finally {
+    unsubscribe()
+    pet.stop()
+  }
 
   // 汇总成本：订阅制模型不产生边际成本，但仍要显示 token 用量
   const tree = await n.runs.tree(runId)
@@ -84,8 +206,13 @@ export async function runTurn(n: Nucleus, conversationId: string, text: string):
 export function printTurn(r: TurnResult, opts: { runCount?: number } = {}): void {
   line()
   if (r.reply) {
-    line(`${c.bold('助手')} ${r.reply}`)
-    if (r.artifacts.length) line(c.gray(`产出：${r.artifacts.join(', ')}`))
+    line(`${ICON.step} ${c.bold('助手')}`)
+    // 回复缩进两格，和上面的过程树对齐，长文本读起来有边界
+    for (const l of r.reply.split('\n')) line(`  ${l}`)
+    if (r.artifacts.length) {
+      line()
+      line(`  ${c.gray('产出')} ${r.artifacts.join(', ')}`)
+    }
   } else {
     line(
       `${ICON.warn} 未产生回复；run ${statusColor(r.status)} ${c.gray(r.errorCode ?? '')} ` +
@@ -100,11 +227,13 @@ export function printTurn(r: TurnResult, opts: { runCount?: number } = {}): void
   line()
   const parts = [
     `${opts.runCount ?? 1} 个 run`,
-    `${r.tokens} tokens`,
+    `${compactTokens(r.tokens)} tok`,
     money(r.costUsd, { subscription: r.allSubscription }),
     duration(r.elapsedMs),
   ]
-  line(c.gray(parts.join(' · ')))
+  // 猫报账：成功时高兴，失败时难过 —— 一行里既有结论也有情绪
+  const mood = r.reply ? 'happy' : 'sad'
+  line(`${petStill(mood)} ${c.gray(parts.join(' · '))}`)
 }
 
 /** 列出最近的 root run */

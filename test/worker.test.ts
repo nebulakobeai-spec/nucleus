@@ -155,13 +155,20 @@ describe('worker 的能力边界', () => {
     expect(visible).not.toContain('write_file')
   })
 
-  it('未知 agent 的 run 落终态而非悬挂', async () => {
+  it('未知 agent 的 run 落终态而非悬挂，且错误指向配置而不是代码', async () => {
     const run = await n.runs.createRun({ agentId: 'nonexistent' })
     await n.runs.enqueueAttempt(run.id)
     await n.worker.drain(5)
 
     const after = await n.runs.getRun(run.id)
     expect(after!.status).toBe('failed')
-    expect(after!.errorCode).toBe('runtime.internal')
+    // 曾经报 runtime.internal —— 那会把人引去查运行时代码，
+    // 而真正的原因是配置里没有这个 agent
+    expect(after!.errorCode).toBe('config.agent_not_found')
+
+    const detail = after!.errorDetail as { known?: string[]; hint?: string }
+    // 列出现有 agent，省得再去翻配置
+    expect(detail.known).toContain('orchestrator')
+    expect(detail.hint).toMatch(/整体替换/)
   })
 })

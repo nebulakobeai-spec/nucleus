@@ -43,6 +43,30 @@ export interface NucleusConfig {
     modelChain: string[]
     maxSteps: number
     maxCostUsd: number
+    /**
+     * 委派链的最大深度。编排者是 0，它派出的专家是 1。
+     *
+     * 没有这道闸门时，只要有一个 agent 能委派给自己（或形成环），
+     * 就会造出一串永远不终态的 run —— 实测 95 个 run 全停在
+     * waiting_children/pending，用户看到的就是「任务永远不动」。
+     * 长驻 worker 下更糟：它不会停，会一直派下去烧真钱。
+     */
+    maxDelegationDepth: number
+    /**
+     * 一棵 run 树的总 run 数上限。
+     *
+     * 深度之外还要防扇出爆炸：一次回复里派 50 个专家，深度只有 1，
+     * 但同样会把队列灌满、把预算烧光。
+     */
+    maxRunsPerRoot: number
+    /**
+     * 用户提问时由哪个 agent 接手。
+     *
+     * 必须显式存在于 `agents` 里 —— 否则每个任务都会在运行时才失败。
+     * 之前 `ask` 硬编码 `orchestrator` 而 `chat` 取 `agents[0]`，
+     * 同一份配置两条命令行为不同；这里统一成一个来源。
+     */
+    entryAgent: string
   }
   runtime: {
     workerId: string
@@ -177,6 +201,19 @@ class ModelRegistry extends Map<string, ModelConfig> {
   }
 }
 
+/**
+ * 当前模型链是否一个真实模型都没有。
+ *
+ * 因为代码里不内置任何真实模型，没配置就会落到 mock 上 —— 而 mock 的
+ * 回答是**假的**。把假答案当真是这里最严重的失败模式，所以 doctor 与
+ * chat/ask 的开头都要显著提示，而不是让人从模型名去推断。
+ */
+export function isMockOnly(cfg: NucleusConfig): boolean {
+  const chain = cfg.defaults.modelChain
+  if (chain.length === 0) return true
+  return chain.every((k) => k === 'mock:local' || k.startsWith('mock:'))
+}
+
 export function modelMap(cfg: NucleusConfig): Map<string, ModelConfig> {
   return new ModelRegistry(cfg.models.map((m) => [m.key, m] as const))
 }
@@ -196,62 +233,23 @@ export function envSecrets(ref: string | undefined): string | null {
 // ─────────────────────────────────────────────────────────
 
 export const defaultConfig: NucleusConfig = {
+  /**
+   * 模型列表。
+   *
+   * **刻意只有 mock 一个。** 任何真实模型都必须由使用者自己声明 ——
+   * 把某几个云端模型写进代码等于把作者的订阅和取舍强加给所有人，
+   * 而 provider、单价、计费方式、端点都随时间变。
+   *
+   * 在哪里配：项目根目录的 `nucleus.config.json`（`nucleus.config.example.json`
+   * 是可直接复制的模板）。也可以用 NUCLEUS_CONFIG 指向别处。
+   *
+   * 两个例外，都不是「默认模型」：
+   *  - `mock:local` 是测试替身，不联网、不需要凭据、输出显然是假的，
+   *    `nucleus verify` 的离线冒烟靠它。
+   *  - `ollama:<任意模型名>` 动态解析（见 ModelRegistry），因为本地模型
+   *    在本机、零成本、无凭据，猜错最多报「模型不存在」。
+   */
   models: [
-    // ── 你的订阅模型 ────────────────────────────────────
-    // 全部为订阅制（月费已付），单次调用无边际成本 ——
-    // 真正的约束是配额与限流，不是 token 单价。
-    // 上下文窗口留空表示未知：宁可不填，也不编造数字。
-    {
-      key: 'zai:glm-5.2',
-      provider: 'zai',
-      model: 'glm-5.2',
-      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
-      api: 'openai-completions',
-      // GLM 订阅提供 API key
-      apiKeyRef: 'ZAI_API_KEY',
-      billing: 'subscription',
-      subscriptionUsdPerMonth: 30,
-    },
-    {
-      // 订阅制**不发 API key**，只能走 OAuth：
-      //   nucleus auth login OPENAI_OAUTH --oauth --provider openai
-      // 凭据里存的是 access token，运行时按 Bearer 发送（与 key 同形）
-      key: 'openai:gpt-5.6-sol',
-      provider: 'openai',
-      model: 'gpt-5.6-sol',
-      baseUrl: 'https://api.openai.com/v1',
-      api: 'openai-completions',
-      apiKeyRef: 'OPENAI_OAUTH',
-      billing: 'subscription',
-      subscriptionUsdPerMonth: 20,
-    },
-    {
-      // 同 OpenAI：订阅制无 API key，走 OAuth
-      //   nucleus auth login XAI_OAUTH --oauth --provider xai
-      key: 'xai:grok-4.5',
-      provider: 'xai',
-      model: 'grok-4.5',
-      baseUrl: 'https://api.x.ai/v1',
-      api: 'openai-completions',
-      apiKeyRef: 'XAI_OAUTH',
-      billing: 'subscription',
-      subscriptionUsdPerMonth: 30,
-    },
-    {
-      // Kimi 的 coding 端点走 anthropic-messages 协议，不是 OpenAI 兼容
-      key: 'kimi:k3',
-      provider: 'kimi',
-      model: 'k3',
-      baseUrl: 'https://api.kimi.com/coding',
-      api: 'anthropic-messages',
-      // Kimi 订阅提供 API key
-      apiKeyRef: 'KIMI_API_KEY',
-      billing: 'subscription',
-      subscriptionUsdPerMonth: 39,
-      maxTokens: 32768,
-    },
-
-    // ── 本地与测试 ──────────────────────────────────────
     {
       key: 'mock:local',
       provider: 'mock',
@@ -260,54 +258,6 @@ export const defaultConfig: NucleusConfig = {
       billing: 'usage',
       costPerMTokIn: 0,
       costPerMTokOut: 0,
-    },
-    // 本地 ollama 模型。
-    //
-    // `ollama:<任意模型名>` 会被动态解析（见 modelMap），不必为每个
-    // 本地模型写一条配置 —— 本地模型换得勤，写死会一直追着改。
-    //   nucleus chat --model ollama:gemma3
-    //   nucleus ask "..." --model ollama:deepseek-r1:7b
-    {
-      key: 'ollama:llama',
-      provider: 'ollama',
-      model: 'llama3.2',
-      baseUrl: process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1',
-      billing: 'usage',
-      costPerMTokIn: 0,
-      costPerMTokOut: 0,
-    },
-    {
-      // Gemma 4 31B（dense）。原生 function calling + system role，
-      // 256K 上下文。是推理模型：ollama 把思考放在响应的 reasoning 字段，
-      // 我们只写进事件流、不进会话历史（Gemma 4 的多轮规范要求如此）。
-      //
-      // 采样参数用 ollama modelfile 里的默认值（temperature=1 / top_p=0.95
-      // / top_k=64，即 Gemma 4 的推荐配置），所以这里不覆盖 temperature。
-      key: 'ollama:gemma4',
-      provider: 'ollama',
-      model: 'gemma4:31b',
-      baseUrl: process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1',
-      billing: 'usage',
-      costPerMTokIn: 0,
-      costPerMTokOut: 0,
-      contextWindow: 256_000,
-    },
-
-    // ── 按量计费的备选（有可靠单价数据）────────────────
-    {
-      key: 'zai:glm-4.7',
-      provider: 'zai',
-      model: 'glm-4.7',
-      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
-      api: 'openai-completions',
-      apiKeyRef: 'ZAI_API_KEY',
-      billing: 'usage',
-      rpm: 60,
-      costPerMTokIn: 0.6,
-      costPerMTokOut: 2.2,
-      costPerMTokCacheRead: 0.11,
-      contextWindow: 204_800,
-      maxTokens: 131_072,
     },
   ],
   agents: [
@@ -325,7 +275,8 @@ export const defaultConfig: NucleusConfig = {
       name: '研究员',
       identity: `你是研究专家，负责调研与信息收集。
 结论必须标注来源。`,
-      toolsAllow: ['web_search', 'write_report'],
+      // 搜索能力靠 MCP 提供 —— 配了搜索服务后把工具名加进来
+      toolsAllow: ['write_report'],
       capabilities: ['research'],
       requiredFields: ['findings[].sources'],
     },
@@ -338,8 +289,18 @@ export const defaultConfig: NucleusConfig = {
     },
   ],
   defaults: {
-    // 全订阅制，切换不产生额外费用 —— fallback 链可以放宽
-    modelChain: ['zai:glm-5.2', 'kimi:k3', 'openai:gpt-5.6-sol', 'xai:grok-4.5'],
+    entryAgent: 'orchestrator',
+    // 3 层足够「编排者 → 专家 → 子专家」，再深通常是模型在兜圈子
+    maxDelegationDepth: 3,
+    maxRunsPerRoot: 32,
+    /**
+     * 降级链，按顺序尝试。
+     *
+     * 默认只有 mock —— **它不会调用任何真实模型，回答是假的**。
+     * doctor 与 chat/ask 的开头都会显著提示这件事，避免有人把假答案
+     * 当真。配置真实模型见 nucleus.config.example.json。
+     */
+    modelChain: ['mock:local'],
     maxSteps: 12,
     maxCostUsd: 1.0,
   },

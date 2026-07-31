@@ -62,3 +62,42 @@ export class MemoryEventSink implements RunEventSink {
     return this.events.filter((e) => e.kind === kind).map((e) => e.payload)
   }
 }
+
+export interface RunEvent {
+  attemptId: string
+  runId: string
+  kind: string
+  payload: unknown
+}
+
+/**
+ * 旁路监听。
+ *
+ * 事件流是「可视化的唯一数据源」（DESIGN.md §9），所以终端的实时进度
+ * 应当读这条流，而不是另开一套回调 —— 否则 CLI 看到的过程和诊断包里
+ * 记录的过程会各说一套，而两者不一致的时候没人知道该信哪个。
+ *
+ * 监听器的异常被吞掉：渲染出错绝不能影响事件落库。
+ */
+export class TeeEventSink implements RunEventSink {
+  #listeners = new Set<(e: RunEvent) => void>()
+
+  constructor(private inner: RunEventSink) {}
+
+  /** 返回退订函数 */
+  subscribe(fn: (e: RunEvent) => void): () => void {
+    this.#listeners.add(fn)
+    return () => this.#listeners.delete(fn)
+  }
+
+  async emit(attemptId: string, runId: string, kind: string, payload: unknown = {}): Promise<void> {
+    await this.inner.emit(attemptId, runId, kind, payload)
+    for (const fn of this.#listeners) {
+      try {
+        fn({ attemptId, runId, kind, payload })
+      } catch {
+        /* 渲染失败不影响运行时 */
+      }
+    }
+  }
+}

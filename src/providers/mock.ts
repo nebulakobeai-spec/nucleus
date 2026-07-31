@@ -16,6 +16,14 @@ export interface MockTurn {
   text?: string
   /** 发起工具调用 */
   tool?: { name: string; args: unknown }
+  /**
+   * 一次回复里发起**多个**工具调用。
+   *
+   * 这不是锦上添花：`delegate` 会挂起当轮 attempt，所以「同时委派给
+   * 多个专家」只可能靠模型在一次回复里返回多个 delegate。
+   * 只支持单个 tool 的话，多专家并发这条路连测都测不了。
+   */
+  tools?: Array<{ name: string; args: unknown }>
   /** 提交结果 */
   submit?: Record<string, unknown>
   usage?: { in?: number; out?: number }
@@ -62,14 +70,13 @@ export function mockProviderFetch(script: MockScript): FetchLike {
     const message: Record<string, unknown> = { role: 'assistant', content: turn.text ?? '' }
     let finish = 'stop'
 
-    if (turn.tool) {
-      message['tool_calls'] = [
-        {
-          id: `call_${agent}_${i}`,
-          type: 'function',
-          function: { name: turn.tool.name, arguments: JSON.stringify(turn.tool.args) },
-        },
-      ]
+    const calls = turn.tools ?? (turn.tool ? [turn.tool] : null)
+    if (calls) {
+      message['tool_calls'] = calls.map((t, k) => ({
+        id: `call_${agent}_${i}_${k}`,
+        type: 'function',
+        function: { name: t.name, arguments: JSON.stringify(t.args) },
+      }))
       finish = 'tool_calls'
     } else if (turn.submit) {
       message['tool_calls'] = [
@@ -96,11 +103,12 @@ export function mockProviderFetch(script: MockScript): FetchLike {
           `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: piece } }] })}\n\n`,
         )
       }
-      if (message['tool_calls']) {
-        const first = (message['tool_calls'] as Array<Record<string, unknown>>)[0]!
+      for (const [k, call] of (
+        (message['tool_calls'] as Array<Record<string, unknown>> | undefined) ?? []
+      ).entries()) {
         chunks.push(
           `data: ${JSON.stringify({
-            choices: [{ index: 0, delta: { tool_calls: [{ index: 0, ...first }] } }],
+            choices: [{ index: 0, delta: { tool_calls: [{ index: k, ...call }] } }],
           })}\n\n`,
         )
       }

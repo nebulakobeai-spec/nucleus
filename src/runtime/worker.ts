@@ -19,7 +19,7 @@ export interface WorkerOptions {
 }
 
 export interface WorkerHooks {
-  onAttemptStart?(info: { runId: string; attemptId: string; agentId: string; attemptNo: number }): void
+  onAttemptStart?(info: { runId: string; attemptId: string; agentId: string; attemptNo: number; depth: number }): void
   onAttemptEnd?(info: { runId: string; attemptId: string; status: string; errorCode?: string }): void
   onIdle?(): void
 }
@@ -109,8 +109,12 @@ export class Worker {
         attemptId: attempt.id,
         fenceToken: attempt.fenceToken!,
         status: 'failed',
-        errorCode: 'runtime.internal',
-        errorDetail: { message: `未知 agent: ${run.agentId}` },
+        errorCode: 'config.agent_not_found',
+        errorDetail: {
+          message: `配置里没有 agent「${run.agentId}」`,
+          known: [...this.agents.keys()],
+          hint: 'agents 是整体替换而非合并；在 nucleus.config.json 里列出 agents 时要把入口 agent 一起列上',
+        },
       })
       return true
     }
@@ -120,10 +124,14 @@ export class Worker {
       attemptId: attempt.id,
       agentId: run.agentId,
       attemptNo: attempt.attemptNo,
+      depth: run.depth,
     })
     await this.events.emit(attempt.id, run.id, 'attempt.started', {
       agent: run.agentId,
       attemptNo: attempt.attemptNo,
+      // depth 进 payload：让读事件流的人（终端渲染、诊断包）不必再回查
+      // runs 表就能还原树形结构
+      depth: run.depth,
     })
 
     try {

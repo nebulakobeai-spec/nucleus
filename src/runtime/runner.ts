@@ -56,6 +56,17 @@ export interface RunnerOptions {
   leaseMs?: number
 }
 
+/** 一次 attempt 内跨多次模型调用累计的用量 */
+interface UsageAcc {
+  stepsUsed: number
+  tokensIn: number
+  tokensOut: number
+  cacheRead: number
+  costUsd: number
+  /** 最后一次成功调用的模型键 */
+  modelKey: string | null
+}
+
 export interface RunOutcome {
   status: 'succeeded' | 'failed'
   /** 本轮主动挂起（如委派后等待子 run），下一次 attempt 由 wake 触发 */
@@ -68,6 +79,8 @@ export interface RunOutcome {
   tokensOut: number
   cacheRead: number
   costUsd: number
+  /** 实际产出结果的模型键，如 `zai:glm-5.2`；一次都没调成功时为 null */
+  modelKey?: string | null
 }
 
 /**
@@ -124,7 +137,9 @@ export class Runner {
     input.signal?.addEventListener('abort', () => ctl.abort(), { once: true })
 
     const heart = this.#startHeartbeat(attemptId, fenceToken, ctl)
-    const acc = { stepsUsed: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, costUsd: 0 }
+    // modelKey 记「最后一次成功调用的模型」——
+    // 一次 attempt 可能跨模型（链上降级），落库的是产出最终结果的那个
+    const acc: UsageAcc = { stepsUsed: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, costUsd: 0, modelKey: null }
 
     try {
       const outcome = await this.#loop({ ...input, signal: ctl.signal }, acc)
@@ -167,7 +182,7 @@ export class Runner {
       workdir: string
       signal: AbortSignal
     },
-    acc: { stepsUsed: number; tokensIn: number; tokensOut: number; cacheRead: number; costUsd: number },
+    acc: UsageAcc,
   ): Promise<RunOutcome> {
     const { agent, attemptId, runId, signal } = input
     const maxSteps = agent.maxSteps ?? 20
@@ -211,6 +226,7 @@ export class Runner {
       acc.tokensOut += res.usage.tokensOut
       acc.cacheRead += res.usage.cacheRead
       acc.costUsd += res.costUsd
+      acc.modelKey = res.modelKey
       await this.events.emit(attemptId, runId, 'llm.call.finished', {
         step,
         model: res.modelKey,
@@ -456,6 +472,10 @@ export class Runner {
         )
         await this.events.emit(ctx.attemptId, ctx.runId, 'artifact.written', {
           ref,
+          // path 与 bytes 单独给出：ref 前面挂着 runId，终端里显示全长是噪音，
+          // 而「产出了多大的东西」恰恰是判断专家有没有真干活的一手信息
+          path: a.path,
+          bytes: a.content.length,
           trustLevel: a.trustLevel ?? 'agent',
         })
         return ref
@@ -561,6 +581,9 @@ export class Runner {
       tokensOut: o.tokensOut,
       cacheRead: o.cacheRead,
       costUsd: o.costUsd,
+      // 落库「谁真的干了这活」：链上降级时这是唯一的事后凭据，
+      // 也是「订阅制显示订阅而不是 $0」的依据
+      ...(o.modelKey ? { modelKey: o.modelKey } : {}),
     })
   }
 }

@@ -1,6 +1,9 @@
 import { createInterface, type Interface } from 'node:readline/promises'
 import type { Nucleus } from '../boot.js'
-import { c, ICON, line } from './ui.js'
+import { isMockOnly } from '../config.js'
+import { BoxInput, type Completion } from './input.js'
+import { petStill } from './pet.js'
+import { c, ICON, line, visibleLength } from './ui.js'
 import { printRunList, printRunTree, printTurn, runTurn } from './turn.js'
 
 /**
@@ -19,13 +22,45 @@ export interface ChatSession {
   modelChain: string[] | null
 }
 
-const HELP = `${c.bold('命令')}
-  /new                 开新会话（下一轮生成新的会话 id）
-  /model <a,b,c>       换模型链，对后续轮次生效
-  /model               显示当前模型链
-  /runs [id 前缀]      查看最近的 run 或某个 run 树
-  /help                这份帮助
-  /exit                退出（Ctrl-D 同效）`
+/**
+ * 命令表。
+ *
+ * 帮助文本与输入框的联想都从这里生成 —— 两处分开写迟早会不一致，
+ * 而「帮助里有的命令实际不存在」是最让人不信任 CLI 的事。
+ */
+const COMMANDS: Array<{ name: string; arg?: string; hint: string }> = [
+  { name: '/new', hint: '开新会话（下一轮生成新的会话 id）' },
+  { name: '/model', arg: '<a,b,c>', hint: '换模型链（按顺序降级），不带参数则显示当前链' },
+  { name: '/runs', arg: '[id 前缀]', hint: '查看最近的 run 或某个 run 树' },
+  { name: '/help', hint: '这份帮助' },
+  { name: '/exit', hint: '退出（Ctrl-D 同效）' },
+]
+
+const HELP = [
+  c.bold('命令'),
+  ...COMMANDS.map((x) => {
+    const sig = x.name + (x.arg ? ' ' + x.arg : '')
+    // 按显示宽度补空格 —— padEnd 用的是 .length，中文会让这一列歪掉
+    return `  ${sig}${' '.repeat(Math.max(1, 20 - visibleLength(sig)))} ${x.hint}`
+  }),
+  '',
+  c.gray('  编辑：← → 移动 · ⌥← ⌥→ 按词 · ⌃A/⌃E 行首行尾 · ⌃U/⌃K 清除 · ⌃W 删词'),
+  c.gray('  历史：↑ ↓ 翻上次输入 · 联想开着时 ↑↓ 选候选、Tab 采用'),
+  c.gray('  多行：⌥Enter 换行不提交 · 粘贴多行不会被拆成多次提交'),
+].join('\n')
+
+/** 输入框的命令联想 */
+function completeCommand(buffer: string): Completion[] {
+  if (!buffer.startsWith('/')) return []
+  // 已经带参数了就不再弹，否则会挡住正在输入的内容
+  if (/\s/.test(buffer)) return []
+  return COMMANDS.filter((x) => x.name.startsWith(buffer)).map((x) => ({
+    // 带参数的命令补出一个空格，可以直接接着打
+    value: x.arg ? x.name + ' ' : x.name,
+    label: x.name,
+    hint: x.hint,
+  }))
+}
 
 export interface ChatOptions {
   conversationId?: string | null
@@ -35,20 +70,102 @@ export interface ChatOptions {
   output?: NodeJS.WritableStream
 }
 
+/**
+ * 交互式（TTY）循环：带框输入区。
+ *
+ * 与管道分支分开写，而不是塞进一个函数里加 if —— 两者的输入模型完全不同
+ * （raw mode 逐键 vs 行事件队列），混在一起只会让两条路都难改。
+ * 管道分支必须保留：脚本、CI 和测试都靠它。
+ */
+async function interactiveLoop(n: Nucleus, session: ChatSession): Promise<number> {
+  let inflight: AbortController | null = null
+
+  const box = new BoxInput({
+    complete: completeCommand,
+    theme: {
+      prompt: ICON.prompt,
+      border: c.gray,
+      dim: c.gray,
+      accent: c.cyan,
+    },
+    footer: '/ 看命令 · ⌥Enter 换行 · ⌃C 取消 · ⌃D 退出',
+    // 跑任务时 raw mode 下没有 SIGINT，只能从字节流里认 Ctrl-C
+    onInterrupt: () => {
+      if (!inflight) return
+      inflight.abort()
+      inflight = null
+      line()
+      line(`${ICON.warn} 已取消当前请求`)
+    },
+  })
+
+  printBanner(n, session)
+
+  try {
+    for (;;) {
+      const r = await box.read()
+      if (r.type === 'eof') {
+        line(`${petStill('idle')} ${c.gray('再见')}`)
+        break
+      }
+      if (r.type === 'cancel') {
+        // 空手 Ctrl-C 只是清掉当前输入，不退出 —— 误触不该丢掉整个会话
+        continue
+      }
+
+      const input = r.text.trim()
+      if (!input) continue
+
+      // 提交的内容留成永久一行，和框里看到的一致
+      line(`${c.cyan(ICON.prompt)} ${input}`)
+
+      if (input.startsWith('/')) {
+        if (await handleCommand(n, session, input)) break
+        line()
+        continue
+      }
+
+      inflight = new AbortController()
+      try {
+        await handleTurn(n, session, input)
+      } catch (e) {
+        // 模型报错、数据库抖动都不该让 REPL 退出
+        line()
+        line(`${ICON.fail} ${c.red((e as Error).message)}`)
+        line(c.gray('  会话仍然可用，可以继续提问'))
+      } finally {
+        inflight = null
+      }
+      line()
+    }
+  } finally {
+    box.close()
+  }
+  return 0
+}
+
 export async function chatLoop(n: Nucleus, opts: ChatOptions = {}): Promise<number> {
   const session: ChatSession = {
     conversationId: opts.conversationId ?? null,
     modelChain: opts.modelChain ?? null,
   }
 
+  const stdin = opts.input ?? process.stdin
+  const isTty = stdin === process.stdin && Boolean(process.stdin.isTTY)
+
+  // 交互式走带框输入区；管道/重定向走行队列（脚本与测试依赖后者）
+  if (isTty && !process.env['NUCLEUS_NO_BOX']) {
+    return interactiveLoop(n, session)
+  }
+
   const rl = createInterface({
-    input: opts.input ?? process.stdin,
+    input: stdin,
     output: opts.output ?? process.stdout,
-    terminal: (opts.input ?? process.stdin) === process.stdin && process.stdin.isTTY,
+    terminal: false,
   })
 
   printBanner(n, session)
-  line(c.gray('/help 查看命令 · /exit 退出'))
+  line(c.gray(`  ${ICON.prompt} 直接输入提问 · /help 看命令 · /exit 退出`))
   line()
 
   // Ctrl-C：中止当前请求而不退出 REPL。
@@ -105,7 +222,7 @@ export async function chatLoop(n: Nucleus, opts: ChatOptions = {}): Promise<numb
       prompt()
     } else {
       line()
-      line(c.gray('再见'))
+      line(`${petStill('idle')} ${c.gray('再见')}`)
       rl.close()
     }
   }
@@ -113,7 +230,7 @@ export async function chatLoop(n: Nucleus, opts: ChatOptions = {}): Promise<numb
 
   const interactive = rl.terminal
   const prompt = () => {
-    if (interactive) process.stdout.write('> ')
+    if (interactive) process.stdout.write(`${c.cyan(ICON.prompt)} `)
   }
 
   try {
@@ -159,7 +276,7 @@ export async function chatLoop(n: Nucleus, opts: ChatOptions = {}): Promise<numb
 async function handleTurn(n: Nucleus, session: ChatSession, text: string): Promise<void> {
   if (!session.conversationId) {
     const conv = await n.conversations.create({
-      agentId: n.config.agents[0]?.id ?? 'orchestrator',
+      agentId: n.config.defaults.entryAgent,
       title: text.slice(0, 40),
     })
     session.conversationId = conv.id
@@ -180,7 +297,7 @@ async function handleCommand(n: Nucleus, session: ChatSession, input: string): P
     case 'exit':
     case 'quit':
     case 'q':
-      line(c.gray('再见'))
+      line(`${petStill('idle')} ${c.gray('再见')}`)
       return true
 
     case 'help':
@@ -257,36 +374,25 @@ function applyModelChain(n: Nucleus, chain: string[]): void {
 }
 
 function printBanner(n: Nucleus, session: ChatSession): void {
-  const conv = session.conversationId ? session.conversationId : '（下一轮创建）'
-  const model = (session.modelChain ?? n.config.defaults.modelChain).join(', ')
-  const width = Math.max(conv.length, model.length) + 8
+  const conv = session.conversationId ?? '（首次提问时创建）'
+  const model = (session.modelChain ?? n.config.defaults.modelChain).join(' → ')
+  const agents = n.config.agents.map((a) => a.id).join(' · ')
 
-  const pad = (s: string) => s + ' '.repeat(Math.max(0, width - visualLength(s)))
-  line(c.gray('╭─ ') + c.bold('nucleus') + c.gray(' ' + '─'.repeat(Math.max(0, width - 8)) + '╮'))
-  line(c.gray('│ ') + pad(`会话 ${c.cyan(conv)}`) + c.gray('│'))
-  line(c.gray('│ ') + pad(`模型 ${c.cyan(model)}`) + c.gray('│'))
-  line(c.gray('╰' + '─'.repeat(width + 1) + '╯'))
-}
-
-/** 去掉 ANSI 后的显示宽度（CJK 按 2 列） */
-function visualLength(s: string): number {
-  const plain = s.replace(/\x1b\[[0-9;]*m/g, '')
-  let n = 0
-  for (const ch of plain) {
-    const cp = ch.codePointAt(0)!
-    n +=
-      cp >= 0x1100 &&
-      (cp <= 0x115f ||
-        (cp >= 0x2e80 && cp <= 0xa4cf) ||
-        (cp >= 0xac00 && cp <= 0xd7a3) ||
-        (cp >= 0xf900 && cp <= 0xfaff) ||
-        (cp >= 0xfe30 && cp <= 0xfe6f) ||
-        (cp >= 0xff00 && cp <= 0xff60) ||
-        (cp >= 0xffe0 && cp <= 0xffe6))
-        ? 2
-        : 1
+  line()
+  line(`${petStill('happy')}  ${c.bold('nucleus')} ${c.gray('多 agent 编排运行时')}`)
+  line()
+  line(`  ${c.gray('会话')}  ${c.cyan(conv)}`)
+  // 模型链用 → 连接：这是**降级顺序**而不是并列，第一个挂了才轮到第二个
+  line(`  ${c.gray('模型')}  ${c.cyan(model)}`)
+  line(`  ${c.gray('agent')} ${c.gray(agents)}`)
+  line(`  ${c.gray('入口')}  ${c.cyan(n.config.defaults.entryAgent)}`)
+  line()
+  // 假模型必须显著提示 —— 把 mock 的回答当真是最严重的失败模式
+  if (isMockOnly(n.config)) {
+    line(`  ${ICON.warn} ${c.yellow('当前是 mock 模型，回答是假的，不会调用任何真实模型')}`)
+    line(c.gray('     配置真实模型：cp nucleus.config.example.json nucleus.config.json'))
+    line()
   }
-  return n
 }
 
 /** 供测试：解析一条命令但不启动 REPL */

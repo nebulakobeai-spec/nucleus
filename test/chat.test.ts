@@ -1,12 +1,14 @@
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { boot, type Nucleus } from '../src/boot.js'
-import { defaultConfig } from '../src/config.js'
+import { defaultConfig, isMockOnly, modelMap } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import { loadEnvFile, parseEnv } from '../src/env.js'
 import { runChatCommand, type ChatSession } from '../src/cli/chat.js'
+import { parseArgv } from '../src/cli/ui.js'
+import { loadConfig, stripJsonComments } from '../src/config-file.js'
 import type { MockScript } from '../src/providers/mock.js'
 
 // ═══════════════════════════════════════════════════════
@@ -153,11 +155,15 @@ describe('chat 命令', () => {
 
   it('/model 同时更新已生效的 agent spec', async () => {
     const before = n.worker.agentSpecs.get('orchestrator')!.modelChain
-    await runChatCommand(n, session, '/model mock:local')
+    expect(before).toEqual(['mock:local'])
+
+    // 切到别的模型才能证明 spec 真的跟着变了 ——
+    // 内置链本身就是 mock，切成 mock 看不出区别
+    await runChatCommand(n, session, '/model ollama:gemma3')
     const after = n.worker.agentSpecs.get('orchestrator')!.modelChain
 
     // 只改 config 对已启动的 worker 无效，spec 也要跟着变
-    expect(after).toEqual(['mock:local'])
+    expect(after).toEqual(['ollama:gemma3'])
     expect(after).not.toEqual(before)
   })
 
@@ -301,5 +307,166 @@ describe('ollama 模型动态解析', () => {
     const session: ChatSession = { conversationId: null, modelChain: null }
     await runChatCommand(n, session, '/model openai:gpt-typo')
     expect(session.modelChain).toBeNull()
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// 参数解析
+// ═══════════════════════════════════════════════════════
+
+describe('parseArgv', () => {
+  it('开关放在位置参数前面不会把它吃掉', () => {
+    // 这是真实踩过的坑：--mock 曾把后面的问题当成自己的值，
+    // 于是 `nucleus ask --mock "问题"` 报「缺少参数」
+    const { positional, flags } = parseArgv(['--mock', '帮我调研向量数据库'])
+    expect(flags['mock']).toBe(true)
+    expect(positional).toEqual(['帮我调研向量数据库'])
+  })
+
+  it('带值的 flag 照常吃下一个参数', () => {
+    const { positional, flags } = parseArgv(['问题', '--model', 'zai:glm-5.2'])
+    expect(flags['model']).toBe('zai:glm-5.2')
+    expect(positional).toEqual(['问题'])
+  })
+
+  it('--key=value 无歧义写法', () => {
+    const { flags } = parseArgv(['--model=zai:glm-5.2', '--conv=abc'])
+    expect(flags['model']).toBe('zai:glm-5.2')
+    expect(flags['conv']).toBe('abc')
+  })
+
+  it('值本身含冒号或等号不被截断', () => {
+    expect(parseArgv(['--model=ollama:gemma4:31b']).flags['model']).toBe('ollama:gemma4:31b')
+    expect(parseArgv(['--value=a=b']).flags['value']).toBe('a=b')
+  })
+
+  it('带值的 flag 在末尾时退化为 true，不越界', () => {
+    expect(parseArgv(['--model']).flags['model']).toBe(true)
+  })
+
+  it('两个开关连着写都能识别', () => {
+    const { flags, positional } = parseArgv(['ask', '--mock', '--no-browser', 'x'])
+    expect(flags['mock']).toBe(true)
+    expect(flags['no-browser']).toBe(true)
+    expect(positional).toEqual(['ask', 'x'])
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// 配置校验：把错误挡在启动阶段
+// ═══════════════════════════════════════════════════════
+
+describe('agents 整体替换的坑', () => {
+  async function withConfig(json: unknown): Promise<ReturnType<typeof loadConfig>> {
+    const dir = await mkdtemp(join(tmpdir(), 'nuc-cfg-'))
+    const p = join(dir, 'nucleus.config.json')
+    await writeFile(p, JSON.stringify(json))
+    return loadConfig(p)
+  }
+
+  it('只加一个专家会删掉入口 agent —— 必须在启动时报错，而不是每个任务都失败', async () => {
+    // 这是真实踩过的坑：配置合法、doctor 全绿，然后所有任务都以
+    // runtime.internal 失败，错误信息完全指不到配置上
+    await expect(
+      withConfig({
+        agents: [
+          { id: 'reviewer', name: '审核员', identity: '你是审核员。', toolsAllow: ['read_file'] },
+        ],
+      }),
+    ).rejects.toThrow(/entryAgent 指向不存在的 agent/)
+  })
+
+  it('报错要说清「整体替换而非合并」—— 否则看不出该怎么改', async () => {
+    const err = await withConfig({
+      agents: [{ id: 'reviewer', name: '审核员', identity: 'x', toolsAllow: [] }],
+    }).catch((e: Error) => e)
+    expect((err as Error).message).toContain('整体替换')
+    // 还要列出现有的 agent，省得再去翻配置
+    expect((err as Error).message).toContain('reviewer')
+  })
+
+  it('把入口 agent 一起列上就正常', async () => {
+    const { config } = await withConfig({
+      agents: [
+        { id: 'orchestrator', name: '编排者', identity: '你是编排者。', toolsAllow: ['delegate'] },
+        { id: 'reviewer', name: '审核员', identity: '你是审核员。', toolsAllow: ['read_file'] },
+      ],
+    })
+    expect(config.agents.map((a) => a.id)).toEqual(['orchestrator', 'reviewer'])
+    expect(config.defaults.entryAgent).toBe('orchestrator')
+  })
+
+  it('也可以改 entryAgent 指向新 agent，不必保留 orchestrator', async () => {
+    const { config } = await withConfig({
+      agents: [{ id: 'reviewer', name: '审核员', identity: '你是审核员。', toolsAllow: [] }],
+      defaults: { entryAgent: 'reviewer' },
+    })
+    expect(config.defaults.entryAgent).toBe('reviewer')
+  })
+
+  it('有 delegate 权限但没有可委派目标时报错', async () => {
+    await expect(
+      withConfig({
+        agents: [{ id: 'solo', name: '独行', identity: 'x', toolsAllow: ['delegate'] }],
+        defaults: { entryAgent: 'solo' },
+      }),
+    ).rejects.toThrow(/没有任何可委派的目标/)
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// 没有内置的真实模型
+// ═══════════════════════════════════════════════════════
+
+describe('模型必须自己配', () => {
+  it('代码里只有 mock —— 不内置任何真实模型', () => {
+    // 把某几个云端模型写进产品等于把作者的订阅强加给所有人，
+    // 而 provider / 单价 / 计费方式 / 端点都会变
+    expect(defaultConfig.models.map((m) => m.key)).toEqual(['mock:local'])
+  })
+
+  it('没有任何需要凭据的内置模型', () => {
+    expect(defaultConfig.models.filter((m) => m.apiKeyRef)).toEqual([])
+  })
+
+  it('默认链只有 mock，且能被识别成「假模型」', () => {
+    expect(defaultConfig.defaults.modelChain).toEqual(['mock:local'])
+    expect(isMockOnly(defaultConfig)).toBe(true)
+  })
+
+  it('配了真实模型后不再判为假', () => {
+    const c = structuredClone(defaultConfig)
+    c.defaults.modelChain = ['zai:glm-5.2', 'mock:local']
+    expect(isMockOnly(c)).toBe(false)
+  })
+
+  it('空链也算「没配」—— 不能当成已就绪', () => {
+    const c = structuredClone(defaultConfig)
+    c.defaults.modelChain = []
+    expect(isMockOnly(c)).toBe(true)
+  })
+
+  it('本地 ollama 模型不需要声明，动态解析', () => {
+    const m = modelMap(defaultConfig)
+    expect(m.has('ollama:gemma4:31b')).toBe(true)
+    expect(m.get('ollama:gemma4:31b')?.model).toBe('gemma4:31b')
+    // 云端 provider 不给这个待遇 —— 拼错模型名会变成一次真实的付费调用
+    expect(m.has('zai:typo')).toBe(false)
+  })
+
+  it('模板文件是合法 JSON 且带真实模型示例', async () => {
+    const raw = await readFile(join(process.cwd(), 'nucleus.config.example.json'), 'utf8')
+    const parsed = JSON.parse(stripJsonComments(raw)) as { models: Array<{ key: string; apiKeyRef?: string }> }
+    expect(parsed.models.length).toBeGreaterThan(1)
+    // 模板里绝不能出现密钥本身，只能有 ref
+    expect(raw).not.toMatch(/sk-[A-Za-z0-9]{10,}/)
+    for (const m of parsed.models) {
+      if (m.apiKeyRef) expect(m.apiKeyRef).toMatch(/^[A-Z0-9_]+$/)
+    }
+  })
+
+  it('内置工具里没有 web_search —— 注册一个必然失败的工具等于宣告不存在的能力', () => {
+    const names = defaultConfig.agents.flatMap((a) => a.toolsAllow)
+    expect(names).not.toContain('web_search')
   })
 })

@@ -15,7 +15,7 @@ import { registerBuiltins } from './runtime/builtin-tools.js'
 import { Runner } from './runtime/runner.js'
 import { Worker } from './runtime/worker.js'
 import { Reconciler } from './runtime/reconciler.js'
-import { DbEventSink, type RunEventSink } from './runtime/events.js'
+import { DbEventSink, TeeEventSink, type RunEventSink } from './runtime/events.js'
 import { McpClient } from './mcp/client.js'
 import { registerMcpTools, type RegisterResult } from './mcp/registry.js'
 import type { McpServerConfig, McpTransport } from './mcp/protocol.js'
@@ -76,7 +76,10 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
     : await PgliteDb.open(opts.dataDir ?? undefined)
   await migrate(db)
 
-  const events = opts.events ?? new DbEventSink(db, deps.clock)
+  // 默认包一层旁路：无监听者时就是透明转发，成本为零；
+  // 有监听者时（终端实时渲染、将来的 SSE 广播）读到的就是落库的同一条流，
+  // 不会出现「终端显示的过程」和「诊断包记录的过程」各说一套。
+  const events = opts.events ?? new TeeEventSink(new DbEventSink(db, deps.clock))
   const runs = new RunStore(db, deps)
   const conversations = new ConversationStore(db, deps)
 
@@ -94,7 +97,14 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
 
   const tools = new ToolRegistry()
   const delegateTargets = config.agents.filter((a) => a.id !== 'orchestrator').map((a) => a.id)
-  registerBuiltins(tools, { store: runs, delegateTargets })
+  registerBuiltins(tools, {
+    store: runs,
+    delegateTargets,
+    delegateLimits: {
+      maxDepth: config.defaults.maxDelegationDepth,
+      maxRunsPerRoot: config.defaults.maxRunsPerRoot,
+    },
+  })
 
   // MCP：部署与运行 server 是用户的事；这里只负责连接、翻译、命名空间、调用。
   // 单个 server 起不来不影响系统启动。

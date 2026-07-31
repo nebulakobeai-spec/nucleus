@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { ask, boot, type Nucleus } from '../boot.js'
-import { defaultConfig } from '../config.js'
+import { defaultConfig, isMockOnly } from '../config.js'
 import { loadEnvFile } from '../env.js'
 import { chatLoop } from './chat.js'
 import { printRunList, printRunTree, printTurn, runTurn } from './turn.js'
@@ -44,7 +44,6 @@ const DEMO_SCRIPT: MockScript = {
     },
   ],
   researcher: [
-    { tool: { name: 'web_search', args: { query: '目标主题' } } },
     { tool: { name: 'write_report', args: { title: '主题调研', content: '## 结论\n可行。\n\n## 依据\n见来源。' } } },
     {
       submit: {
@@ -128,6 +127,29 @@ async function doctor(flags: Record<string, string | true>): Promise<number> {
     })
 
     checks.push({ name: '工具注册', ok: n.tools.size > 0, detail: `${n.tools.size} 个` })
+    const { config, tools } = n
+
+    // 模型链：没配真实模型时会静默落到 mock，回答是假的
+    checks.push({
+      name: '模型链',
+      ok: !isMockOnly(config),
+      detail: isMockOnly(config)
+        ? `只有 mock（回答是假的）—— cp nucleus.config.example.json nucleus.config.json`
+        : config.defaults.modelChain.join(' → '),
+    })
+
+    // toolsAllow 引用了不存在的工具时，模型只是「看不到」它，没有任何报错 ——
+    // 拼错工具名或 MCP 没连上都会这样，必须显式报出来
+    for (const a of config.agents) {
+      const missing = a.toolsAllow.filter((t) => !t.includes('*') && !tools.get(t))
+      if (missing.length) {
+        checks.push({
+          name: `agent ${a.id} 的工具`,
+          ok: false,
+          detail: `toolsAllow 里有未注册的工具：${missing.join(', ')}（MCP 工具名形如 server__tool）`,
+        })
+      }
+    }
     checks.push({ name: 'agent 配置', ok: n.config.agents.length > 0, detail: n.config.agents.map((a) => a.id).join(', ') })
 
     // 凭据：只报来源与有效性，绝不打印值
@@ -194,10 +216,20 @@ async function askCmd(argv: string[], flags: Record<string, string | true>): Pro
   try {
     const convId =
       (flags['conv'] as string) ??
-      (await n.conversations.create({ agentId: 'orchestrator', title: text.slice(0, 40) })).id
+      (await n.conversations.create({
+        // 与 chat 同一个来源 —— 过去这里硬编码 orchestrator、chat 取 agents[0]，
+        // 同一份配置两条命令的入口 agent 不同
+        agentId: n.config.defaults.entryAgent,
+        title: text.slice(0, 40),
+      })).id
 
-    heading(`会话 ${convId.slice(0, 8)}`)
-    line(`${c.bold('你')}  ${text}`)
+    // 与 chat 的提示符一致：一眼能认出「这是我问的那句」
+    line()
+    line(`${c.cyan(ICON.prompt)} ${text}`)
+    line(c.gray(`  会话 ${convId.slice(0, 8)}`))
+    if (isMockOnly(n.config)) {
+      line(`  ${ICON.warn} ${c.yellow('mock 模型，回答是假的')} ${c.gray('· 配置真实模型见 nucleus.config.example.json')}`)
+    }
     line()
 
     // 与 chat 共用同一套渲染，避免两条命令的输出漂移

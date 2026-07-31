@@ -33,7 +33,7 @@ npm test && npm run build
 
 ```bash
 git diff > diagnostics/local-changes.patch
-node dist/cli/index.js bundle --run <id>
+nucleus bundle --run <id>
 ```
 
 ### 2. 密钥不进任何被 git 跟踪的文件
@@ -147,7 +147,7 @@ curl -s -X POST https://api.kimi.com/coding/v1/messages \
 3. 跑几轮真实任务后看：
 
 ```bash
-node dist/cli/index.js doctor      # provider 健康：谁在熔断、何时恢复
+nucleus doctor      # provider 健康：谁在熔断、何时恢复
 ```
 
 ### C. 数据库连接细节
@@ -189,7 +189,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8888
 配好之后必看这一项：
 
 ```bash
-node dist/cli/index.js mcp tools
+nucleus mcp tools
 ```
 
 **逐个确认副作用等级**（见阶段 8）。分级错了的后果：把「发邮件」标成 `pure` → 崩溃后会自动重发。
@@ -217,7 +217,7 @@ Nucleus 要求模型用 `submit_result` 工具提交结构化结果。本地只�
 跑几轮真实任务后：
 
 ```bash
-node dist/cli/index.js events <run-id> | grep contract.rejected
+nucleus events <run-id> | grep contract.rejected
 ```
 
 - 偶尔出现 = 正常，系统会让它重写
@@ -332,15 +332,23 @@ git clone <仓库地址> nucleus
 cd nucleus
 npm ci
 npm run build
+npm link          # 把 nucleus 挂到 PATH 上
 ```
 
 **判据**：`npm run build` 无输出（tsc 成功时静默），且 `dist/cli/index.js` 存在。
 
 ```bash
-ls dist/cli/index.js && node dist/cli/index.js --help | head -3
+ls dist/cli/index.js && nucleus --help | head -3
 ```
 
 应该打印命令帮助。
+
+`npm link` 建的是一条指向本仓库 `dist/` 的全局符号链接，所以**改完代码要
+重新 `npm run build`**，`nucleus` 才会跟着变；不需要重新 link。
+
+不想装全局命令（比如共享机器、或 npm 全局目录没有写权限）就用
+`npm run cli -- <子命令>` 代替，后文所有 `nucleus xxx` 都等价于
+`npm run cli -- xxx`。撤销：`npm unlink -g nucleus`。
 
 ### 先跑一遍离线测试
 
@@ -430,7 +438,7 @@ cp nucleus.config.example.json nucleus.config.json
 ## 阶段 4：建表
 
 ```bash
-node dist/cli/index.js migrate
+nucleus migrate
 ```
 
 **判据**：输出 `[ok] migration 已应用（postgres）`。
@@ -445,16 +453,16 @@ node dist/cli/index.js migrate
 
 ```bash
 # 交互式，输入不回显
-node dist/cli/index.js auth login ZAI_API_KEY
+nucleus auth login ZAI_API_KEY
 
 # 或脚本化（适合自动部署）
-echo "$ZAI_KEY" | node dist/cli/index.js auth login ZAI_API_KEY --stdin
+echo "$ZAI_KEY" | nucleus auth login ZAI_API_KEY --stdin
 ```
 
 **判据**：
 
 ```bash
-node dist/cli/index.js auth list
+nucleus auth list
 ```
 
 对应的 ref 显示来源（`env` / `keychain` / `file`）和脱敏值（形如 `********1234`）。**明文永不显示。**
@@ -462,7 +470,7 @@ node dist/cli/index.js auth list
 ### 用真实请求验证
 
 ```bash
-node dist/cli/index.js auth test
+nucleus auth test
 ```
 
 **判据**：目标凭据显示 `[ok]`。
@@ -505,8 +513,8 @@ client_id —— 内置的只有端点模板（公开的协议事实），应用
 配好后：
 
 ```bash
-node dist/cli/index.js auth login OPENAI_OAUTH --oauth --provider openai
-node dist/cli/index.js auth login XAI_OAUTH --oauth --provider xai
+nucleus auth login OPENAI_OAUTH --oauth --provider openai
+nucleus auth login XAI_OAUTH --oauth --provider xai
 ```
 
 流程：启动本地回调服务器（`localhost:1455`，只绑 loopback）→ 打开浏览器授权
@@ -525,7 +533,7 @@ node dist/cli/index.js auth login XAI_OAUTH --oauth --provider xai
 ## 阶段 6：自检
 
 ```bash
-node dist/cli/index.js doctor
+nucleus doctor
 ```
 
 **判据**：最后一行是 `全部通过`。
@@ -554,7 +562,7 @@ node dist/cli/index.js doctor
 ### 7.1 离线冒烟（不烧 token）
 
 ```bash
-node dist/cli/index.js verify
+nucleus verify
 ```
 
 **判据**：8 项全 `[ok]`，最后 `verify 通过`。
@@ -570,10 +578,10 @@ node dist/cli/index.js verify
 ### 7.2 真模型
 
 ```bash
-node dist/cli/index.js ask "用一句话介绍你自己" --model zai:glm-5.2
+nucleus ask "用一句话介绍你自己" --model zai:glm-5.2
 
 # 或用交互式 REPL 连续测几轮
-node dist/cli/index.js chat --model zai:glm-5.2
+nucleus chat --model zai:glm-5.2
 ```
 
 **判据**：打印出助手回复，末尾显示 run 数 / token 数 / 成本。
@@ -581,7 +589,7 @@ node dist/cli/index.js chat --model zai:glm-5.2
 ### 7.3 真实编排
 
 ```bash
-node dist/cli/index.js ask "帮我调研一下 X，要有来源" --model zai:glm-5.2
+nucleus ask "帮我调研一下 X，要有来源" --model zai:glm-5.2
 ```
 
 **这一步是真正的验收。** 期望看到：
@@ -598,8 +606,8 @@ node dist/cli/index.js ask "帮我调研一下 X，要有来源" --model zai:glm
 然后看细节：
 
 ```bash
-node dist/cli/index.js runs                  # run 树
-node dist/cli/index.js events <run-id 前缀>  # 完整时间轴
+nucleus runs                  # run 树
+nucleus events <run-id 前缀>  # 完整时间轴
 ```
 
 **如果真模型这一步失败，最可能的原因是 schema 遵守率** —— 在 timeline 里找 `contract.rejected` 事件，它表示模型的 `submit_result` 输出不合格被退回了。偶尔一两次是正常的（系统会让它重写）；每次都失败则需要调整 prompt，**这需要开发方介入，请导出诊断包**。
@@ -636,8 +644,8 @@ node dist/cli/index.js events <run-id 前缀>  # 完整时间轴
 验证：
 
 ```bash
-node dist/cli/index.js mcp list      # 状态应为 ready
-node dist/cli/index.js mcp tools     # 工具清单 + 副作用等级
+nucleus mcp list      # 状态应为 ready
+nucleus mcp tools     # 工具清单 + 副作用等级
 ```
 
 ### ⚠️ 副作用等级必须确认
@@ -674,10 +682,10 @@ MCP 协议**不表达副作用等级**，但崩溃恢复完全依赖它。未声
 
 ```bash
 # 针对某个具体的 run
-node dist/cli/index.js bundle --run <run-id 前缀>
+nucleus bundle --run <run-id 前缀>
 
 # 或最近 20 条失败
-node dist/cli/index.js bundle
+nucleus bundle
 ```
 
 生成 `diagnostics/<时间>-<git sha>.json`，包含：
@@ -703,7 +711,7 @@ git diff > diagnostics/local-changes.patch
 ### 事件时间轴
 
 ```bash
-node dist/cli/index.js events <run-id>
+nucleus events <run-id>
 ```
 
 | 事件 | 含义 |
@@ -730,7 +738,7 @@ node dist/cli/index.js events <run-id>
 某个不可幂等的工具（发邮件、转账之类）调用结果未知 —— **可能已经执行了**。系统不会自动重跑，等你确认。
 
 ```bash
-node dist/cli/index.js runs <id>    # 看是哪个工具
+nucleus runs <id>    # 看是哪个工具
 ```
 
 ---
@@ -765,7 +773,7 @@ After=network.target postgresql.service
 Type=simple
 WorkingDirectory=/opt/nucleus
 EnvironmentFile=/opt/nucleus/.env
-ExecStart=/usr/bin/node dist/cli/index.js serve
+ExecStart=/usr/bin/nucleus serve
 Restart=always
 RestartSec=5
 User=nucleus
@@ -783,10 +791,10 @@ WantedBy=multi-user.target
 ```bash
 git pull
 npm ci
-npm run build
-node dist/cli/index.js migrate
-node dist/cli/index.js doctor      # 必须全绿
-node dist/cli/index.js verify      # 离线冒烟
+npm run build      # link 过的 nucleus 指向 dist/，重新 build 即生效
+nucleus migrate
+nucleus doctor      # 必须全绿
+nucleus verify      # 离线冒烟
 ```
 
 ---

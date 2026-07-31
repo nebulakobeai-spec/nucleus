@@ -117,7 +117,25 @@ export const writeReportTool: ToolDefinition = {
  * 关键：子 run **不传 conversationId** —— 它没有对外身份，
  * 结构上不可能把结果直发给用户。
  */
-export function delegateTool(store: RunStore, allowedAgents: string[]): ToolDefinition {
+export interface DelegateLimits {
+  /** 委派链最大深度；编排者为 0 */
+  maxDepth: number
+  /** 一棵 run 树的总 run 数上限 */
+  maxRunsPerRoot: number
+}
+
+/**
+ * 委派工具。
+ *
+ * 两道闸门都在 precondition 里 —— 被拒的调用**从未发生**，不留意图记录，
+ * 模型收到明确原因后可以改成自己做或直接 submit。这比让 run 失败更好：
+ * 委派不下去不代表任务做不成。
+ */
+export function delegateTool(
+  store: RunStore,
+  allowedAgents: string[],
+  limits: DelegateLimits,
+): ToolDefinition {
   return {
     name: 'delegate',
     description: `把一件事委派给专家。可选专家：${allowedAgents.join(', ')}`,
@@ -130,13 +148,40 @@ export function delegateTool(store: RunStore, allowedAgents: string[]): ToolDefi
       required: ['agent', 'task'],
     },
     sideEffect: 'idempotent',
-    precondition: (args) => {
+    precondition: async (args, ctx) => {
       const a = args as { agent?: string }
       if (!a.agent || !allowedAgents.includes(a.agent)) {
         return {
           ok: false,
           content: `未知专家 ${a.agent}。可选：${allowedAgents.join(', ')}`,
           rule: 'delegate.known-agent',
+          errorCode: 'tool.denied',
+        }
+      }
+
+      const parent = await store.getRun(ctx.runId)
+      const depth = (parent?.depth ?? 0) + 1
+      if (depth > limits.maxDepth) {
+        return {
+          ok: false,
+          content:
+            `委派深度已达上限 ${limits.maxDepth}，不能再往下派。` +
+            `请自己完成剩下的部分，或用现有信息 submit_result。`,
+          rule: 'delegate.max-depth',
+          errorCode: 'tool.denied',
+        }
+      }
+
+      // 扇出上限按整棵树算 —— 只看单轮的话，多轮累加照样会爆
+      const rootId = parent?.rootRunId ?? ctx.runId
+      const total = await store.countRunsInTree(rootId)
+      if (total >= limits.maxRunsPerRoot) {
+        return {
+          ok: false,
+          content:
+            `这棵任务树已有 ${total} 个子任务，达到上限 ${limits.maxRunsPerRoot}。` +
+            `请合并剩下的工作或直接 submit_result。`,
+          rule: 'delegate.max-fanout',
           errorCode: 'tool.denied',
         }
       }
@@ -164,33 +209,27 @@ export function delegateTool(store: RunStore, allowedAgents: string[]): ToolDefi
   }
 }
 
-/** 演示用的搜索工具：无网络时返回占位结果 */
-export const webSearchTool: ToolDefinition = {
-  name: 'web_search',
-  description: '搜索网络',
-  parameters: {
-    type: 'object',
-    properties: { query: { type: 'string' } },
-    required: ['query'],
-  },
-  sideEffect: 'pure',
-  execute: async (args) => {
-    const q = (args as { query: string }).query
-    return {
-      ok: false,
-      content: `本环境无网络访问，无法搜索「${q}」。请基于已有信息作答，并在 open_questions 中说明缺口。`,
-      errorCode: 'tool.not_found',
-    }
-  },
-}
+/**
+ * 为什么这里**没有** web_search。
+ *
+ * 曾经有一个内置的 `web_search`，它永远失败并回答「本环境无网络访问」——
+ * 那是开发沙箱的事实，不是运行 Nucleus 的机器的事实，把它写进产品是错的。
+ *
+ * 更根本的问题是：一个注册了却必然失败的工具，等于向模型宣告一个不存在的
+ * 能力。实测代价不小 —— 真实 GLM-5.2 因此连续调用了 6 次搜索
+ * （第一批 4 个并行，读懂失败后仍要「再确认」2 次），烧掉 12 步预算里的 3 步。
+ *
+ * 搜索属于 MCP 的范围（DESIGN.md：MCP 的部署与运行归用户，Nucleus 只负责连接）。
+ * 配了搜索类 MCP，工具就会以 `server__tool` 的名字出现；没配就**不出现**，
+ * 模型看不到也就不会去试。这才是 T3 能力边界该有的样子。
+ */
 
 export function registerBuiltins(
   registry: ToolRegistry,
-  opts: { store: RunStore; delegateTargets: string[] },
+  opts: { store: RunStore; delegateTargets: string[]; delegateLimits: DelegateLimits },
 ): void {
   registry.register(readFileTool)
   registry.register(writeFileTool)
   registry.register(writeReportTool)
-  registry.register(webSearchTool)
-  registry.register(delegateTool(opts.store, opts.delegateTargets))
+  registry.register(delegateTool(opts.store, opts.delegateTargets, opts.delegateLimits))
 }

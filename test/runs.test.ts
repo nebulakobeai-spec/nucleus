@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { PgliteDb } from '../src/db/pglite.js'
 import { migrate } from '../src/db/migrate.js'
 import type { Db } from '../src/db/types.js'
-import { RunStore, StaleFenceError } from '../src/store/runs.js'
+import { RunStore, splitModelKey, StaleFenceError } from '../src/store/runs.js'
 import { FakeClock, FakeIds, type Deps } from '../src/seams.js'
 
 let db: Db
@@ -337,5 +337,74 @@ describe('工具调用意图日志', () => {
     expect(unknown).toHaveLength(1)
     expect(unknown[0]!.toolName).toBe('send_email')
     expect(unknown[0]!.sideEffectClass).toBe('non_idempotent')
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// 「谁真的干了这活」—— 订阅判定与事后追责的唯一凭据
+// ═══════════════════════════════════════════════════════
+
+describe('实际服务的模型落库', () => {
+  it('modelKey 被拆成 provider + model 存下来', async () => {
+    const run = await store.createRun({ agentId: 'albert' })
+    await store.enqueueAttempt(run.id)
+    const a = await store.claimNext('w1')
+    await store.finishAttempt({
+      attemptId: a!.id,
+      fenceToken: a!.fenceToken!,
+      status: 'succeeded',
+      modelKey: 'zai:glm-5.2',
+    })
+
+    const [row] = await store.listAttempts(run.id)
+    expect(row!.provider).toBe('zai')
+    expect(row!.model).toBe('glm-5.2')
+    // 关键：拼回去必须等于配置里的 key，否则查不到单价与计费方式，
+    // 「订阅制显示订阅而不是 $0」就会静默失效
+    expect(`${row!.provider}:${row!.model}`).toBe('zai:glm-5.2')
+  })
+
+  it('本地模型名自带冒号也能原样拼回', () => {
+    expect(splitModelKey('ollama:gemma4:31b')).toEqual(['ollama', 'gemma4:31b'])
+    const [p, m] = splitModelKey('ollama:gemma4:31b')
+    expect(`${p}:${m}`).toBe('ollama:gemma4:31b')
+  })
+
+  it('没给 modelKey 就留空，绝不从别的 attempt 继承 —— 编造凭据比没有更糟', async () => {
+    const run = await store.createRun({ agentId: 'albert' })
+
+    // 第 1 次：kimi 服务，失败
+    await store.enqueueAttempt(run.id)
+    const a1 = await store.claimNext('w1')
+    await store.finishAttempt({
+      attemptId: a1!.id,
+      fenceToken: a1!.fenceToken!,
+      status: 'failed',
+      errorCode: 'provider.timeout',
+      modelKey: 'kimi:k3',
+    })
+
+    // 第 2 次：一次模型都没调成（如全链熔断），没有 modelKey 可报
+    await store.enqueueAttempt(run.id)
+    const a2 = await store.claimNext('w1')
+    await store.finishAttempt({
+      attemptId: a2!.id,
+      fenceToken: a2!.fenceToken!,
+      status: 'failed',
+      errorCode: 'provider.all_exhausted',
+    })
+
+    const rows = await store.listAttempts(run.id)
+    expect(rows[0]!.provider).toBe('kimi')
+    // 第 2 次必须是 null 而不是继承 kimi —— 它根本没调到模型
+    expect(rows[1]!.provider).toBeNull()
+    expect(rows[1]!.model).toBeNull()
+  })
+
+  it('splitModelKey 处理空值与无冒号的输入', () => {
+    expect(splitModelKey(null)).toEqual([null, null])
+    expect(splitModelKey(undefined)).toEqual([null, null])
+    expect(splitModelKey('')).toEqual([null, null])
+    expect(splitModelKey('bare')).toEqual([null, 'bare'])
   })
 })

@@ -2,7 +2,7 @@
 
 命令参考与日常操作。部署见 [`DEPLOYMENT.md`](./DEPLOYMENT.md)，设计见 [`../DESIGN.md`](../DESIGN.md)。
 
-下文用 `nucleus` 指代 `node dist/cli/index.js`。想直接用短命令：
+下文用 `nucleus` 指代 `nucleus`。想直接用短命令：
 
 ```bash
 npm link          # 之后可以直接敲 nucleus
@@ -117,21 +117,71 @@ nucleus ask "接着刚才的说" --conv 39774043-...   # 需要完整 id
 ### 读懂输出
 
 ```
-▸ orchestrator attempt 1 · run dc1996e0
-  · waiting_children（挂起，等待专家）
-▸ researcher attempt 1 · run 26a1e0d5
-  ✓ succeeded
-▸ orchestrator attempt 2 · run dc1996e0
-  ✓ succeeded
+⏺ orchestrator #1
+  ⎿ zai:glm-5.2 · 240 tok
+  ⎿ delegate ✓ 1ms
+  ⎿ 挂起，等 1 个专家 —— 本轮 attempt 到此结束
+  ⏺ researcher #1
+    ⎿ zai:glm-5.2 · 1.2k tok
+    ⎿ 想了 2.4k 字
+    ⎿ 产出 reports/主题调研.md 3.1 KB
+    ⎿ write_report ✓ 12ms
+⏺ orchestrator #2
+  ⎿ zai:glm-5.2 · 290 tok
 
-助手 调研完成：专家确认方向可行，关键依据已整理成报告。
+⏺ 助手
+  调研完成：专家确认方向可行，关键依据已整理成报告。
 
-2 个 run · 1400 tokens · $0.0021 · 2.3s
+(=^ω^=)/ 2 个 run · 1.7k tok · 订阅 · 2.3s
 ```
 
-`waiting_children` **不是错误**。编排者委派后当轮就结束了 —— 它不保持活着、不占进程、不占 context。子任务完成时会被唤醒，起第二次 attempt 来整合。
+| 符号 | 含义 |
+|---|---|
+| `⏺ agent #N` | 第 N 次 **attempt**（物理尝试）。缩进代表 run 树的层级 |
+| `⎿` | 这一层的实际动作 |
+| `⎿ <模型> · N tok` | 一次模型调用，报出**真正服务的模型** |
+| `⎿ 想了 N 字` | 推理模型的思考量。内容只进事件流，**不进对话历史** |
+| `⎿ 结果被退回（第 N 次）` | 模型输出不合契约，缺项已回喂给它重试 |
+| `⎿ 挂起，等 N 个专家` | 本轮 attempt 正常结束，不是卡住 |
 
-这也解释了为什么 attempt 编号会跳：一个逻辑 run 可以有多次物理尝试（被唤醒、重试、恢复）。
+几件事这里说清楚了：
+
+**`挂起，等 N 个专家` 不是错误。** 编排者委派后当轮就结束了 —— 它不保持
+活着、不占进程、不占 context。子任务完成时会被唤醒，起第二次 attempt 来整合。
+这也解释了为什么 attempt 编号会跳：一个逻辑 run 可以有多次物理尝试
+（被唤醒、重试、恢复）。
+
+**「订阅」不等于 `$0`。** 订阅制模型不产生边际成本，但把它显示成 `$0` 会和
+「按量计费但恰好没花钱」混为一谈。没有单价数据时显示 `N/A`，也不写成 `$0`。
+
+**`结果被退回` 是规则遵守情况的直接读数。** 0 次表示模型一次就写对了；
+反复出现说明这个模型对当前 schema 的遵守率不行，换模型或简化 schema
+比继续加 prompt 有用。想统计的话：
+
+```bash
+nucleus events <run-id> | grep contract.rejected | wc -l
+```
+
+### 状态行与那只猫
+
+跑的过程中最后一行是活的：
+
+```
+(=^･ω･^=)~~ 干活中… write_report · 12.4s · 3.2k tok · Ctrl-C 取消
+```
+
+表情跟着状态换 —— `?` 在等模型回话、`~` 在执行工具、`z` 挂起等子任务、
+`x` 出错了。这不只是好看：本地模型一次调用可能几十秒，
+**「在想」和「已经卡死」看起来必须不一样**，否则只能靠盯着秒表猜。
+
+自动关闭动画的情况：输出不是 TTY（管道、重定向、CI）。手动关：
+
+```bash
+NUCLEUS_NO_ANIM=1 nucleus chat
+NO_COLOR=1 nucleus chat          # 只去颜色，符号和结构保留
+```
+
+关掉动画不影响任何永久输出 —— 上面那棵树照样完整。
 
 ### 换模型
 
@@ -490,7 +540,6 @@ nucleus doctor      # 「配置文件」那行显示实际用的路径和覆盖�
 | `read_file` | pure | 读工作目录内的文件 |
 | `write_file` | idempotent | 写文件并登记 artifact |
 | `write_report` | idempotent | 写 Markdown 报告 |
-| `web_search` | pure | 需要 MCP 提供实现，否则返回不可用 |
 
 文件工具限制在 run 的工作目录内，**禁止绝对路径与 `..` 穿越** —— 违反时返回规则原文让模型改。
 

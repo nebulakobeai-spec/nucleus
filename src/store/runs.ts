@@ -94,6 +94,20 @@ export interface CreateRunInput {
   deadlineAt?: Date | null
 }
 
+/**
+ * `provider:model` → [provider, model]。
+ *
+ * 只切**第一个**冒号：本地模型名自带冒号（`ollama:gemma4:31b`），
+ * 切多了就拼不回原样的 key，而下游要靠 `provider + ':' + model`
+ * 反查配置里的单价与计费方式。
+ */
+export function splitModelKey(key: string | null | undefined): [string | null, string | null] {
+  if (!key) return [null, null]
+  const i = key.indexOf(':')
+  if (i < 0) return [null, key]
+  return [key.slice(0, i), key.slice(i + 1)]
+}
+
 export interface FinishAttemptInput {
   attemptId: string
   fenceToken: string
@@ -109,6 +123,14 @@ export interface FinishAttemptInput {
   cacheRead?: number
   costUsd?: number
   contextBreakdown?: unknown
+  /**
+   * 实际服务的模型键（`provider:model`）。
+   *
+   * 拆成两列存：`provider` 取第一个冒号之前，`model` 取之后 ——
+   * 本地模型名自带冒号（`ollama:gemma4:31b`），只切第一个才能原样拼回，
+   * 而拼回后要能对上配置里的 key，否则计费与订阅判定都会失准。
+   */
+  modelKey?: string | null
   /** 覆盖默认的 attempt→run 状态映射，例如 failed 但还要重试 → waiting_retry */
   runStatusOverride?: RunStatus
 }
@@ -286,6 +308,20 @@ export class RunStore {
    * 这是「不存在丢唤醒」的根据：子 run 的完成与 parent 的入队是原子的。
    * 任何一步失败则整体回滚，reconciler 之后会重新处理。
    */
+  /**
+   * 一棵 run 树当前的 run 总数。
+   *
+   * 给委派的扇出闸门用。按整棵树算而不是按单轮算 —— 只看单轮的话，
+   * 多轮累加照样能把队列灌满。
+   */
+  async countRunsInTree(rootRunId: string): Promise<number> {
+    const r = await this.db.query<{ n: number }>(
+      `select count(*)::int as n from runs where root_run_id = $1`,
+      [rootRunId],
+    )
+    return r.rows[0]?.n ?? 0
+  }
+
   async finishAttempt(input: FinishAttemptInput): Promise<FinishAttemptResult> {
     if (!isTerminalAttempt(input.status)) {
       throw new Error(`finishAttempt 只接受终态，收到 ${input.status}`)
@@ -303,6 +339,8 @@ export class RunStore {
                 cache_read = coalesce($8, cache_read),
                 cost_usd = coalesce($9, cost_usd),
                 context_breakdown = coalesce($10::jsonb, context_breakdown),
+                provider = coalesce($13, provider),
+                model = coalesce($14, model),
                 lease_expires_at = null
           where id = $11 and fence_token = $12
           returning run_id`,
@@ -319,6 +357,7 @@ export class RunStore {
           input.contextBreakdown === undefined ? null : JSON.stringify(input.contextBreakdown),
           input.attemptId,
           input.fenceToken,
+          ...splitModelKey(input.modelKey),
         ],
       )
       const runId = upd.rows[0]?.run_id

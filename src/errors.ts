@@ -45,6 +45,11 @@ export const ERRORS = new Map<string, ErrorSpec>([
 
   // ── tool ──────────────────────────────────────────────
   spec('tool.not_found', 'terminal', false, '工具不存在'),
+  // 与 not_found 区分：工具注册了、agent 也有权，只是这台机器上跑不了
+  //（无网络、缺依赖、外部服务未配置）。说成「工具不存在」会把人引向错误的方向。
+  spec('tool.unavailable', 'needs_user', false, '工具在当前环境不可用'),
+  // 配置问题，不是运行时内部错误 —— 报成 runtime.internal 会让人去查代码
+  spec('config.agent_not_found', 'needs_user', false, '配置里找不到该 agent'),
   spec('tool.denied', 'needs_user', false, '该 agent 无权使用此工具'),
   spec('tool.timeout', 'automatic', true, '工具执行超时'),
   spec('tool.crashed', 'automatic', true, '工具崩溃'),

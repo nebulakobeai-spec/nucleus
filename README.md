@@ -31,35 +31,54 @@
 ```bash
 npm ci
 npm run build
+npm link            # 把 nucleus 挂到 PATH（改代码后重新 build 即生效）
 
 # 端到端冒烟，全离线、不需要数据库、不烧 token
-node dist/cli/index.js verify
+nucleus verify
 
 # 交互式对话（内置 mock 模型，离线可跑）
-node dist/cli/index.js chat --mock
+nucleus chat --mock
 ```
+
+不想装全局命令就用 `npm run cli -- <子命令>`，与 `nucleus <子命令>` 等价。
 
 输出：
 
 ```
-会话 39774043
-───────────────────────────────
-你  帮我调研一下向量数据库选型
+❯ 帮我调研一下向量数据库选型
+  会话 a73f3fd8
 
-▸ orchestrator attempt 1 · run dc1996e0
-  · waiting_children（挂起，等待专家）
-▸ researcher attempt 1 · run 26a1e0d5
-  ✓ succeeded
-▸ orchestrator attempt 2 · run dc1996e0
-  ✓ succeeded
+⏺ orchestrator #1
+  ⎿ zai:glm-5.2 · 240 tok
+  ⎿ delegate ✓ 1ms
+  ⎿ 挂起，等 1 个专家 —— 本轮 attempt 到此结束
+  ⏺ researcher #1
+    ⎿ zai:glm-5.2 · 240 tok
+    ⎿ 产出 reports/主题调研.md 1.2 KB
+    ⎿ write_report ✓ 1ms
+    ⎿ zai:glm-5.2 · 340 tok
+⏺ orchestrator #2
+  ⎿ zai:glm-5.2 · 290 tok
 
-助手 调研完成：专家确认方向可行，关键依据已整理成报告。
+⏺ 助手
+  调研完成：专家确认方向可行，关键依据已整理成报告。
 
-2 个 run · 1400 tokens · $0 · 43ms
-详情：nucleus runs dc1996e0
+(=^ω^=)/ 2 个 run · 1.4k tok · 订阅 · 39ms
+详情：nucleus runs 02054ec7
 ```
 
-注意第一行的 `waiting_children` —— 编排者委派后**当轮就结束了**，没有空转等待。子任务完成时它会被唤醒，起第二次 attempt 来整合。
+几处值得注意：
+
+- **`挂起，等 1 个专家`** —— 编排者委派后**当轮就结束了**，没有空转等待。
+  子任务完成时它会被唤醒，起第二次 attempt 来整合（就是下面的 `#2`）。
+- **缩进代表 run 树的层级**，`⎿` 挂着的是那一层的实际动作。
+- **每次模型调用都报出真正服务的模型** —— 降级链上到底谁接了这一手，
+  事后不用猜。
+- **订阅制显示「订阅」而不是 `$0`** —— 两者含义不同，混在一起会让人误判成本。
+
+跑起来时最后一行是活的：一只猫跟着状态换表情（琢磨 / 干活 / 等专家 / 出错），
+带耗时与累计 token。**任务挂住和任务在想，一眼能分清** —— 这是原来最难受的地方。
+不想要动画就设 `NUCLEUS_NO_ANIM=1`，管道与 CI 下自动关闭。
 
 `chat` 是连续对话的 REPL —— 会话 id 自动记住，`/model` 可随时换模型链，
 `/runs` 可以不退出就查执行详情。脚本场景用 `ask`（一次性，两者走同一条管线）。
@@ -68,12 +87,12 @@ node dist/cli/index.js chat --mock
 
 ```bash
 # GLM / Kimi 的订阅发 API key
-node dist/cli/index.js auth login ZAI_API_KEY      # 输入不回显
+nucleus auth login ZAI_API_KEY      # 输入不回显
 
 # OpenAI / Grok 的订阅不发 API key，只能走 OAuth
-node dist/cli/index.js auth login OPENAI_OAUTH --oauth --provider openai
+nucleus auth login OPENAI_OAUTH --oauth --provider openai
 
-node dist/cli/index.js chat --model zai:glm-5.2
+nucleus chat --model zai:glm-5.2
 ```
 
 OAuth 需要先在配置里给出 `clientId`，见[凭据与 OAuth](#凭据与-oauth)。

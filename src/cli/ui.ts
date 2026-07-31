@@ -17,13 +17,28 @@ export const c = {
   gray: wrap('90'),
 }
 
+/**
+ * 记号。
+ *
+ * 字形不跟着颜色降级 —— 它们是普通字符而非转义序列，重定向到文件时
+ * 保留符号比退化成 `[ok]` 更易读，也让管道输出和终端输出长得一样。
+ * 颜色由 `c.*` 自己按 TTY 决定，所以这里包一层就够了。
+ */
 export const ICON = {
-  ok: useColor ? c.green('✓') : '[ok]',
-  fail: useColor ? c.red('✗') : '[fail]',
-  warn: useColor ? c.yellow('!') : '[warn]',
-  info: useColor ? c.blue('·') : '[info]',
-  run: useColor ? c.cyan('▸') : '>',
+  ok: c.green('✓'),
+  fail: c.red('✗'),
+  warn: c.yellow('!'),
+  info: c.blue('·'),
+  run: c.cyan('▸'),
+  /** 一个步骤的开始 —— 树的节点 */
+  step: '⏺',
+  /** 步骤下挂的细节 —— 树的枝 */
+  branch: '⎿',
+  /** 输入提示符 */
+  prompt: '❯',
 }
+
+export const isTty = useColor
 
 export function line(s = ''): void {
   process.stdout.write(s + '\n')
@@ -90,14 +105,32 @@ export function table(rows: string[][], headers?: string[]): void {
   for (const r of rows) line(fmt(r))
 }
 
-/** 计算去掉 ANSI 转义后的显示宽度（CJK 按 2 列） */
-function visibleLength(s: string): number {
-  const plain = s.replace(/\x1b\[[0-9;]*m/g, '')
+/**
+ * 单个字符的显示宽度。
+ *
+ * 输入框的光标定位完全依赖这个 —— 中文按 1 列算，光标就会越写越偏。
+ */
+export function charWidth(ch: string): number {
+  const cp = ch.codePointAt(0)!
+  // 组合记号不占位
+  if (cp >= 0x0300 && cp <= 0x036f) return 0
+  return cp >= 0x1100 &&
+    (cp <= 0x115f ||
+      (cp >= 0x2e80 && cp <= 0xa4cf) ||
+      (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xfe30 && cp <= 0xfe6f) ||
+      (cp >= 0xff00 && cp <= 0xff60) ||
+      (cp >= 0xffe0 && cp <= 0xffe6) ||
+      (cp >= 0x1f300 && cp <= 0x1faff))
+    ? 2
+    : 1
+}
+
+/** 去掉 ANSI 转义后的显示宽度（CJK 按 2 列） */
+export function visibleLength(s: string): number {
   let n = 0
-  for (const ch of plain) {
-    const cp = ch.codePointAt(0)!
-    n += cp >= 0x1100 && (cp <= 0x115f || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6)) ? 2 : 1
-  }
+  for (const ch of s.replace(/\x1b\[[0-9;]*m/g, '')) n += charWidth(ch)
   return n
 }
 
@@ -123,23 +156,51 @@ export function money(usd: number | null | undefined, opts: { subscription?: boo
   return `$${usd.toFixed(4)}`
 }
 
-/** 参数解析：--key value / --flag */
+/**
+ * 不带值的开关。
+ *
+ * 必须显式声明：否则 `nucleus ask --mock "问题"` 里的 `--mock` 会把
+ * 后面的问题当成自己的值吃掉，命令直接变成「缺少参数」——
+ * 而「开关放在前面」恰恰是最自然的写法。
+ */
+const BOOLEAN_FLAGS = new Set([
+  'mock',
+  'stdin',
+  'oauth',
+  'no-keychain',
+  'no-browser',
+  'help',
+])
+
+/** 参数解析：--key value / --key=value / --flag */
 export function parseArgv(argv: string[]): { positional: string[]; flags: Record<string, string | true> } {
   const positional: string[] = []
   const flags: Record<string, string | true> = {}
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!
-    if (a.startsWith('--')) {
-      const key = a.slice(2)
-      const next = argv[i + 1]
-      if (next && !next.startsWith('--')) {
-        flags[key] = next
-        i++
-      } else {
-        flags[key] = true
-      }
-    } else {
+    if (!a.startsWith('--')) {
       positional.push(a)
+      continue
+    }
+
+    // --key=value 是无歧义写法，优先
+    const eq = a.indexOf('=')
+    if (eq > 2) {
+      flags[a.slice(2, eq)] = a.slice(eq + 1)
+      continue
+    }
+
+    const key = a.slice(2)
+    if (BOOLEAN_FLAGS.has(key)) {
+      flags[key] = true
+      continue
+    }
+    const next = argv[i + 1]
+    if (next !== undefined && !next.startsWith('--')) {
+      flags[key] = next
+      i++
+    } else {
+      flags[key] = true
     }
   }
   return { positional, flags }

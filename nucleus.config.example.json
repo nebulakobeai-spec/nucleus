@@ -1,11 +1,22 @@
 {
-  // Nucleus 配置示例。复制为 nucleus.config.json 后按需修改。
+  // Nucleus 配置示例：
+  //
+  //     cp nucleus.config.example.json nucleus.config.json
   //
   // 与代码内置的 defaultConfig 合并：这里出现的顶层键整体替换默认值，
   // 数组不做深合并（列了几个就是几个）。
   //
   // ⛔ 不要在这里写密钥。用 apiKeyRef / envRefs 引用凭据名，
   //    值通过 `nucleus auth login <REF>` 或环境变量提供。
+  //
+  // ── 为什么必须配 models ────────────────────────────────
+  // 代码里**只有 mock:local 一个模型**，它是测试替身、不联网、输出显然是假的。
+  // 任何真实模型都必须在这里声明 —— 把某几个云端模型写进产品等于把作者的
+  // 订阅和取舍强加给所有人，而 provider、单价、计费方式、端点都会变。
+  //
+  // 例外：`ollama:<任意模型名>` 不必声明，会被动态解析（本机、零成本、
+  // 无凭据，猜错最多报「模型不存在」）：nucleus chat --model ollama:gemma4:31b
+  // ────────────────────────────────────────────────────────
 
   // OAuth provider。OpenAI 与 Grok 的订阅不发 API key，只能走 OAuth。
   //
@@ -18,10 +29,114 @@
   //   "xai":    { "clientId": "<你申请到的 client_id>" }
   // },
 
+  "models": [
+    // ── 订阅制：月费已付，单次调用无边际成本 ──────────────
+    // 真正的约束是配额与限流，不是 token 单价。
+    // contextWindow 不知道就留空 —— 宁可不填，不编造数字。
+    {
+      "key": "zai:glm-5.2",
+      "provider": "zai",
+      "model": "glm-5.2",
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "api": "openai-completions",
+      // GLM 订阅发 API key：nucleus auth login ZAI_API_KEY
+      "apiKeyRef": "ZAI_API_KEY",
+      "billing": "subscription",
+      "subscriptionUsdPerMonth": 30
+    },
+    {
+      // Kimi 的 coding 端点走 anthropic-messages 协议，不是 OpenAI 兼容
+      "key": "kimi:k3",
+      "provider": "kimi",
+      "model": "k3",
+      "baseUrl": "https://api.kimi.com/coding",
+      "api": "anthropic-messages",
+      "apiKeyRef": "KIMI_API_KEY",
+      "billing": "subscription",
+      "subscriptionUsdPerMonth": 39,
+      "maxTokens": 32768
+    },
+    {
+      // OpenAI 订阅**不发 API key**，只能走 OAuth：
+      //   nucleus auth login OPENAI_OAUTH --oauth --provider openai
+      // 需要先在上面 oauthProviders 里填自己的 clientId
+      "key": "openai:gpt-5.6-sol",
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-completions",
+      "apiKeyRef": "OPENAI_OAUTH",
+      "billing": "subscription",
+      "subscriptionUsdPerMonth": 20
+    },
+    {
+      // 同上：订阅制无 API key，走 OAuth
+      "key": "xai:grok-4.5",
+      "provider": "xai",
+      "model": "grok-4.5",
+      "baseUrl": "https://api.x.ai/v1",
+      "api": "openai-completions",
+      "apiKeyRef": "XAI_OAUTH",
+      "billing": "subscription",
+      "subscriptionUsdPerMonth": 30
+    },
+
+    // ── 按量计费：有可靠单价，成本会如实累加 ──────────────
+    {
+      "key": "zai:glm-4.7",
+      "provider": "zai",
+      "model": "glm-4.7",
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "api": "openai-completions",
+      "apiKeyRef": "ZAI_API_KEY",
+      "billing": "usage",
+      "rpm": 60,
+      "costPerMTokIn": 0.6,
+      "costPerMTokOut": 2.2,
+      "costPerMTokCacheRead": 0.11,
+      "contextWindow": 204800,
+      "maxTokens": 131072
+    },
+
+    // ── 本地模型：只在需要覆盖参数时才写 ──────────────────
+    {
+      // Gemma 4 31B 是推理模型：思考在响应的 reasoning 字段里，
+      // 只进事件流不进会话历史（Gemma 4 的多轮规范要求如此）。
+      // 采样参数用 ollama modelfile 的默认值，所以不覆盖 temperature。
+      "key": "ollama:gemma4",
+      "provider": "ollama",
+      "model": "gemma4:31b",
+      "baseUrl": "http://localhost:11434/v1",
+      "billing": "usage",
+      "costPerMTokIn": 0,
+      "costPerMTokOut": 0,
+      "contextWindow": 256000
+    },
+
+    // models 是整体替换 —— 想保留 mock（verify 的离线冒烟靠它）就得列上
+    {
+      "key": "mock:local",
+      "provider": "mock",
+      "model": "mock",
+      "baseUrl": "http://mock.invalid/v1",
+      "billing": "usage",
+      "costPerMTokIn": 0,
+      "costPerMTokOut": 0
+    }
+  ],
+
   "defaults": {
+    // 降级链：按顺序尝试，前面不可用（限流/熔断/额度耗尽）就换后面的
     "modelChain": ["zai:glm-5.2", "kimi:k3", "openai:gpt-5.6-sol", "xai:grok-4.5"],
+    // 用户提问时由哪个 agent 接手。必须存在于 agents 里 ——
+    // agents 是整体替换，漏了入口 agent 会在启动时报错
+    "entryAgent": "orchestrator",
     "maxSteps": 12,
-    "maxCostUsd": 1.0
+    "maxCostUsd": 1.0,
+    // 委派链最大深度（编排者为 0）。无上限时实测会造出 95 个永不终态的 run
+    "maxDelegationDepth": 3,
+    // 一棵任务树的 run 总数上限。深度之外还要防扇出爆炸
+    "maxRunsPerRoot": 32
   },
 
   "agents": [
@@ -36,7 +151,10 @@
       "id": "researcher",
       "name": "研究员",
       "identity": "你是研究专家，负责调研与信息收集。\n结论必须标注来源。",
-      "toolsAllow": ["web_search", "write_report", "searxng__*"],
+      // 搜索能力靠 MCP 提供 —— 没有内置的 web_search。
+      // 一个注册了却必然失败的工具等于向模型宣告不存在的能力：
+      // 实测真实 GLM 因此连调 6 次搜索，烧掉 12 步预算里的 3 步。
+      "toolsAllow": ["write_report", "searxng__*"],
       "capabilities": ["research"],
       // 启用这条会让 findings[].sources 变成必填
       "requiredFields": ["findings[].sources"]

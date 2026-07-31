@@ -122,6 +122,27 @@ function validate(cfg: NucleusConfig, path: string): void {
     }
   }
 
+  // 入口 agent 必须存在。这条校验的由来是一个真实的坑：
+  // `agents` 是**整体替换**语义，所以在配置里只写一个新专家会把内置的
+  // orchestrator 一起删掉 —— 而配置本身完全合法、doctor 全绿，
+  // 直到每个任务都以 runtime.internal 失败。错误必须在启动时就报出来。
+  if (!agentIds.has(cfg.defaults.entryAgent)) {
+    errors.push(
+      `defaults.entryAgent 指向不存在的 agent「${cfg.defaults.entryAgent}」` +
+        `（现有：${[...agentIds].join(', ') || '无'}）。` +
+        `注意 agents 是整体替换而非合并 —— 在配置里列出 agents 就必须把入口 agent 一起列上`,
+    )
+  }
+
+  // delegate 的目标必须存在，否则编排者会在运行时才发现委派不出去
+  for (const a of cfg.agents) {
+    if (!a.toolsAllow.includes('delegate')) continue
+    const targets = cfg.agents.filter((x) => x.id !== a.id)
+    if (targets.length === 0) {
+      errors.push(`agent ${a.id} 有 delegate 权限，但没有任何可委派的目标 agent`)
+    }
+  }
+
   const mcpIds = new Set<string>()
   for (const s of cfg.mcp ?? []) {
     if (mcpIds.has(s.id)) errors.push(`MCP server id 重复：${s.id}`)
