@@ -180,10 +180,14 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
         [rootId],
       )
       const invocations = await n.db.query(
+        // 按 (attempt, seq) 排序而不是 intent_at —— 同一毫秒内的多次调用
+        // 用时间戳排序不稳定，而诊断包的价值全在于重建正确的执行顺序。
+        // seq 有 unique(run_attempt_id, seq) 约束，是可靠的序。
         `select i.* from tool_invocations i
            join run_attempts a on a.id = i.run_attempt_id
            join runs r on r.id = a.run_id
-          where r.root_run_id = $1 order by i.intent_at`,
+          where r.root_run_id = $1
+          order by a.created_at, a.attempt_no, i.seq`,
         [rootId],
       )
       const wakes = await n.db.query(

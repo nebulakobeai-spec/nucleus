@@ -1,0 +1,38 @@
+{
+  "note": "gemma4:31b 真实响应，curl 采集",
+  "model": "gemma4:31b",
+  "response": {
+    "id": "chatcmpl-99",
+    "object": "chat.completion",
+    "created": 1785524463,
+    "model": "gemma4:31b",
+    "system_fingerprint": "fp_ollama",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning": "The user wants a research on vector database selection.\nThe `researcher` has already provided a result, which is summarized as: \"Vector database selection should be based on data scale, operational capabilities, and retrieval requirements. Native libraries (Milvus, Qdrant) are suitable for large-scale production; pgvector is suitable for scenarios with existing PG and small data volumes.\"\nThe researcher also produced an artifact: `runs/abc/reports/向量数据库选型.md`.\n\nSince I am the orchestrator, my job is to integrate the results and submit them to the user. The research part is done. No further agents are needed.\n\nPlan:\n1. Review the expert's summary.\n2. Reference the artifact provided by the researcher.\n3. Submit the result using `submit_result`.",
+          "tool_calls": [
+            {
+              "id": "call_enj6m9hx",
+              "index": 0,
+              "type": "function",
+              "function": {
+                "name": "submit_result",
+                "arguments": "{\"artifacts\":[\"runs/abc/reports/向量数据库选型.md\"],\"confidence\":1,\"status\":\"ok\",\"summary\":\"已完成向量数据库选型调研。结论是：选型应重点考量数据规模、运维能力和检索需求。对于大规模生产环境，推荐使用 Milvus 或 Qdrant 等原生向量数据库；而对于已有 PostgreSQL 且数据规模较小的场景，pgvector 是更轻量化的选择。详细对比分析请参考附件报告。\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 500,
+      "completion_tokens": 287,
+      "total_tokens": 787
+    }
+  }
+}

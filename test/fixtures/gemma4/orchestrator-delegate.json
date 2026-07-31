@@ -1,0 +1,38 @@
+{
+  "note": "gemma4:31b 真实响应，curl 采集",
+  "model": "gemma4:31b",
+  "response": {
+    "id": "chatcmpl-270",
+    "object": "chat.completion",
+    "created": 1785524448,
+    "model": "gemma4:31b",
+    "system_fingerprint": "fp_ollama",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning": "The user wants a research report/comparison for vector database selection.\n\nAs the orchestrator, I need to:\n1.  Break down the requirement into a structured research task.\n2.  Delegate this to the `researcher` expert to gather information on popular vector databases (e.g., Milvus, Pinecone, Weaviate, Qdrant, Chroma, FAISS).\n3.  The researcher should compare them based on key criteria: performance, scalability, ease of use, cost, community/ecosystem, and specific use cases.\n4.  Once the research is complete, I will synthesize it into a final recommendation or comparison matrix.\n\nPlan:\n1. Delegate to `researcher` to conduct a comprehensive survey of current top vector databases.",
+          "tool_calls": [
+            {
+              "id": "call_dfj80mf2",
+              "index": 0,
+              "type": "function",
+              "function": {
+                "name": "delegate",
+                "arguments": "{\"agent\":\"researcher\",\"task\":\"请针对向量数据库（Vector Database）进行深度的选型调研。研究内容需涵盖以下方面：\\n\\n1. 主流产品清单：包括但不限于 Milvus, Pinecone, Weaviate, Qdrant, Chroma, FAISS, 以及集成向量功能的传统数据库（如 pgvector/PostgreSQL）。\\n2. 核心维度对比分析：针对上述产品，从以下维度进行详细对比：\\n    - 架构设计：(分布式 vs 单机，托管服务 vs 自建)\\n    - 性能指标：(索引速度、检索延迟、并发能力等)\\n    - 功能特性：(支持的索引算法如 HNSW/IVF, 是否支持混合搜索 Hybrid Search, 元数据过滤能力)\\n    - 易用性与生态：(API 支持, 文档完善程度, 社区活跃度)\\n    - 成本模型：(开源免费 vs 按量付费)\\n3. 适用场景推荐：针对不同的业务规模（如原型开发、中型应用、超大规模数据集）和技术栈，给出具体的选型建议。\\n4. 总结性对比表格：提供一个清晰的矩阵表，方便快速对比核心指标。\\n\\n请以结构化报告的形式输出。\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 430,
+      "completion_tokens": 441,
+      "total_tokens": 871
+    }
+  }
+}
