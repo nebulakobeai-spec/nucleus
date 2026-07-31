@@ -132,6 +132,39 @@ describe('clientId', () => {
 })
 
 // ═══════════════════════════════════════════════════════
+// 配置文件加载 —— 回归：auth 命令曾用 defaultConfig 而非 loadConfig，
+// 导致 nucleus.config.json 里的 oauthProviders 完全读不到
+// ═══════════════════════════════════════════════════════
+
+describe('从配置文件构建注册表', () => {
+  it('oauthProviders 声明能被识别', () => {
+    const reg = new OAuthRegistry({ openai: { clientId: 'from-config-file' } })
+    const entry = reg.get('openai')
+
+    expect(entry).toBeDefined()
+    expect(entry!.kind).toBe('auth_code')
+    expect(entry!.config.clientId).toBe('from-config-file')
+    // 端点由内置模板补齐，不需要在配置里重复写
+    expect((entry!.config as AuthCodeProviderConfig).authorizeUrl).toContain('auth.openai.com')
+  })
+
+  it('空配置时注册表为空 —— 不会凭空冒出 provider', () => {
+    expect(new OAuthRegistry({}).ids()).toEqual([])
+    expect(new OAuthRegistry().ids()).toEqual([])
+  })
+
+  it('多个 provider 各自独立', () => {
+    const reg = new OAuthRegistry({
+      openai: { clientId: 'id-a' },
+      xai: { clientId: 'id-b' },
+    })
+    expect(reg.ids()).toEqual(['openai', 'xai'])
+    expect(reg.get('openai')!.config.clientId).toBe('id-a')
+    expect(reg.get('xai')!.config.clientId).toBe('id-b')
+  })
+})
+
+// ═══════════════════════════════════════════════════════
 // Authorize URL
 // ═══════════════════════════════════════════════════════
 
