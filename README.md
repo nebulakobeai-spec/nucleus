@@ -239,7 +239,8 @@ npm run build
 诊断包记录 git sha，工作区不干净时 sha 与实际运行的代码对不上，
 基于它的分析会指向错误的地方。`bundle` 会检测并在包里标注这一点。
 
-本地用 **PGlite**（进程内 WASM Postgres），所以 `npm test` 不需要装任何东西。SQL 按 **PG 14 基线**写。
+自动化测试用 **PGlite**（进程内 WASM Postgres），所以 `npm test` 不需要装任何东西。
+SQL 按 **PG 14 基线**写，已在真实的 PostgreSQL 14.17 上验证通过。
 
 **测试分层**：
 
@@ -272,7 +273,6 @@ tier 2 的 fixture 由真实模型产生，不是手写的 —— 手写 stub �
 **未完成**：HTTP API + SSE（所以前端还接不上）· 计划式编排（目前是 ad-hoc 委派）· 长期记忆 · 定时任务 · LLM 压缩
 
 **已知风险**：
-- 真 Postgres 连接路径**尚未在真实环境验证**（开发机连不上数据库，所有测试跑在 PGlite 上）
 - 前沿模型对输出 schema 的实际遵守率未知（本地只有小模型的真实响应）
 - 四个订阅模型的 `baseUrl` / `contextWindow` / `maxTokens` **需要部署方自行确认**（它们比开发方的知识截止更新）—— 见 [部署指南 阶段 0.5](./docs/DEPLOYMENT.md#-阶段-05你需要自己搞清楚的事)
 

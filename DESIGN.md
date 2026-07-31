@@ -562,17 +562,46 @@ Niche 需删除：`pg` / `drizzle-orm` / `drizzle-kit` / `@types/pg` / `drizzle.
 
 **tier 0–2 全部离线、零成本、确定性**，不需要 Postgres、不需要网络、不需要 API key。
 
-### 开发机的两个硬限制（重要，部署机不适用）
+### AI agent 沙箱的限制（**不是机器限制**，人类终端不受影响）
 
-1. **Docker daemon 被禁**（`Forbidden`），**本机 Postgres 的 socket 与 TCP 被拦**（`Operation not permitted`，关掉沙箱也一样）。
-   → 本地数据库一律用 **PGlite**（进程内 WASM Postgres，实测 PG 18.3）。
-   → 已验证可用：`pg_trgm` / `uuid-ossp` / tsvector 全文检索 / `LISTEN·NOTIFY` / 事务 / jsonb / array / generated column。
-   → **`pgvector` 不可用**（不在 contrib 中，Apple registry 也无独立包）。因此 v1 的 migration 里不得出现 `vector` 类型；L3 语义记忆推后到 v2 时作为 optional migration 单独引入，`doctor` 负责检查目标库是否具备。
+开发过程中大量代码由 Claude Code agent 编写，它运行在 `CLAUDE_SANDBOX_LEVEL=strict`
+沙箱内。以下限制**只作用于该 agent 的进程树**：
 
-2. **Node 进程被禁止一切出网，包括 localhost**（`connect EPERM 127.0.0.1:11434`）。curl 不受此限。
-   → tier 3 在开发机上跑不了。真实响应用 **curl 采集 → 装配成 cassette fixture**（见 `test/live/build-fixtures.ts`），tier 2 因此仍然基于真实响应而非手写 stub。
-   → 在能出网的机器上直接用 `npm run test:record` 代替这一步。
-   → 同理，`tsx` 直接跑脚本会因 IPC pipe `EPERM` 失败；临时诊断脚本走 vitest。
+| | agent 沙箱内 | 同一台机器的普通终端 |
+|---|---|---|
+| Node 出网（含 localhost） | ❌ `EPERM` | ✅ 已实测通过 |
+| Node 监听端口 | ❌ `EPERM` | ✅ 已实测通过 |
+| Postgres socket / TCP | ❌ `EPERM` | ✅ 已实测通过（PG 14.17） |
+| Docker daemon | ❌ `Forbidden` | 未测 |
+| curl | ✅ | ✅ |
+
+**曾经把这些误记为「开发机的硬限制」，是错的。** 它们只影响 agent 能自动验证什么，
+不影响这份代码在真实环境的行为。
+
+由此带来的实际影响：
+
+1. **agent 无法跑 tier 3**（真模型）。真实响应改由 curl 采集后装配成 cassette
+   fixture（见 `test/live/build-fixtures.ts`），所以 tier 2 仍然基于真实响应而非手写 stub。
+   在人类终端或部署机上直接用 `npm run test:record`。
+
+2. **agent 无法跑需要监听端口的测试**（OAuth 回调服务器，7 个）。
+   测试里用 `canListen` 探测并自动 `describe.skipIf`，在能监听的环境会正常执行。
+
+3. **agent 无法连真 Postgres**，所有自动化测试跑在 **PGlite**（进程内 WASM，PG 18.3）上。
+   已验证可用：`pg_trgm` / `uuid-ossp` / tsvector 全文检索 / `LISTEN·NOTIFY` /
+   事务 / jsonb / array / generated column。
+   **`pgvector` 不可用** —— 因此 v1 的 migration 里不得出现 `vector` 类型；
+   L3 语义记忆推后到 v2 时作为 optional migration 单独引入。
+
+4. `tsx` 直接跑脚本会因 IPC pipe `EPERM` 失败；agent 的临时诊断脚本走 vitest。
+
+### 真 Postgres 验证状态
+
+**已在 PostgreSQL 14.17 上验证通过**（2026-07-31，人类终端）：
+`migrate` 建成 17 张表、`doctor` 全绿、trigger 与外键生效。
+
+14.x 正好是声明的最低支持版本，比部署机可能用的 16/17 更严格 ——
+SQL 里若混进新版特性会在这里暴露。
 
 ### SQL 兼容性
 
