@@ -1,0 +1,87 @@
+{
+  // Nucleus 配置示例。复制为 nucleus.config.json 后按需修改。
+  //
+  // 与代码内置的 defaultConfig 合并：这里出现的顶层键整体替换默认值，
+  // 数组不做深合并（列了几个就是几个）。
+  //
+  // ⛔ 不要在这里写密钥。用 apiKeyRef / envRefs 引用凭据名，
+  //    值通过 `nucleus auth login <REF>` 或环境变量提供。
+
+  "defaults": {
+    "modelChain": ["zai:glm-4.7", "openai:gpt-5"],
+    "maxSteps": 12,
+    "maxCostUsd": 1.0
+  },
+
+  "agents": [
+    {
+      "id": "orchestrator",
+      "name": "编排者",
+      "identity": "你是编排者，用户的唯一入口。\n理解需求 → 拆解 → 委派给专家 → 整合结果。\n你自己不执行具体工作，一律委派。",
+      // 能力边界：只有 delegate，物理上无法自己动手
+      "toolsAllow": ["delegate"]
+    },
+    {
+      "id": "researcher",
+      "name": "研究员",
+      "identity": "你是研究专家，负责调研与信息收集。\n结论必须标注来源。",
+      "toolsAllow": ["web_search", "write_report", "searxng__*"],
+      "capabilities": ["research"],
+      // 启用这条会让 findings[].sources 变成必填
+      "requiredFields": ["findings[].sources"]
+    },
+    {
+      "id": "operator",
+      "name": "执行者",
+      "identity": "你是执行专家，负责文件操作与数据查询。\n限制输出规模，只返回关键信息。",
+      "toolsAllow": ["read_file", "write_file", "postgres__*"]
+    }
+  ],
+
+  // MCP server。部署与运行归你；Nucleus 只负责连接、翻译、命名空间、调用。
+  // 工具会以 `<serverId>__<toolName>` 的形式暴露给 agent。
+  "mcp": [
+    // {
+    //   "id": "searxng",
+    //   "transport": "stdio",
+    //   "command": "npx",
+    //   "args": ["-y", "mcp-searxng"],
+    //   "env": { "SEARXNG_URL": "http://localhost:8888" }
+    // },
+    // {
+    //   "id": "finnhub",
+    //   "transport": "stdio",
+    //   "command": "npx",
+    //   "args": ["-y", "finnhub-mcp"],
+    //   // 密钥走 ref：nucleus auth login FINNHUB_API_KEY
+    //   "envRefs": { "FINNHUB_API_KEY": "FINNHUB_API_KEY" }
+    // },
+    // {
+    //   "id": "web-search-prime",
+    //   "transport": "http",
+    //   "url": "https://api.z.ai/api/mcp/web_search_prime/mcp"
+    // }
+  ],
+
+  // MCP 协议不表达副作用等级，但崩溃恢复完全依赖它。
+  // 未匹配的一律按 non_idempotent 处理（不自动重跑，转人工确认）。
+  "mcpPolicies": {
+    "policies": [
+      { "pattern": "searxng__*", "sideEffect": "pure" },
+      { "pattern": "web-search-prime__*", "sideEffect": "pure" },
+      { "pattern": "finnhub__*", "sideEffect": "pure" },
+      { "pattern": "postgres__list_*", "sideEffect": "pure" },
+      { "pattern": "postgres__describe_*", "sideEffect": "pure" },
+      { "pattern": "memory__*", "sideEffect": "idempotent" }
+    ],
+    "fallback": "non_idempotent",
+    "maxOutputChars": 8000
+  },
+
+  "runtime": {
+    "workerId": "prod-1",
+    "leaseMs": 60000,
+    "heartbeatMs": 15000,
+    "workdirRoot": "/var/lib/nucleus/work"
+  }
+}

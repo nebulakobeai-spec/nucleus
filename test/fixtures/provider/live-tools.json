@@ -1,0 +1,46 @@
+[
+  {
+    "key": "b1d811f532e70dbf",
+    "request": {
+      "url": "http://localhost:11434/v1/chat/completions",
+      "body": {
+        "model": "llama3.2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is the weather in Tokyo? Use the tool."
+          }
+        ],
+        "temperature": 0,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Get the current weather for a city",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string",
+                    "description": "City name"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"id\":\"chatcmpl-382\",\"object\":\"chat.completion\",\"created\":1785465294,\"model\":\"llama3.2\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call_1tgpoe4x\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":166,\"completion_tokens\":18,\"total_tokens\":184}}\n"
+    }
+  }
+]

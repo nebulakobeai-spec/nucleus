@@ -1,0 +1,30 @@
+[
+  {
+    "key": "27c656dd1e991b90",
+    "request": {
+      "url": "http://localhost:11434/v1/chat/completions",
+      "body": {
+        "model": "llama3.2",
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with exactly one word."
+          },
+          {
+            "role": "user",
+            "content": "What is the capital of Japan?"
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 16
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"id\":\"chatcmpl-681\",\"object\":\"chat.completion\",\"created\":1785465318,\"model\":\"llama3.2\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Tokyo.\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":38,\"completion_tokens\":4,\"total_tokens\":42}}\n"
+    }
+  }
+]

@@ -1,0 +1,67 @@
+[
+  {
+    "key": "26583a59cc629647",
+    "request": {
+      "url": "http://localhost:11434/v1/chat/completions",
+      "body": {
+        "model": "llama3.2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is the weather in Tokyo? Use the tool."
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_1tgpoe4x",
+                "type": "function",
+                "function": {
+                  "name": "get_weather",
+                  "arguments": "{\"city\":\"Tokyo\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{\"tempC\":18,\"sky\":\"clear\"}",
+            "tool_call_id": "call_1tgpoe4x",
+            "name": "get_weather"
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 64,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Get the current weather for a city",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string",
+                    "description": "City name"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"id\":\"chatcmpl-832\",\"object\":\"chat.completion\",\"created\":1785465319,\"model\":\"llama3.2\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"The current temperature in Tokyo is 18 degrees Celsius, and it's clear skies.\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":105,\"completion_tokens\":18,\"total_tokens\":123}}\n"
+    }
+  }
+]
