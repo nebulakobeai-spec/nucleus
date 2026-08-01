@@ -9,6 +9,7 @@ import type { MockScript } from '../providers/mock.js'
 import { authList, authLogin, authLogout, authRefresh, authTest, credentialStatus } from './auth.js'
 import { mcpCall, mcpEnable, mcpList, mcpTools } from './mcp.js'
 import { agentList, agentMap, agentShow } from './agent.js'
+import { artifactCat, artifactList } from './artifact.js'
 import { rulesCmd } from './rules.js'
 import { bundleCmd, replayCmd } from './bundle.js'
 import { loadConfig } from '../config-file.js'
@@ -70,6 +71,28 @@ async function open(flags: Record<string, string | true>): Promise<Nucleus> {
   if (flags['model']) {
     const chain = String(flags['model']).split(',')
     config.defaults = { ...config.defaults, modelChain: chain }
+  }
+  if (useMock) {
+    // --mock 必须同时改模型链，不能只换 HTTP 拦截。
+    // 否则配置里写的是 ollama:gemma4:31b，屏幕上也显示它服务了这一轮，
+    // 而实际答话的是 mock —— 且「回答是假的」的警告不会触发，
+    // 因为那个判断看的是模型链。显示与事实不符比没有显示更糟。
+    const MOCK = 'mock:local'
+    config.defaults = { ...config.defaults, modelChain: [MOCK] }
+    if (!config.models.some((m) => m.key === MOCK)) {
+      config.models = [
+        ...config.models,
+        {
+          key: MOCK,
+          provider: 'mock',
+          model: 'mock',
+          baseUrl: 'http://mock.invalid/v1',
+          billing: 'usage',
+          costPerMTokIn: 0,
+          costPerMTokOut: 0,
+        },
+      ]
+    }
   }
 
   return boot({
@@ -406,6 +429,8 @@ ${c.bold('agent 与规则')}
   agent show <id>             看模型实际收到的 system prompt 与结果契约
   agent map                   能力边界矩阵：谁能用哪些工具
   rules                       规则遵守率：谁不听哪条规则
+  artifact list [run]         产出清单
+  artifact cat <路径>         读产出内容
 
 ${c.bold('凭据')}
   auth login <REF>            录入 API key（静默输入，不回显）
@@ -519,6 +544,23 @@ export async function main(argv: string[]): Promise<number> {
         default:
           // 省一步：nucleus agent researcher 等价于 agent show researcher
           return agentShow(rest, flags)
+      }
+    }
+    case 'artifact':
+    case 'artifacts': {
+      const sub = rest[0]
+      const args = rest.slice(1)
+      switch (sub) {
+        case 'cat':
+        case 'show':
+          return artifactCat(args, flags)
+        case 'list':
+        case 'ls':
+        case undefined:
+          return artifactList(args, flags)
+        default:
+          // nucleus artifact <路径片段> 等价于 cat
+          return artifactCat(rest, flags)
       }
     }
     case 'rules':

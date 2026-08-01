@@ -32,6 +32,40 @@ export interface WorkerHooks {
  *
  * 内嵌 reconciler：单进程部署时不需要另起守护进程。
  */
+/**
+ * 把结果渲染成给用户看的一段话。
+ *
+ * 三条都要出现在**会话消息本身**里，而不是只在数据库或只在终端里：
+ *  - `status` 不是 ok —— 否则「部分完成」看起来和「完成」一样
+ *  - `open_questions` —— 用户判断能不能采信的依据，静默丢掉最糟
+ *  - `confidence` 偏低时说出来
+ *
+ * 放进 content 而不是只放 meta，是因为会话历史会回灌给下一轮：
+ * 上一轮留下的未决项，下一轮的上下文里就该看得见。
+ */
+export function announceText(result: {
+  status?: string
+  summary: string
+  confidence?: number | undefined
+  open_questions?: string[]
+}): string {
+  const parts: string[] = []
+  if (result.status && result.status !== 'ok') {
+    parts.push(result.status === 'partial' ? '（部分完成）' : '（未完成）')
+  }
+  parts.push(result.summary)
+
+  let text = parts.join(' ')
+  if (result.confidence !== undefined && result.confidence < 0.6) {
+    text += `\n\n把握不大（${Math.round(result.confidence * 100)}%）。`
+  }
+  const open = (result.open_questions ?? []).filter((q) => q.trim())
+  if (open.length) {
+    text += `\n\n未解决：\n${open.map((q) => `- ${q}`).join('\n')}`
+  }
+  return text
+}
+
 export class Worker {
   #store: RunStore
   #conversations: ConversationStore
@@ -160,9 +194,15 @@ export class Worker {
         await this.#conversations.append({
           conversationId: run.conversationId,
           role: 'assistant',
-          content: out.result.summary,
+          // 只发 summary 会把结果最要紧的部分吞掉：status='partial' 时看起来
+          // 像做完了，open_questions 里「没查到 2026 年的实测数据」这种话
+          // 直接消失 —— 而那恰恰是用户判断能不能采信的依据。
+          content: announceText(out.result),
           runId: run.id,
           artifacts: out.result.artifacts,
+          // 结构化原文进 meta：终端与将来的前端可以自己渲染，
+          // 不必去反解上面那段人类可读文本
+          meta: { result: out.result },
         })
       }
 

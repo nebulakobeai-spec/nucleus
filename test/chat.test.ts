@@ -489,3 +489,37 @@ describe('strFlag', () => {
     expect(strFlag(parseArgv([]).flags, 'conv')).toBeUndefined()
   })
 })
+
+describe('--mock 的诚实性', () => {
+  it('--mock 会把模型链也换成 mock —— 显示与事实必须一致', async () => {
+    // 曾经只换 HTTP 拦截：配置里写 ollama:gemma4:31b，屏幕上也显示它服务了
+    // 这一轮，而实际答话的是 mock，且「回答是假的」的警告不触发
+    // （那个判断看的是模型链）。显示与事实不符比没有显示更糟。
+    const dir = await mkdtemp(join(tmpdir(), 'nuc-mock-'))
+    const p = join(dir, 'nucleus.config.json')
+    await writeFile(
+      p,
+      JSON.stringify({
+        models: [
+          {
+            key: 'ollama:gemma4:31b',
+            provider: 'ollama',
+            model: 'gemma4:31b',
+            baseUrl: 'http://localhost:11434/v1',
+            contextWindow: 262144,
+          },
+        ],
+        defaults: { modelChain: ['ollama:gemma4:31b'] },
+      }),
+    )
+    const { config } = await loadConfig(p)
+    expect(isMockOnly(config)).toBe(false)
+
+    // 模拟 open() 里 --mock 的处理
+    const withMock = {
+      ...config,
+      defaults: { ...config.defaults, modelChain: ['mock:local'] },
+    }
+    expect(isMockOnly(withMock)).toBe(true)
+  })
+})

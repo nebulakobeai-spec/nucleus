@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { NucleusError } from '../errors.js'
 import type { Deps } from '../seams.js'
 import type { Db } from '../db/types.js'
@@ -521,16 +522,23 @@ export class Runner {
       signal: ctx.signal,
       writeArtifact: async (a) => {
         const ref = `${ctx.runId}/${a.path}`
+        // content 必须真的存下来。它一度只被用来算 bytes ——
+        // 于是「summary 写结论、完整内容进 artifact 后引用」这整套策略
+        // 指向的是不存在的东西（实测一份 17KB 报告只剩长度数字）。
+        const sha = createHash('sha256').update(a.content).digest('hex')
         await this.db.query(
-          `insert into artifacts (ref, run_id, path, kind, bytes, summary, trust_level, created_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8)
-           on conflict (ref) do update set bytes = $5, summary = $6`,
+          `insert into artifacts (ref, run_id, path, kind, bytes, sha256, content, summary, trust_level, created_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           on conflict (ref) do update
+              set bytes = $5, sha256 = $6, content = $7, summary = $8`,
           [
             ref,
             ctx.runId,
             a.path,
             a.kind ?? 'file',
             a.content.length,
+            sha,
+            a.content,
             a.summary ?? null,
             a.trustLevel ?? 'agent',
             this.deps.clock.nowIso(),
