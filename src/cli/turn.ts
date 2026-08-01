@@ -28,9 +28,25 @@ export interface TurnResult {
   /** run 终态与错误，用于失败时给出下一步 */
   status: string
   errorCode: string | null
+  /** 错误里附的可操作提示（如「服务没在监听」），没有则为 null */
+  hint: string | null
 }
 
 const p = (e: RunEvent) => (e.payload ?? {}) as Record<string, unknown>
+
+/**
+ * 从 error_detail 里取出 hint。
+ *
+ * 结构有两层：runner 抛的错直接带 detail.hint，而 router 会把各模型的失败
+ * 包成 `{attempts, lastError}`，真正的提示在 lastError 里。
+ */
+export function extractHint(detail: unknown): string | null {
+  if (!detail || typeof detail !== 'object') return null
+  const d = detail as { hint?: unknown; lastError?: { hint?: unknown } }
+  if (typeof d.hint === 'string' && d.hint) return d.hint
+  const inner = d.lastError?.hint
+  return typeof inner === 'string' && inner ? inner : null
+}
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -228,6 +244,7 @@ export async function runTurn(n: Nucleus, conversationId: string, text: string):
     elapsedMs: Date.now() - t0,
     status: run?.status ?? 'unknown',
     errorCode: run?.errorCode ?? null,
+    hint: extractHint(run?.errorDetail),
   }
 }
 
@@ -247,6 +264,8 @@ export function printTurn(r: TurnResult, opts: { runCount?: number } = {}): void
       `${ICON.warn} 未产生回复；run ${statusColor(r.status)} ${c.gray(r.errorCode ?? '')} ` +
         recoveryHint(recoveryOf(r.errorCode)),
     )
+    // 错误里带了可操作提示就显示出来 —— 只报错误码等于让人自己猜
+    if (r.hint) line(c.gray(`  ${r.hint}`))
     // 反复失败时给出下一步，而不是让人自己猜
     if (r.errorCode?.startsWith('contract.')) {
       line(c.gray(`  模型输出不合 schema。反复出现请导出诊断包：nucleus bundle --run ${r.runId.slice(0, 8)}`))

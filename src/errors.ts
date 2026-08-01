@@ -38,7 +38,11 @@ export const ERRORS = new Map<string, ErrorSpec>([
   spec('provider.all_exhausted', 'needs_user', false, '所有模型都不可用，等待额度恢复'),
   spec('provider.auth_failed', 'needs_user', false, '凭据无效，需要检查配置'),
   spec('provider.server_error', 'automatic', true, '模型服务异常，正在重试'),
-  spec('provider.timeout', 'automatic', true, '模型响应超时，正在重试'),
+  spec('provider.timeout', 'automatic', true, '模型响应超时'),
+  // 与 timeout 分开：连接被拒 / DNS 失败 / 被网络策略拦截，重试永远不会成功。
+  // 归成 timeout 会让界面说「系统会自动重试」，把人往错的方向引 ——
+  // 实际要做的是启动服务、改 baseUrl 或放开网络。
+  spec('provider.unreachable', 'needs_user', false, '连不上模型服务，需要检查服务与网络'),
   spec('provider.degenerate_output', 'automatic', true, '模型输出退化（重复），已中断并重试'),
   spec('provider.bad_request', 'terminal', false, '请求不被模型接受'),
   spec('provider.output_truncated', 'needs_user', false, '模型输出被截断，需要提高 maxTokens'),

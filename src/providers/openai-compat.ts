@@ -73,13 +73,32 @@ export class OpenAICompatProvider implements Provider {
       if (req.signal?.aborted) {
         throw new NucleusError('runtime.cancelled', '请求已取消', { cause: e })
       }
-      // 带上底层原因：网络错误、DNS、被拦截、fixture 未命中 —— 只说「超时」
-      // 会让排查时完全看不到根因。
-      const why = e instanceof Error ? (e.cause instanceof Error ? e.cause.message : e.message) : String(e)
-      throw new NucleusError('provider.timeout', `请求 ${this.cfg.key} 失败：${why}`, {
-        cause: e,
-        detail: { reason: why },
-      })
+      // 区分「超时」与「连不上」。
+      //
+      // 以前一律报 provider.timeout，于是连接被拒也显示「系统会自动重试」——
+      // 而那种情况重试永远不会成功，该做的是启动服务或改 baseUrl。
+      // 实测中还出现过 540ms 就报「超时」，本身就说不通。
+      const timedOut = ctl.signal.reason instanceof Error && ctl.signal.reason.message === 'timeout'
+      const sys = systemErrorCode(e)
+      const why = describeFetchError(e)
+      throw timedOut
+        ? new NucleusError('provider.timeout', `${this.cfg.key} 超时（${this.#timeoutMs}ms）`, {
+            cause: e,
+            detail: { timeoutMs: this.#timeoutMs },
+          })
+        : new NucleusError(
+            'provider.unreachable',
+            `连不上 ${this.cfg.key}（${this.cfg.baseUrl}）：${why}`,
+            {
+              cause: e,
+              detail: {
+                reason: why,
+                syscallCode: sys,
+                baseUrl: this.cfg.baseUrl,
+                hint: hintFor(sys),
+              },
+            },
+          )
     }
 
     const rateLimit = parseRateLimitHeaders(res.headers, this.#clock.now())
@@ -381,6 +400,66 @@ export function parseRateLimitHeaders(h: Headers, nowMs: number): RateLimitInfo 
 }
 
 /** OpenAI 的 reset 头是 "1s" / "6m0s" / "300ms" 这种格式 */
+/**
+ * 从错误链里挖出系统错误码。
+ *
+ * fetch 失败时外层只是 `TypeError: fetch failed`，有用的东西藏在 `cause`
+ * 里，而且**不在 message 上而在 code 上**（EPERM 之类的 message 常常是空的）。
+ * 一度只取 `cause.message`，结果诊断里记下来的 reason 是空字符串 ——
+ * 专门为保留根因写的代码什么也没保留下来。
+ */
+export function systemErrorCode(e: unknown): string | null {
+  let cur: unknown = e
+  for (let i = 0; i < 5 && cur; i++) {
+    const c = (cur as { code?: unknown }).code
+    if (typeof c === 'string' && /^[A-Z_]+$/.test(c)) return c
+    // undici 会把多个尝试（IPv6/IPv4）包成 AggregateError
+    const errs = (cur as { errors?: unknown[] }).errors
+    if (Array.isArray(errs) && errs.length) {
+      const inner = errs.map(systemErrorCode).find(Boolean)
+      if (inner) return inner
+    }
+    cur = (cur as { cause?: unknown }).cause
+  }
+  return null
+}
+
+/** 拼一句人能看懂的原因，message 为空时退回系统码 */
+export function describeFetchError(e: unknown): string {
+  const sys = systemErrorCode(e)
+  // 非 Error 的输入不能直接 String()：对象会变成「[object Object]」，
+  // 比空字符串更没用
+  const msg =
+    e instanceof Error
+      ? (e.cause instanceof Error && e.cause.message ? e.cause.message : e.message)
+      : typeof e === 'string'
+        ? e
+        : ''
+  if (sys && !msg.includes(sys)) return msg ? `${sys}（${msg}）` : sys
+  return msg || '未知网络错误'
+}
+
+/** 系统码 → 下一步该做什么。不给提示的诊断只是把问题重述一遍。 */
+export function hintFor(sys: string | null): string {
+  switch (sys) {
+    case 'ECONNREFUSED':
+      return '服务没在监听 —— 本地模型确认 ollama serve 已启动，云端确认 baseUrl 正确'
+    case 'ENOTFOUND':
+    case 'EAI_AGAIN':
+      return '域名解析不了 —— 检查 baseUrl 拼写与 DNS'
+    case 'EPERM':
+    case 'EACCES':
+      return '被网络策略拦下 —— 当前进程没有出网权限'
+    case 'ECONNRESET':
+      return '连接被对端重置 —— 可能是代理或 TLS 中间设备'
+    case 'CERT_HAS_EXPIRED':
+    case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
+      return '证书校验失败 —— 检查系统时间与代理证书'
+    default:
+      return '检查 baseUrl、网络连通性与代理设置'
+  }
+}
+
 export function parseDuration(s: string): number | undefined {
   const m = s.match(/^(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m(?!s))?(?:(\d+(?:\.\d+)?)s)?(?:(\d+(?:\.\d+)?)ms)?$/)
   if (!m || m.slice(1).every((x) => x === undefined)) {
