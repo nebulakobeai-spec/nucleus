@@ -157,6 +157,24 @@ export function money(usd: number | null | undefined, opts: { subscription?: boo
 }
 
 /**
+ * 数据库位置的统一解析。
+ *
+ * 抽出来是因为**同一个 bug 犯了三次**：某个命令自己写 `dataDir` 时漏掉
+ * `NUCLEUS_PGLITE_DIR`，于是它悄悄打开另一个（空的）库，表现成
+ * 「明明跑过任务却说没有数据」。三次之后该消掉这一类，而不是这一处。
+ */
+export function resolveDb(flags: Record<string, string | true>): {
+  databaseUrl: string | null
+  dataDir: string
+} {
+  const url = strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null
+  return {
+    databaseUrl: url,
+    dataDir: strFlag(flags, 'data') ?? process.env['NUCLEUS_PGLITE_DIR'] ?? '.nucleus-data/pglite',
+  }
+}
+
+/**
  * 不带值的开关。
  *
  * 必须显式声明：否则 `nucleus ask --mock "问题"` 里的 `--mock` 会把

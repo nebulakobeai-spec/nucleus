@@ -137,6 +137,12 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
     heartbeatMs: config.runtime.heartbeatMs,
     leaseMs: config.runtime.leaseMs,
     assumedContextWindow: config.defaults.assumedContextWindow,
+    ...(config.runtime.captureTranscripts !== undefined
+      ? { captureTranscripts: config.runtime.captureTranscripts }
+      : {}),
+    ...(config.runtime.transcriptMaxChars !== undefined
+      ? { transcriptMaxChars: config.runtime.transcriptMaxChars }
+      : {}),
   })
 
   const worker = new Worker(db, deps, runner, agentMap(config), events, {

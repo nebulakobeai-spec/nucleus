@@ -1,7 +1,7 @@
 import { writeFile } from 'node:fs/promises'
 import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
-import { c, heading, ICON, line, strFlag, table } from './ui.js'
+import { c, heading, ICON, line, strFlag, table, resolveDb } from './ui.js'
 
 /**
  * `nucleus artifact` —— 把产出读出来。
@@ -17,8 +17,7 @@ async function open(flags: Record<string, string | true>): Promise<Nucleus> {
   const { config } = await loadConfig(strFlag(flags, 'config'))
   return boot({
     config,
-    databaseUrl: strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null,
-    dataDir: strFlag(flags, 'data') ?? process.env['NUCLEUS_PGLITE_DIR'] ?? '.nucleus-data/pglite',
+    ...resolveDb(flags),
     skipMcp: true,
   })
 }

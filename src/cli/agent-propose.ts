@@ -7,7 +7,7 @@ import {
   type ResultFields,
 } from '../runtime/result-schema.js'
 import type { AgentConfig } from '../config.js'
-import { c, line } from './ui.js'
+import { c, line, resolveDb } from './ui.js'
 
 /**
  * `agent new --describe` 的生成逻辑。
@@ -326,8 +326,7 @@ export async function bootForProposal(flags: Record<string, string | true>): Pro
   const { config } = await loadConfig(typeof flags['config'] === 'string' ? flags['config'] : undefined)
   return boot({
     config,
-    databaseUrl: process.env['NUCLEUS_DATABASE_URL'] ?? null,
-    dataDir: process.env['NUCLEUS_PGLITE_DIR'] ?? '.nucleus-data/pglite',
+    ...resolveDb(flags),
     skipMcp: flags['mcp'] !== true,
   })
 }

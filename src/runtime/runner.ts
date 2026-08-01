@@ -61,6 +61,9 @@ export interface RunnerOptions {
   schemaRetries?: number
   /** 模型未声明 contextWindow 时按这个值预算 */
   assumedContextWindow?: number
+  /** 是否记录 transcript（默认开 —— 出问题后再开就来不及了） */
+  captureTranscripts?: boolean
+  transcriptMaxChars?: number
   heartbeatMs?: number
   leaseMs?: number
 }
@@ -122,6 +125,8 @@ export class Runner {
   #noProgressSteps: number
   #schemaRetries: number
   #assumedContextWindow: number
+  #captureTranscripts: boolean
+  #transcriptMaxChars: number
   #heartbeatMs: number
   #leaseMs: number
 
@@ -138,6 +143,8 @@ export class Runner {
     this.#noProgressSteps = opts.noProgressSteps ?? 6
     this.#schemaRetries = opts.schemaRetries ?? 2
     this.#assumedContextWindow = opts.assumedContextWindow ?? 32_768
+    this.#captureTranscripts = opts.captureTranscripts ?? true
+    this.#transcriptMaxChars = opts.transcriptMaxChars ?? 200_000
     this.#heartbeatMs = opts.heartbeatMs ?? 15_000
     this.#leaseMs = opts.leaseMs ?? 60_000
   }
@@ -295,6 +302,31 @@ export class Runner {
       acc.cacheRead += res.usage.cacheRead
       acc.costUsd += res.costUsd
       acc.modelKey = res.modelKey
+      // transcript：模型被问了什么、答了什么。
+      // 事件流只有 token 与延迟 —— 而「为什么派给了这个专家」只有看到
+      // prompt 与回复才答得出，且出问题之后再想开启就来不及了
+      if (this.#captureTranscripts) {
+        await this.#store
+          .recordTranscript({
+            runAttemptId: attemptId,
+            step,
+            request: { messages, tools: wire.map((t) => t.name) },
+            response: {
+              content: res.content,
+              // 思考只记长度与开头 —— 全文可能很长，而它不进历史
+              reasoningChars: res.reasoning?.length ?? 0,
+              reasoningHead: res.reasoning?.slice(0, 2_000) ?? null,
+              toolCalls: res.toolCalls.map((t) => ({ name: t.name, arguments: t.arguments })),
+              finishReason: res.finishReason,
+              model: res.modelKey,
+            },
+            maxChars: this.#transcriptMaxChars,
+          })
+          .catch(() => {
+            /* 记录失败不该影响执行 —— 但也不静默：下面的事件仍然会落 */
+          })
+      }
+
       await this.events.emit(attemptId, runId, 'llm.call.finished', {
         step,
         model: res.modelKey,
@@ -595,6 +627,7 @@ export class Runner {
       seq: ctx.seq,
       toolName: def.name,
       argsHash: ctx.fingerprint,
+      args,
       sideEffectClass: def.sideEffect,
       ...(def.sideEffect === 'idempotent' ? { idempotencyKey: `${ctx.runId}:${ctx.fingerprint}` } : {}),
     })
@@ -629,6 +662,8 @@ export class Runner {
     await this.#store.recordOutcome(invocationId, out.ok ? 'ok' : 'error', {
       resultRef: out.artifactRef ?? null,
       errorCode: out.errorCode ?? null,
+      // 回灌给模型的就是这段文本 —— 规则为什么拦下、工具报了什么，都在里面
+      resultText: out.content ?? null,
     })
     await this.events.emit(ctx.attemptId, ctx.runId, 'tool.outcome', {
       step: ctx.step,

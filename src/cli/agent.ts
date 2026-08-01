@@ -3,7 +3,7 @@ import { agentSpec } from '../config.js'
 import { buildPrefix } from '../context/assemble.js'
 import { resultJsonSchema } from '../runtime/result-schema.js'
 import { loadConfig } from '../config-file.js'
-import { c, heading, ICON, line, strFlag, table, visibleLength } from './ui.js'
+import { c, heading, ICON, line, strFlag, table, visibleLength, resolveDb } from './ui.js'
 
 /**
  * `nucleus agent` —— 看清一个 agent 到底是什么样。
@@ -29,10 +29,7 @@ async function open(flags: Record<string, string | true>): Promise<Nucleus> {
   lastLoaded = { agentSources: loaded.agentSources, cases: loaded.cases }
   return boot({
     config,
-    databaseUrl: strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null,
-    // 与其它命令同一套解析 —— 写死路径会让这个命令悄悄打开另一个（空的）库
-    dataDir:
-      strFlag(flags, 'data') ?? process.env['NUCLEUS_PGLITE_DIR'] ?? '.nucleus-data/pglite',
+    ...resolveDb(flags),
     // 只看配置不跑任务，没必要连 MCP —— 但工具可见性需要它，见下面的提示
     skipMcp: flags['mcp'] !== true,
   })

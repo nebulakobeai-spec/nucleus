@@ -89,6 +89,16 @@ export interface NucleusConfig {
     entryAgent: string
   }
   runtime: {
+    /**
+     * 是否记录 transcript（发给模型的完整消息 + 模型的回复）。
+     *
+     * **默认开**。理由：出问题之后再想开启就来不及了 —— 而这恰恰是
+     * 「模型为什么那么做」唯一的证据。代价是数据库变大，用
+     * transcriptMaxChars 控制单条上限。
+     */
+    captureTranscripts?: boolean
+    /** 单条 transcript 的字符上限，超出截断并标记 */
+    transcriptMaxChars?: number
     workerId: string
     leaseMs: number
     heartbeatMs: number
@@ -383,6 +393,8 @@ export const defaultConfig: NucleusConfig = {
     maxOutputChars: 8_000,
   },
   runtime: {
+    captureTranscripts: true,
+    transcriptMaxChars: 200_000,
     workerId: 'local-1',
     leaseMs: 60_000,
     heartbeatMs: 15_000,

@@ -3,7 +3,7 @@ import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { parseAgentFile } from '../config/agent-files.js'
 import type { AgentConfig, NucleusConfig } from '../config.js'
-import { c, duration, heading, ICON, line, strFlag } from './ui.js'
+import { c, duration, heading, ICON, line, strFlag, resolveDb } from './ui.js'
 import { compactTokens } from './pet.js'
 import type { ModelConfig } from '../providers/types.js'
 
@@ -170,8 +170,7 @@ async function runBatch(
     config: useMock
       ? { ...solo, defaults: { ...solo.defaults, modelChain: ['mock:local'] }, models: [MOCK_MODEL, ...solo.models.filter((m) => m.key !== MOCK_MODEL.key)] }
       : solo,
-    databaseUrl: strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null,
-    dataDir: strFlag(flags, 'data') ?? process.env['NUCLEUS_PGLITE_DIR'] ?? '.nucleus-data/pglite',
+    ...resolveDb(flags),
     skipMcp: flags['mcp'] !== true,
     // 空脚本：任何 agent 都走到默认的 submit 兜底。
     // 这只验「定义能不能加载、权限对不对、契约跑不跑」——

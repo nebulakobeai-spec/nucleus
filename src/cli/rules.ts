@@ -2,7 +2,7 @@ import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { agentSpec } from '../config.js'
 import { RULES, ruleSpec } from '../runtime/rules.js'
-import { c, heading, ICON, line, strFlag, table } from './ui.js'
+import { c, heading, ICON, line, strFlag, table, resolveDb } from './ui.js'
 
 /**
  * `nucleus rules` —— 规则清单与遵守率。
@@ -31,10 +31,7 @@ export async function rulesCmd(argv: string[], flags: Record<string, string | tr
   const { config } = await loadConfig(strFlag(flags, 'config'))
   const n = await boot({
     config,
-    databaseUrl: strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null,
-    // 与其它命令同一套解析 —— 写死路径会让这个命令悄悄打开另一个（空的）库
-    dataDir:
-      strFlag(flags, 'data') ?? process.env['NUCLEUS_PGLITE_DIR'] ?? '.nucleus-data/pglite',
+    ...resolveDb(flags),
     skipMcp: true,
   })
   const days = Number(strFlag(flags, 'since') ?? 30)

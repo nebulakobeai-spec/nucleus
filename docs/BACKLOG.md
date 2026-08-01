@@ -286,6 +286,34 @@
 
 ---
 
+## G. 可追溯性 ✅ 已完成
+
+24. ~~**transcript：模型被问了什么、答了什么**~~
+
+    事件流对「发生了什么」是完整的，但对「模型为什么那么做」是瞎的：
+    `llm.call.started` 只有 `{step, chain}`、`llm.call.finished` 只有 token 与
+    延迟、工具实参只有 `args_hash`（`args_ref` / `result_ref` 是第 10、11 处
+    「声明了没人写」）、bundle 里 agent 只有 id 列表、artifact 没有内容。
+
+    于是远程诊断答不了这个阶段最常见的问题：编排者为什么派给了这个专家？
+    专家为什么忽略了验收标准？
+
+    「事后重建」不成立：重建需要当时的 config + agent 定义 + 当时的历史，
+    三样都会变；而且出问题之后再想开启记录就来不及了。所以**默认开**。
+
+    已做：`transcripts` 表（完整消息数组 + 回复 + tool_calls 实参，超长截断
+    并标记）、`tool_invocations.args_json` / `result_text`、bundle 带上
+    agent 完整定义 + 来源 + 工具目录 + artifact 内容（单条 64KB 上限）+
+    transcripts、`nucleus replay` 渲染成因果链。
+
+    可以用 `runtime.captureTranscripts: false` 关掉。
+
+25. ~~**dataDir 解析统一**~~ —— 同一个 bug 犯了三次（某个命令自己写 dataDir
+    时漏掉 `NUCLEUS_PGLITE_DIR`，于是悄悄打开另一个空库，表现成「明明跑过
+    任务却说没数据」）。抽成 `resolveDb(flags)`，消掉这一类而不是这一处。
+
+---
+
 ## F. 诚实性与技术债
 
 19. **README / DESIGN 的现状段改准**。它现在有过时之处：说「前沿模型遵守率

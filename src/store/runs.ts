@@ -555,21 +555,60 @@ export class RunStore {
   // ── 工具调用意图日志（§3.2）───────────────────────────
 
   /** 调用**之前**写。返回的 id 用于随后记录结果。 */
+/**
+   * 记一次模型往返。
+   *
+   * 存的是「模型被问了什么、答了什么」—— 事件流里只有 token 数与延迟，
+   * 而 agent 定义调优阶段最常要回答的问题（为什么派给了这个专家、
+   * 为什么忽略了验收标准）只有看到 prompt 与回复才答得出。
+   *
+   * 超长时截断并标记，而不是拒绝写 —— 截断的记录仍然有用，没有记录则完全瞎。
+   */
+  async recordTranscript(input: {
+    runAttemptId: string
+    step: number
+    request: unknown
+    response: unknown
+    maxChars?: number
+  }): Promise<void> {
+    const cap = input.maxChars ?? 200_000
+    let req = JSON.stringify(input.request)
+    let res = JSON.stringify(input.response)
+    let truncated = false
+    if (req.length > cap) {
+      req = JSON.stringify({ truncated: `请求超过 ${cap} 字符`, head: req.slice(0, cap) })
+      truncated = true
+    }
+    if (res.length > cap) {
+      res = JSON.stringify({ truncated: `回复超过 ${cap} 字符`, head: res.slice(0, cap) })
+      truncated = true
+    }
+    await this.db.query(
+      `insert into transcripts (id, run_attempt_id, step, request, response, truncated, created_at)
+       values ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7)
+       on conflict (run_attempt_id, step) do update
+          set request = $4::jsonb, response = $5::jsonb, truncated = $6`,
+      [this.deps.ids.uuid(), input.runAttemptId, input.step, req, res, truncated, this.deps.clock.nowIso()],
+    )
+  }
+
   async recordIntent(input: {
     runAttemptId: string
     seq: number
     toolName: string
     argsHash: string
     argsRef?: string | null
+    /** 实参本身。只有 hash 时无法判断「模型到底填了什么」 */
+    args?: unknown
     sideEffectClass: SideEffectClass
     idempotencyKey?: string | null
   }): Promise<string> {
     const id = this.deps.ids.uuid()
     await this.db.query(
       `insert into tool_invocations
-         (id, run_attempt_id, seq, tool_name, args_hash, args_ref,
+         (id, run_attempt_id, seq, tool_name, args_hash, args_ref, args_json,
           side_effect_class, idempotency_key, intent_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+       values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)`,
       [
         id,
         input.runAttemptId,
@@ -577,6 +616,8 @@ export class RunStore {
         input.toolName,
         input.argsHash,
         input.argsRef ?? null,
+        // 实参本身：委派信封写得好不好、路径为什么被规则拦下，都要看它
+        input.args === undefined ? null : JSON.stringify(input.args),
         input.sideEffectClass,
         input.idempotencyKey ?? null,
         this.deps.clock.nowIso(),
@@ -588,11 +629,17 @@ export class RunStore {
   async recordOutcome(
     invocationId: string,
     outcome: 'ok' | 'error',
-    extra: { resultRef?: string | null; errorCode?: string | null } = {},
+    extra: {
+      resultRef?: string | null
+      errorCode?: string | null
+      /** 工具返回的文本。回灌给模型的就是它，所以诊断时必须看得到 */
+      resultText?: string | null
+    } = {},
   ): Promise<void> {
     await this.db.query(
       `update tool_invocations
-          set outcome = $1, outcome_at = $2, result_ref = $3, error_code = $4
+          set outcome = $1, outcome_at = $2, result_ref = $3, error_code = $4,
+              result_text = $6
         where id = $5`,
       [
         outcome,
@@ -600,6 +647,10 @@ export class RunStore {
         extra.resultRef ?? null,
         extra.errorCode ?? null,
         invocationId,
+        // 回灌给模型的就是这段文本，诊断时必须看得到。截断避免大输出撑爆库
+        extra.resultText === undefined || extra.resultText === null
+          ? null
+          : extra.resultText.slice(0, 20_000),
       ],
     )
   }

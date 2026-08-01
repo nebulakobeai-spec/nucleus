@@ -5,7 +5,7 @@ import { boot } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { redactText } from '../auth/credentials.js'
 import { errorSpec } from '../errors.js'
-import { c, heading, ICON, line, strFlag } from './ui.js'
+import { c, heading, ICON, line, strFlag, resolveDb } from './ui.js'
 
 /**
  * `nucleus bundle` —— 故障诊断包。
@@ -37,8 +37,18 @@ export interface Bundle {
     credentials: Array<{ ref: string; present: boolean }>
     providerHealth: unknown[]
     mcpServers: unknown[]
-    toolCount: number
-    agents: string[]
+    /** 工具的完整目录 —— 只报数量的话看不出模型当时能调什么 */
+    tools: unknown[]
+    /**
+     * agent 的**完整定义**，不是 id 列表。
+     *
+     * agent 定义决定行为：prompt 正文、权限、结果契约。只给 id 的话，
+     * 「专家为什么忽略了验收标准」这类问题完全无从下手 ——
+     * 而定义随时在改，事后也重建不出当时那一版。
+     */
+    agents: unknown[]
+    /** 每个 agent 来自哪个文件 */
+    agentSources: Record<string, string>
   }
   run?: {
     root: unknown
@@ -48,6 +58,8 @@ export interface Bundle {
     toolInvocations: unknown[]
     wakes: unknown[]
     artifacts: unknown[]
+    /** 模型被问了什么、答了什么 —— 「为什么那么做」唯一的证据 */
+    transcripts: unknown[]
     /** 每个 error_code 的恢复性，避免对方还要查文档 */
     errorSpecs: Record<string, unknown>
   }
@@ -105,15 +117,14 @@ function gitDirty(): { dirty: boolean; files: string[] } {
 
 export async function bundleCmd(argv: string[], flags: Record<string, string | true>): Promise<number> {
   const runPrefix = strFlag(flags, 'run') ?? argv[0]
-  const { config, path: configPath, overrides } = await loadConfig(
+  const { config, path: configPath, overrides, agentSources } = await loadConfig(
     typeof flags['config'] === 'string' ? flags['config'] : undefined,
   )
   const dirty = gitDirty()
 
   const n = await boot({
     config,
-    databaseUrl: strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null,
-    dataDir: strFlag(flags, 'data') ?? '.nucleus-data/pglite',
+    ...resolveDb(flags),
     // 诊断时不要真去连 MCP —— 那可能正是出问题的地方，会拖慢或挂住
     skipMcp: true,
   })
@@ -151,8 +162,14 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
           // envRefs 的 key 保留（说明需要什么），值不含密钥
           envRefs: Object.keys(s.envRefs ?? {}),
         })),
-        toolCount: n.tools.size,
-        agents: config.agents.map((a) => a.id),
+        tools: n.tools.all().map((t) => ({
+          name: t.name,
+          requires: t.requires,
+          sideEffect: t.sideEffect,
+          description: t.description.split('\n')[0],
+        })),
+        agents: config.agents,
+        agentSources,
       },
     }
 
@@ -195,9 +212,24 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
           where r.root_run_id = $1`,
         [rootId],
       )
+      // 带上内容。只给元数据的话，「专家产出对不对」根本没法判 ——
+      // 而那常常是唯一能看出问题的地方。单条上限 64KB，避免包大到没法传
       const artifacts = await n.db.query(
-        `select a.ref, a.path, a.kind, a.bytes, a.trust_level, a.summary, a.created_at
+        `select a.ref, a.path, a.kind, a.bytes, a.sha256, a.trust_level, a.summary, a.created_at,
+                left(a.content, 65536) as content,
+                (length(a.content) > 65536) as content_truncated
            from artifacts a join runs r on r.id = a.run_id where r.root_run_id = $1`,
+        [rootId],
+      )
+
+      const transcripts = await n.db.query(
+        `select t.* from transcripts t
+           join run_attempts a on a.id = t.run_attempt_id
+           join runs r on r.id = a.run_id
+          where r.root_run_id = $1
+          -- depth 作为 tiebreak：同一毫秒内的记录靠时间戳排不稳定，
+          -- 而诊断包的价值全在于重建正确的先后
+          order by a.created_at, r.depth, a.attempt_no, t.step`,
         [rootId],
       )
 
@@ -218,6 +250,7 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
         toolInvocations: invocations.rows,
         wakes: wakes.rows,
         artifacts: artifacts.rows,
+        transcripts: transcripts.rows,
         errorSpecs,
       }
     } else {
@@ -261,7 +294,9 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
       const r = bundle.run
       line(
         c.gray(
-          `  ${r.tree.length} run · ${r.attempts.length} attempt · ${r.events.length} 事件 · ${r.toolInvocations.length} 工具调用`,
+          `  ${r.tree.length} run · ${r.attempts.length} attempt · ${r.events.length} 事件 · ` +
+            `${r.toolInvocations.length} 工具调用 · ${r.transcripts.length} 条 transcript · ` +
+            `${r.artifacts.length} 个产出`,
         ),
       )
     } else {
@@ -318,7 +353,11 @@ export async function replayCmd(argv: string[], _flags: Record<string, string | 
   for (const cred of bundle.environment.credentials) {
     line(`${cred.present ? ICON.ok : ICON.fail} 凭据 ${cred.ref}`)
   }
-  line(`${ICON.info} ${bundle.environment.toolCount} 个工具 · agent: ${bundle.environment.agents.join(', ')}`)
+  const ags = bundle.environment.agents as Array<{ id: string }>
+  line(
+    `${ICON.info} ${bundle.environment.tools.length} 个工具 · ` +
+      `${ags.length} 个 agent：${ags.map((a) => a.id).join(', ')}`,
+  )
   for (const s of bundle.environment.mcpServers as Array<{ id: string; transport: string }>) {
     line(`${ICON.info} MCP ${s.id} (${s.transport})`)
   }
@@ -333,6 +372,65 @@ export async function replayCmd(argv: string[], _flags: Record<string, string | 
         `${c.gray(String(dt).padStart(7) + 'ms')} ${c.gray(e.run_id.slice(0, 6))} ${e.kind.padEnd(22)} ` +
           c.gray(JSON.stringify(e.payload).slice(0, 80)),
       )
+    }
+
+    // transcript：模型被问了什么、答了什么。
+    // 「为什么派给了这个专家」「为什么忽略了验收标准」只有这里答得出
+    const ts = (bundle.run.transcripts ?? []) as Array<{
+      step: number
+      truncated: boolean
+      request: { messages?: Array<{ role: string; content: string }>; tools?: string[] }
+      response: {
+        content?: string
+        reasoningChars?: number
+        toolCalls?: Array<{ name: string; arguments: string }>
+        finishReason?: string
+        model?: string
+      }
+    }>
+    if (ts.length) {
+      heading(`模型往返（${ts.length} 次）`)
+      for (const t of ts) {
+        const msgs = t.request.messages ?? []
+        line(
+          `${c.bold(`step ${t.step}`)} ${c.gray(`${t.response.model ?? '?'} · ${msgs.length} 条消息 · 可用工具 ${(t.request.tools ?? []).join(', ') || '无'}`)}` +
+            (t.truncated ? ` ${c.yellow('（已截断）')}` : ''),
+        )
+        // 最后一条用户消息通常是任务信封或工具结果 —— 最能说明它当时看到了什么
+        const last = [...msgs].reverse().find((m) => m.role === 'user' || m.role === 'tool')
+        if (last) {
+          line(c.gray(`  ← ${last.role}: ${last.content.replace(/\n/g, ' ⏎ ').slice(0, 160)}`))
+        }
+        if (t.response.content) {
+          line(c.gray(`  → ${t.response.content.replace(/\n/g, ' ⏎ ').slice(0, 160)}`))
+        }
+        if (t.response.reasoningChars) line(c.gray(`  → 思考 ${t.response.reasoningChars} 字`))
+        for (const tc of t.response.toolCalls ?? []) {
+          line(`  → ${c.cyan(tc.name)}(${c.gray(tc.arguments.replace(/\n/g, ' ').slice(0, 200))})`)
+        }
+      }
+      line()
+      line(c.gray('完整内容在包里的 run.transcripts —— 上面只是摘要'))
+    }
+
+    // 工具实参：委派信封写得好不好、路径为什么被拦，都要看它
+    const invs = bundle.run.toolInvocations as Array<{
+      tool_name: string
+      args_json?: unknown
+      result_text?: string | null
+      outcome: string | null
+      error_code?: string | null
+    }>
+    if (invs.some((i) => i.args_json)) {
+      heading('工具实参与返回')
+      for (const i of invs) {
+        line(
+          `${i.outcome === 'ok' ? ICON.ok : ICON.fail} ${c.cyan(i.tool_name)}` +
+            (i.error_code ? ` ${c.red(i.error_code)}` : ''),
+        )
+        if (i.args_json) line(c.gray(`  ← ${JSON.stringify(i.args_json).slice(0, 220)}`))
+        if (i.result_text) line(c.gray(`  → ${i.result_text.replace(/\n/g, ' ⏎ ').slice(0, 220)}`))
+      }
     }
 
     const unknown = (bundle.run.toolInvocations as Array<{ outcome: string | null; tool_name: string; side_effect_class: string }>).filter(
