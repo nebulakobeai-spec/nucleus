@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { ask, boot, type Nucleus } from '../src/boot.js'
-import { defaultConfig, type NucleusConfig } from '../src/config.js'
+import { defaultConfig, type NucleusConfig, withExampleAgents } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import {
   envelopeSizes,
@@ -124,7 +124,7 @@ describe('envelopeSizes', () => {
 // ═══════════════════════════════════════════════════════
 
 function config(): NucleusConfig {
-  const c = structuredClone(defaultConfig)
+  const c = withExampleAgents(structuredClone(defaultConfig))
   c.defaults.modelChain = ['mock:local']
   return c
 }

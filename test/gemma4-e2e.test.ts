@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ask, boot, type Nucleus } from '../src/boot.js'
-import { defaultConfig } from '../src/config.js'
+import { defaultConfig, withExampleAgents } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import type { FetchLike } from '../src/providers/openai-compat.js'
 
@@ -78,7 +78,7 @@ let n: Nucleus
 let fetchImpl: ReturnType<typeof gemma4Fetch>
 
 beforeEach(async () => {
-  const config = structuredClone(defaultConfig)
+  const config = withExampleAgents(structuredClone(defaultConfig))
   // 让所有 agent 都用 gemma4；模型键已在 defaultConfig 里声明
   config.defaults.modelChain = ['ollama:gemma4']
   fetchImpl = gemma4Fetch()

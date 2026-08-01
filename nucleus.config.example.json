@@ -139,52 +139,20 @@
     "maxRunsPerRoot": 32
   },
 
-  "agents": [
-    {
-      "id": "orchestrator",
-      "name": "编排者",
-      "identity": "你是编排者，用户的唯一入口。\n理解需求 → 拆解 → 委派给专家 → 整合结果。\n你自己不执行具体工作，一律委派。",
-      // 只有 delegate 与 user：物理上无法自己读写或执行，
-      // 也拿不到 artifact —— 它该整合而不是自己写报告
-      "permissions": ["delegate", "user"]
-    },
-    {
-      "id": "researcher",
-      "name": "研究员",
-      // 一句话说清**什么时候该派给它** —— 这句会进 delegate 的工具描述，
-      // 是编排者的选路依据。不写的话它只能看着 id 猜。
-      "whenToUse": "需要调研、查资料、核实事实、给出带来源的结论时",
-      "identity": "你是研究专家，负责调研与信息收集。\n结论必须标注来源。",
-      // ── 权限：能力边界的主关 ──────────────────────────
-      // 工具声明自己需要什么权限，这里授予权限。新接一个会写文件的 MCP
-      // 工具时，没有 write 的 agent 自动看不到它，配置一个字都不用改。
-      //
-      // 可选：read / write / execute / network / delegate / user / artifact
-      //   read      读工作目录内的文件
-      //   write     写工作目录内的文件
-      //   artifact  登记产出（write_report）—— 只进数据库，不碰文件系统
-      //   execute   执行命令（最强的一项，拿到它基本等于拿到本机权限）
-      //   network   主动出网
-      //   delegate  派活给其它 agent
-      //   user      直接向用户提问
-      "permissions": ["read", "artifact"],
-      // 可选的**收窄**：给了 read，但只许用某几个读取工具。
-      // 与 permissions 是「与」关系 —— 名字在这里但权限没给，依然看不到。
-      // 不填表示不收窄。
-      "toolsAllow": ["write_report", "searxng__*"],
-      "capabilities": ["research"],
-      // 启用这条会让 findings[].sources 变成必填
-      "requiredFields": ["findings[].sources"]
-    },
-    {
-      "id": "operator",
-      "name": "执行者",
-      "whenToUse": "需要读写文件、整理数据、执行具体操作时",
-      "identity": "你是执行专家，负责文件操作与数据查询。\n限制输出规模，只返回关键信息。",
-      "permissions": ["read", "write", "artifact"],
-      "toolsAllow": ["read_file", "write_file", "postgres__*"]
-    }
-  ],
+  // ── agent ───────────────────────────────────────────────
+  // **agents 不能写在这里** —— 专家用 `agents/*.md`，一个专家一个文件。
+  // 理由：JSON 数组是整体替换语义（加一个要把已有的全抄一遍），而 prompt
+  // 在 JSON 里是 \n 转义串，偏偏 prompt 是改得最勤的东西。
+  //
+  //     nucleus agent new reviewer      # 生成骨架，里面有写法说明
+  //     nucleus agent show reviewer     # 看模型实际收到什么
+  //
+  // 内置只有 orchestrator（基础设施：入口 + 委派 + 整合，不是专家）。
+  // 想换掉它就写 agents/orchestrator.md —— 同名时 md 优先。
+  // 专家定义建议进 git（要版本化、要能 diff）；这个文件不进。
+  //
+  // 只想让某台机器有某个专家：agentsDir 指到别处，或用 NUCLEUS_AGENTS_DIR。
+  // "agentsDir": "agents",
 
   // MCP server。部署与运行归你；Nucleus 只负责连接、翻译、命名空间、调用。
   // 工具会以 `<serverId>__<toolName>` 的形式暴露给 agent。

@@ -7,7 +7,7 @@ import type { Db } from '../src/db/types.js'
 import { FakeClock, FakeIds, type Deps } from '../src/seams.js'
 import { ModelRouter } from '../src/providers/router.js'
 import type { ModelConfig } from '../src/providers/types.js'
-import { agentSpec, defaultConfig } from '../src/config.js'
+import { EXAMPLE_AGENTS, agentSpec, defaultConfig } from '../src/config.js'
 import { validateResult } from '../src/runtime/result-schema.js'
 import { scriptedFetch } from './harness/provider.js'
 
@@ -115,7 +115,7 @@ describe('gemma4 的 schema 遵守率', () => {
 
     // 用真实的 researcher spec 校验（含 requiredFields: findings[].sources）
     const spec = agentSpec(
-      defaultConfig.agents.find((a) => a.id === 'researcher')!,
+      EXAMPLE_AGENTS.find((a) => a.id === 'researcher')!,
       defaultConfig.defaults,
     )
     const payload = JSON.parse(res.toolCalls[0]!.arguments)

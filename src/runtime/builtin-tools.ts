@@ -163,10 +163,7 @@ export function delegateTool(
 
   return {
     name: 'delegate',
-    description:
-      targets.length === 0
-        ? '把一件事委派给专家。当前没有可委派的专家。'
-        : `把一件事委派给专家。可选专家：\n${roster}`,
+    description: `把一件事委派给专家。可选专家：\n${roster}`,
     parameters: {
       type: 'object',
       properties: {
@@ -283,5 +280,12 @@ export function registerBuiltins(
   registry.register(readFileTool)
   registry.register(writeFileTool)
   registry.register(writeReportTool)
-  registry.register(delegateTool(opts.store, opts.delegateTargets, opts.delegateLimits))
+  // 没有可委派目标时**不注册** delegate。
+  // 两个理由：`enum: []` 不是有意义的 JSON Schema（部分 provider 会拒）；
+  // 而全新安装还没定义专家时，编排者直接作答才是正确行为 ——
+  // 给它一个必然失败的工具等于宣告一个不存在的能力（和当初那个假
+  // web_search 同一个错）。
+  if (opts.delegateTargets.length > 0) {
+    registry.register(delegateTool(opts.store, opts.delegateTargets, opts.delegateLimits))
+  }
 }

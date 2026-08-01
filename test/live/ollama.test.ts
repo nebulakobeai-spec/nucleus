@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { ask, boot, type Nucleus } from '../../src/boot.js'
-import { agentSpec, defaultConfig, type NucleusConfig } from '../../src/config.js'
+import { EXAMPLE_AGENTS, agentSpec, defaultConfig, type NucleusConfig, withExampleAgents } from '../../src/config.js'
 import type { ModelConfig } from '../../src/providers/types.js'
 import { ModelRouter } from '../../src/providers/router.js'
 import { PgliteDb } from '../../src/db/pglite.js'
@@ -88,7 +88,7 @@ function modelCfg(name: string, contextWindow: number, maxTokens: number): Model
 }
 
 function liveConfig(model: string, contextWindow = 131_072, maxTokens = 4096): NucleusConfig {
-  const c = structuredClone(defaultConfig)
+  const c = withExampleAgents(structuredClone(defaultConfig))
   c.models = [modelCfg(model, contextWindow, maxTokens)]
   c.defaults.modelChain = [`ollama:${model}`]
   // 本机一次调用几十秒，步数收紧，卡住早暴露
@@ -180,7 +180,7 @@ describe.skipIf(!reachable)('真模型的响应形状', () => {
     'submit_result 能通过我们的校验器 —— 含规则驱动的必填字段',
     async () => {
       const spec = agentSpec(
-        defaultConfig.agents.find((a) => a.id === 'researcher')!,
+        EXAMPLE_AGENTS.find((a) => a.id === 'researcher')!,
         defaultConfig.defaults,
       )
       const res = await callRouter(STRONG, {

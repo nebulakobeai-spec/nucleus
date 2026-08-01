@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { ask, boot, type Nucleus } from '../src/boot.js'
-import { defaultConfig, type NucleusConfig } from '../src/config.js'
+import { EXAMPLE_AGENTS, defaultConfig, type NucleusConfig, withExampleAgents } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import { RULE, RULES, ruleSpec } from '../src/runtime/rules.js'
 import type { MockScript } from '../src/providers/mock.js'
@@ -17,7 +17,7 @@ import type { MockScript } from '../src/providers/mock.js'
  */
 
 function config(): NucleusConfig {
-  const c = structuredClone(defaultConfig)
+  const c = withExampleAgents(structuredClone(defaultConfig))
   c.defaults.modelChain = ['mock:local']
   // 入口直接用 researcher，省掉委派那一层，让契约事件更好观察
   c.defaults.entryAgent = 'researcher'
@@ -320,7 +320,7 @@ describe('whenToUse', () => {
     // 只给 id 列表时，模型没有任何选路依据
     expect(def.description).toContain('researcher')
     expect(def.description).toContain(
-      defaultConfig.agents.find((a) => a.id === 'researcher')!.whenToUse!,
+      EXAMPLE_AGENTS.find((a) => a.id === 'researcher')!.whenToUse!,
     )
   })
 

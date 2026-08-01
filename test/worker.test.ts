@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { boot, ask, type Nucleus } from '../src/boot.js'
-import { defaultConfig } from '../src/config.js'
+import { defaultConfig, withExampleAgents } from '../src/config.js'
 import type { MockScript } from '../src/providers/mock.js'
 import { FakeIds, FakeClock } from '../src/seams.js'
 
@@ -32,7 +32,7 @@ const SCRIPT: MockScript = {
 
 async function bootWith(script: MockScript): Promise<Nucleus> {
   return boot({
-    config: defaultConfig,
+    config: withExampleAgents(defaultConfig),
     deps: { clock: new FakeClock(), ids: new FakeIds() },
     mock: script,
   })

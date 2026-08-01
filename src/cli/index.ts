@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { ask, boot, type Nucleus } from '../boot.js'
-import { defaultConfig, isMockOnly } from '../config.js'
+import { defaultConfig, isMockOnly, withExampleAgents } from '../config.js'
 import { loadEnvFile } from '../env.js'
 import { chatLoop } from './chat.js'
 import { printRunList, printRunTree, printTurn, runTurn } from './turn.js'
@@ -169,6 +169,18 @@ async function doctor(flags: Record<string, string | true>): Promise<number> {
         ? `只有 mock（回答是假的）—— cp nucleus.config.example.json nucleus.config.json`
         : config.defaults.modelChain.join(' → '),
     })
+
+    // 还没有专家时提示一句 —— 不是错误，但值得知道编排者现在会自己作答
+    const experts = config.agents.filter((a) => a.id !== config.defaults.entryAgent)
+    if (experts.length === 0) {
+      checks.push({
+        name: '专家 agent',
+        ok: true,
+        detail: '还没有 —— 编排者会直接作答。加一个：nucleus agent new <id>',
+      })
+    } else {
+      checks.push({ name: '专家 agent', ok: true, detail: experts.map((a) => a.id).join(', ') })
+    }
 
     // toolsAllow 引用了不存在的工具时，模型只是「看不到」它，没有任何报错 ——
     // 拼错工具名或 MCP 没连上都会这样，必须显式报出来
@@ -374,7 +386,9 @@ async function eventsCmd(argv: string[], flags: Record<string, string | true>): 
 
 async function verify(flags: Record<string, string | true>): Promise<number> {
   heading('nucleus verify')
-  const n = await boot({ mock: DEMO_SCRIPT })
+  // verify 是离线冒烟，需要一个专家才能验完整的委派链路。
+  // 示例专家不在 defaultConfig 里 —— 专家由用户定义
+  const n = await boot({ config: withExampleAgents(defaultConfig), mock: DEMO_SCRIPT })
   const results: Array<[string, boolean, string]> = []
 
   try {

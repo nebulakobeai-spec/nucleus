@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { boot, type Nucleus } from '../src/boot.js'
-import { defaultConfig, isMockOnly, modelMap } from '../src/config.js'
+import { defaultConfig, isMockOnly, modelMap, withExampleAgents } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import { loadEnvFile, parseEnv } from '../src/env.js'
 import { runChatCommand, type ChatSession } from '../src/cli/chat.js'
@@ -108,7 +108,7 @@ describe('chat 命令', () => {
 
   beforeEach(async () => {
     n = await boot({
-      config: structuredClone(defaultConfig),
+      config: withExampleAgents(structuredClone(defaultConfig)),
       deps: { clock: new FakeClock(), ids: new FakeIds() },
       mock: SCRIPT,
     })
@@ -169,7 +169,7 @@ describe('chat 命令', () => {
 
   it('/model 不覆盖显式声明了模型链的 agent', async () => {
     // researcher 若在 config 里显式指定过链，切换默认链不应影响它
-    const cfg = structuredClone(defaultConfig)
+    const cfg = withExampleAgents(structuredClone(defaultConfig))
     cfg.agents = cfg.agents.map((a) =>
       a.id === 'researcher' ? { ...a, modelChain: ['ollama:llama'] } : a,
     )
@@ -211,7 +211,7 @@ describe('会话延续', () => {
 
   beforeEach(async () => {
     n = await boot({
-      config: structuredClone(defaultConfig),
+      config: withExampleAgents(structuredClone(defaultConfig)),
       deps: { clock: new FakeClock(), ids: new FakeIds() },
       mock: {
         orchestrator: [
@@ -264,7 +264,7 @@ describe('ollama 模型动态解析', () => {
 
   beforeEach(async () => {
     n = await boot({
-      config: structuredClone(defaultConfig),
+      config: withExampleAgents(structuredClone(defaultConfig)),
       deps: { clock: new FakeClock(), ids: new FakeIds() },
       mock: SCRIPT,
     })
@@ -356,7 +356,7 @@ describe('parseArgv', () => {
 // 配置校验：把错误挡在启动阶段
 // ═══════════════════════════════════════════════════════
 
-describe('agents 整体替换的坑', () => {
+describe('agents 只能来自 md', () => {
   async function withConfig(json: unknown): Promise<ReturnType<typeof loadConfig>> {
     const dir = await mkdtemp(join(tmpdir(), 'nuc-cfg-'))
     const p = join(dir, 'nucleus.config.json')
@@ -364,110 +364,38 @@ describe('agents 整体替换的坑', () => {
     return loadConfig(p)
   }
 
-  it('只加一个专家会删掉入口 agent —— 必须在启动时报错，而不是每个任务都失败', async () => {
-    // 这是真实踩过的坑：配置合法、doctor 全绿，然后所有任务都以
-    // runtime.internal 失败，错误信息完全指不到配置上
+  it('JSON 里定义 agents 被拒绝，而不是静默忽略', async () => {
+    // 静默忽略会让人以为配置生效了。而两种来源意味着两条代码路径、
+    // 两个出问题时要看的地方 —— 那个「来源」列本身就是歧义的补丁
     await expect(
       withConfig({
-        agents: [
-          { id: 'reviewer', name: '审核员', identity: '你是审核员。', permissions: ['read'] },
-        ],
+        agents: [{ id: 'reviewer', name: '审核员', identity: '你是审核员。', permissions: ['read'] }],
       }),
-    ).rejects.toThrow(/entryAgent 指向不存在的 agent/)
+    ).rejects.toThrow(/不能定义 agents/)
   })
 
-  it('报错要说清「整体替换而非合并」—— 否则看不出该怎么改', async () => {
+  it('拒绝时给出迁移路径与要迁的 id', async () => {
     const err = await withConfig({
-      agents: [{ id: 'reviewer', name: '审核员', identity: 'x', permissions: [] }],
+      agents: [{ id: 'reviewer' }, { id: 'analyst' }],
     }).catch((e: Error) => e)
-    expect((err as Error).message).toContain('整体替换')
-    // 还要列出现有的 agent，省得再去翻配置
-    expect((err as Error).message).toContain('reviewer')
+    const msg = (err as Error).message
+    expect(msg).toContain('agents/*.md')
+    expect(msg).toContain('nucleus agent new')
+    // 要迁哪些必须列出来，否则得自己去数
+    expect(msg).toContain('reviewer, analyst')
   })
 
-  it('把入口 agent 一起列上就正常', async () => {
-    const { config } = await withConfig({
-      agents: [
-        { id: 'orchestrator', name: '编排者', identity: '你是编排者。', permissions: ['delegate'] },
-        { id: 'reviewer', name: '审核员', identity: '你是审核员。', permissions: ['read'] },
-      ],
-    })
-    expect(config.agents.map((a) => a.id)).toEqual(['orchestrator', 'reviewer'])
-    expect(config.defaults.entryAgent).toBe('orchestrator')
+  it('不写 agents 时沿用内置的 orchestrator', async () => {
+    const { config } = await withConfig({ defaults: { maxSteps: 5 } })
+    expect(config.agents.map((a) => a.id)).toEqual(['orchestrator'])
+    expect(config.defaults.maxSteps).toBe(5)
   })
 
-  it('也可以改 entryAgent 指向新 agent，不必保留 orchestrator', async () => {
-    const { config } = await withConfig({
-      agents: [{ id: 'reviewer', name: '审核员', identity: '你是审核员。', permissions: [] }],
-      defaults: { entryAgent: 'reviewer' },
-    })
-    expect(config.defaults.entryAgent).toBe('reviewer')
-  })
-
-  it('有 delegate 权限但没有可委派目标时报错', async () => {
-    await expect(
-      withConfig({
-        agents: [{ id: 'solo', name: '独行', identity: 'x', permissions: ['delegate'] }],
-        defaults: { entryAgent: 'solo' },
-      }),
-    ).rejects.toThrow(/没有任何可委派的目标/)
-  })
-})
-
-// ═══════════════════════════════════════════════════════
-// 没有内置的真实模型
-// ═══════════════════════════════════════════════════════
-
-describe('模型必须自己配', () => {
-  it('代码里只有 mock —— 不内置任何真实模型', () => {
-    // 把某几个云端模型写进产品等于把作者的订阅强加给所有人，
-    // 而 provider / 单价 / 计费方式 / 端点都会变
-    expect(defaultConfig.models.map((m) => m.key)).toEqual(['mock:local'])
-  })
-
-  it('没有任何需要凭据的内置模型', () => {
-    expect(defaultConfig.models.filter((m) => m.apiKeyRef)).toEqual([])
-  })
-
-  it('默认链只有 mock，且能被识别成「假模型」', () => {
-    expect(defaultConfig.defaults.modelChain).toEqual(['mock:local'])
-    expect(isMockOnly(defaultConfig)).toBe(true)
-  })
-
-  it('配了真实模型后不再判为假', () => {
-    const c = structuredClone(defaultConfig)
-    c.defaults.modelChain = ['zai:glm-5.2', 'mock:local']
-    expect(isMockOnly(c)).toBe(false)
-  })
-
-  it('空链也算「没配」—— 不能当成已就绪', () => {
-    const c = structuredClone(defaultConfig)
-    c.defaults.modelChain = []
-    expect(isMockOnly(c)).toBe(true)
-  })
-
-  it('本地 ollama 模型不需要声明，动态解析', () => {
-    const m = modelMap(defaultConfig)
-    expect(m.has('ollama:gemma4:31b')).toBe(true)
-    expect(m.get('ollama:gemma4:31b')?.model).toBe('gemma4:31b')
-    // 云端 provider 不给这个待遇 —— 拼错模型名会变成一次真实的付费调用
-    expect(m.has('zai:typo')).toBe(false)
-  })
-
-  it('模板文件是合法 JSON 且带真实模型示例', async () => {
-    const raw = await readFile(join(process.cwd(), 'nucleus.config.example.json'), 'utf8')
-    const parsed = JSON.parse(stripJsonComments(raw)) as { models: Array<{ key: string; apiKeyRef?: string }> }
-    expect(parsed.models.length).toBeGreaterThan(1)
-    // 模板里绝不能出现密钥本身，只能有 ref
-    expect(raw).not.toMatch(/sk-[A-Za-z0-9]{10,}/)
-    for (const m of parsed.models) {
-      if (m.apiKeyRef) expect(m.apiKeyRef).toMatch(/^[A-Z0-9_]+$/)
-    }
-  })
-
-  it('内置工具里没有 web_search —— 注册一个必然失败的工具等于宣告不存在的能力', () => {
-    const names = defaultConfig.agents.flatMap((a) => a.toolsAllow)
-    expect(names).not.toContain('web_search')
+  it('entryAgent 指向不存在的 agent 仍然在启动时报错', async () => {
+    // 这条校验还有用：md 文件可以定义任何 id，entryAgent 可能指向没有的那个
+    await expect(withConfig({ defaults: { entryAgent: 'nobody' } })).rejects.toThrow(
+      /entryAgent 指向不存在的 agent/,
+    )
   })
 })
 

@@ -34,7 +34,6 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   const path = explicitPath ?? findConfigFile()
   if (!path) {
     // 没有配置文件也要读 agents/ —— 否则「只用 md 定义专家」这条路走不通
-    declaredInConfigFile = new Set()
     const merged = mergeAgentFiles(defaultConfig, agentsDir(defaultConfig))
     validate(merged.config, '(内置默认)')
     return { config: merged.config, path: null, overrides: [], ...merged.meta }
@@ -54,7 +53,17 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
     throw new Error(`配置文件 ${path} 不是合法 JSON：${(e as Error).message}`)
   }
 
-  declaredInConfigFile = new Set((parsed.agents ?? []).map((a) => a.id))
+  // agents 只能来自 agents/*.md —— 两种来源意味着两条代码路径、
+  // 两个出问题时要看的地方，而那个「来源」列本身就是歧义的补丁。
+  // 拒绝而不是静默忽略：静默忽略会让人以为配置生效了。
+  if (parsed.agents) {
+    throw new Error(
+      `配置文件 ${path} 里不能定义 agents —— 专家改用 agents/*.md，一个专家一个文件。\n` +
+        `  迁移：${(parsed.agents as Array<{ id?: string }>).map((a) => a.id ?? '?').join(', ')}\n` +
+        `  每个跑一次：nucleus agent new <id>，然后把 identity 正文与字段搬进去\n` +
+        `  （正文即 prompt，不必再写成 \\n 转义串）`,
+    )
+  }
   const { config, overrides } = merge(defaultConfig, parsed)
   const merged = mergeAgentFiles(config, agentsDir(config))
   validate(merged.config, path)
@@ -72,10 +81,6 @@ function agentsDir(cfg: NucleusConfig): string {
  * 而且「我明明改了 agents/x.md 却没生效」比反过来更难排查。
  * 冲突会在 agentSources 里显示成文件路径，所以不会是无声的。
  */
-/** 这个 id 是否在用户的配置文件里显式出现过 */
-let declaredInConfigFile = new Set<string>()
-const configHasAgent = (id: string) => declaredInConfigFile.has(id)
-
 function mergeAgentFiles(
   cfg: NucleusConfig,
   dir: string,
@@ -84,10 +89,8 @@ function mergeAgentFiles(
   const cases: Record<string, string[]> = {}
   // 区分「内置默认」与「你的配置文件」—— 它们是两回事：
   // 前者编译进代码（将来会被移除，见 BACKLOG A8），后者是你写的
-  const builtinIds = new Set(defaultConfig.agents.map((a) => a.id))
-  for (const a of cfg.agents) {
-    sources[a.id] = builtinIds.has(a.id) && !configHasAgent(a.id) ? '(内置默认)' : '(配置文件)'
-  }
+  // 只有两种来源了：内置兜底与 md 文件
+  for (const a of cfg.agents) sources[a.id] = '(内置)'
 
   const { files, errors } = loadAgentFiles(dir)
   if (errors.length) {
@@ -221,14 +224,9 @@ function validate(cfg: NucleusConfig, path: string): void {
     )
   }
 
-  // delegate 的目标必须存在，否则编排者会在运行时才发现委派不出去
-  for (const a of cfg.agents) {
-    if (!(a.permissions ?? []).includes('delegate')) continue
-    const targets = cfg.agents.filter((x) => x.id !== a.id)
-    if (targets.length === 0) {
-      errors.push(`agent ${a.id} 有 delegate 权限，但没有任何可委派的目标 agent`)
-    }
-  }
+  // 「有 delegate 权限但没有目标」**不是错误** —— 全新安装还没定义专家时
+  // 就是这个状态，编排者直接作答是正确行为。delegate 工具在无目标时不注册，
+  // 所以模型也看不到它。doctor 会把这件事作为提示报出来。
 
   const mcpIds = new Set<string>()
   for (const s of cfg.mcp ?? []) {

@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -181,43 +181,53 @@ describe('自定义字段的必填', () => {
 // ═══════════════════════════════════════════════════════
 
 describe('配置里声明结果段', () => {
-  async function withConfig(agents: unknown[]) {
+  /** agents 只能来自 md —— JSON 里定义会被拒 */
+  async function withAgentMd(frontmatter: string, body = '你是金融数据分析专家。') {
     const dir = await mkdtemp(join(tmpdir(), 'nuc-rf-'))
-    const p = join(dir, 'nucleus.config.json')
+    await mkdir(join(dir, 'agents'), { recursive: true })
     await writeFile(
-      p,
+      join(dir, 'nucleus.config.json'),
       JSON.stringify({
         models: [{ key: 'mock:local', provider: 'mock', model: 'mock', baseUrl: 'http://mock.invalid/v1' }],
         defaults: { modelChain: ['mock:local'], entryAgent: 'analyst' },
-        agents,
       }),
     )
-    return loadConfig(p)
+    await writeFile(join(dir, 'agents', 'analyst.md'), `---\n${frontmatter}\n---\n${body}\n`)
+    process.env['NUCLEUS_AGENTS_DIR'] = join(dir, 'agents')
+    try {
+      return await loadConfig(join(dir, 'nucleus.config.json'))
+    } finally {
+      delete process.env['NUCLEUS_AGENTS_DIR']
+    }
   }
 
-  const ANALYST = {
-    id: 'analyst',
-    name: '分析师',
-    whenToUse: '需要带出处的量化结论时',
-    identity: '你是金融数据分析专家。',
-    permissions: ['read', 'artifact'],
-    resultFields: METRICS,
-    requiredFields: ['metrics[].source'],
-  }
+  const FM = `name: 分析师
+whenToUse: 需要带出处的量化结论时
+permissions: [read, artifact]
+requiredFields: [metrics[].source]
+resultFields:
+  verdict:
+    type: string
+    description: 一句话结论
+  metrics:
+    type: object[]
+    fields:
+      name: string
+      value: number
+      source: string`
 
   it('声明写错时**启动就报**，而不是等某个 run 提交结果', async () => {
     await expect(
-      withConfig([{ ...ANALYST, resultFields: { summary: { type: 'string' } } }]),
+      withAgentMd('resultFields:\n  summary:\n    type: string'),
     ).rejects.toThrow(/核心字段/)
-    await expect(
-      withConfig([{ ...ANALYST, resultFields: { x: { type: 'date' } } }]),
-    ).rejects.toThrow(/resultFields\.x/)
+    await expect(withAgentMd('resultFields:\n  x:\n    type: date')).rejects.toThrow(/resultFields\.x/)
   })
 
   it('合法声明加载成功并进 agentSpec', async () => {
-    const { config } = await withConfig([ANALYST])
+    const { config } = await withAgentMd(FM)
     const { agentSpec } = await import('../src/config.js')
-    const spec = agentSpec(config.agents[0]!, config.defaults)
+    const a = config.agents.find((x) => x.id === 'analyst')!
+    const spec = agentSpec(a, config.defaults)
     expect(spec.resultSpec?.fields).toMatchObject({ verdict: { type: 'string' } })
     expect(spec.resultSpec?.requiredFields).toEqual(['metrics[].source'])
   })
