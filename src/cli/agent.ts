@@ -41,16 +41,24 @@ export async function agentList(_argv: string[], flags: Record<string, string | 
         return [
           (a.id === entry ? c.cyan('▸ ') : '  ') + a.id,
           a.name,
+          // 「什么时候派给它」——编排者的选路依据，也是人最想先看到的一列
+          a.whenToUse ?? c.red('（未声明）'),
           c.gray(spec.modelChain.join(' → ')),
-          String(spec.toolsAllow.length),
           a.requiredFields?.length ? c.yellow(String(a.requiredFields.length)) : c.gray('0'),
         ]
       }),
-      ['ID', '名称', '模型链', '工具', '必填'],
+      ['ID', '名称', '什么时候派给它', '模型链', '必填'],
     )
     line()
-    line(c.gray(`▸ 表示入口 agent（用户提问先落到它手上）`))
-    line(c.gray(`看某个的完整定义：nucleus agent show <id>`))
+    line(c.gray(`▸ 入口 agent（用户提问先落到它手上）`))
+    const noDomain = n.config.agents.filter((a) => a.id !== entry && !a.whenToUse)
+    if (noDomain.length) {
+      line(
+        `${ICON.warn} ${c.yellow(`${noDomain.length} 个专家没声明 whenToUse`)}` +
+          c.gray(` —— 编排者只能靠 id 猜派给谁：${noDomain.map((a) => a.id).join(', ')}`),
+      )
+    }
+    line(c.gray(`能力边界矩阵：nucleus agent map · 完整定义：nucleus agent show <id>`))
     return 0
   } finally {
     await n.close()
@@ -79,6 +87,10 @@ export async function agentShow(argv: string[], flags: Record<string, string | t
 
     heading(`${id}${isEntry ? c.cyan('（入口）') : ''}`)
     line(`${c.gray('名称')}     ${cfg.name}`)
+    line(
+      `${c.gray('何时用')}   ` +
+        (cfg.whenToUse ?? c.red('（未声明 —— 编排者只能靠 id 猜是否该派给它）')),
+    )
     line(`${c.gray('模型链')}   ${c.cyan(spec.modelChain.join(' → '))}`)
     const window = n.router.contextWindowFor(spec.modelChain, n.config.defaults.assumedContextWindow)
     const declared = spec.modelChain.some(
@@ -107,7 +119,10 @@ export async function agentShow(argv: string[], flags: Record<string, string | t
     const visible = n.tools.forAgent(spec.toolsAllow, spec.toolsDeny).map((t) => t.name)
     const missing = spec.toolsAllow.filter((t) => !t.includes('*') && !n.tools.get(t))
     for (const t of n.tools.forAgent(spec.toolsAllow, spec.toolsDeny)) {
-      line(`  ${t.name.padEnd(24)} ${c.gray(t.sideEffect)} ${c.gray(t.description.slice(0, 44))}`)
+      // 描述可能是多行的（delegate 会列出所有可委派专家），截断会把清单切掉
+      const [head, ...rest] = t.description.split('\n')
+      line(`  ${t.name.padEnd(24)} ${c.gray(t.sideEffect)} ${c.gray(head ?? '')}`)
+      for (const l of rest) line(`  ${' '.repeat(24)} ${' '.repeat(10)} ${c.gray(l.trim())}`)
     }
     if (visible.length === 0) line(c.gray('  （无）'))
     line()
@@ -123,6 +138,14 @@ export async function agentShow(argv: string[], flags: Record<string, string | t
             : '  MCP 工具要加 --mcp 才会被算进来',
         ),
       )
+    }
+    // 委派关系是双向的，两边都要能看到
+    const delegators = n.config.agents.filter(
+      (a) => a.id !== id && a.toolsAllow.includes('delegate') && id !== n.config.defaults.entryAgent,
+    )
+    if (delegators.length) {
+      line()
+      line(c.gray(`可以被这些 agent 派活：${delegators.map((a) => a.id).join(', ')}`))
     }
     // 能不能委派，直接影响是否会形成委派链
     if (visible.includes('delegate')) {
@@ -150,6 +173,93 @@ export async function agentShow(argv: string[], flags: Record<string, string | t
     const schema = resultJsonSchema(spec.resultSpec ?? {})
     for (const l of JSON.stringify(schema, null, 2).split('\n')) line(c.gray(`  ${l}`))
 
+    return 0
+  } finally {
+    await n.close()
+  }
+}
+
+/**
+ * `nucleus agent map` —— 能力边界矩阵。
+ *
+ * 单看每个 agent 的 toolsAllow 很难发现问题；横过来一眼就看得出
+ * 「谁权限过大」「哪个工具人人都能用」「有没有第二个 agent 也能委派
+ * （多一个能委派的就多一条成环的路）」。
+ *
+ * 这张表是 T3 能力边界的全貌 —— 而 T3 是唯一不依赖模型配合的一层。
+ */
+export async function agentMap(_argv: string[], flags: Record<string, string | true>): Promise<number> {
+  const n = await open(flags)
+  try {
+    const entry = n.config.defaults.entryAgent
+    const specs = n.config.agents.map((a) => ({ cfg: a, spec: agentSpec(a, n.config.defaults) }))
+
+    // 列 = 所有被任何 agent 声明过的工具（含通配），按被引用次数排
+    const counts = new Map<string, number>()
+    for (const { spec } of specs) {
+      for (const t of spec.toolsAllow) counts.set(t, (counts.get(t) ?? 0) + 1)
+    }
+    const tools = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([t]) => t)
+
+    heading('能力边界矩阵')
+    if (tools.length === 0) {
+      line(c.gray('没有任何 agent 声明了工具。'))
+      return 0
+    }
+
+    const rows = specs.map(({ cfg, spec }) => [
+      (cfg.id === entry ? c.cyan('▸ ') : '  ') + cfg.id,
+      ...tools.map((t) => {
+        if (spec.toolsDeny?.includes(t)) return c.red('✗')
+        if (!spec.toolsAllow.includes(t)) return c.gray('·')
+        // 声明了但没注册 —— 模型看不到它，却容易被误认为「有这个能力」
+        return t.includes('*') || n.tools.get(t) ? c.green('●') : c.yellow('?')
+      }),
+    ])
+    table(rows, ['AGENT', ...tools])
+
+    line()
+    line(
+      `${c.green('●')} 可用   ${c.gray('·')} 未授予   ${c.red('✗')} 显式拒绝   ` +
+        `${c.yellow('?')} 声明了但未注册（模型看不到）`,
+    )
+
+    // 几条一眼能看出的风险，直接点出来而不是让人自己数
+    const delegators = specs.filter((x) => x.spec.toolsAllow.includes('delegate'))
+    if (delegators.length > 1) {
+      line()
+      line(
+        `${ICON.info} ${delegators.length} 个 agent 能委派（${delegators.map((x) => x.cfg.id).join(', ')}）` +
+          c.gray(` —— 多一个就多一条成环的路，深度上限 ${n.config.defaults.maxDelegationDepth} 是唯一兜底`),
+      )
+    }
+    // 用**声明的副作用等级**判断风险，不靠工具名正则。
+    // 名字正则会把 write_report 也算成「改变外部状态」，而它和 write_file
+    // 一样受 fs.workdir-boundary 约束，只写 run 的工作目录内。
+    // non_idempotent 才是真风险：结果未知时不能自动重跑（§3.2）。
+    const risky = specs
+      .map((x) => ({
+        id: x.cfg.id,
+        tools: n.tools
+          .forAgent(x.spec.toolsAllow, x.spec.toolsDeny)
+          .filter((t) => t.sideEffect === 'non_idempotent')
+          .map((t) => t.name),
+      }))
+      .filter((x) => x.tools.length > 0)
+    if (risky.length) {
+      line(
+        `${ICON.warn} ${c.yellow('可执行不可重试的操作')}：` +
+          risky.map((x) => `${x.id}(${x.tools.join(',')})`).join('  ') +
+          c.gray('  —— 结果未知时不会自动重跑，转 needs_human_confirmation'),
+      )
+    }
+    const idle = specs.filter((x) => x.spec.toolsAllow.length === 0)
+    if (idle.length) {
+      line(
+        `${ICON.warn} ${c.yellow(`${idle.map((x) => x.cfg.id).join(', ')} 没有任何工具`)}` +
+          c.gray(' —— 只能靠 submit_result 直接作答'),
+      )
+    }
     return 0
   } finally {
     await n.close()

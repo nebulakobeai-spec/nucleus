@@ -96,7 +96,11 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
     ref ? (secretCache.get(ref) ?? envSecrets(ref)) : null
 
   const tools = new ToolRegistry()
-  const delegateTargets = config.agents.filter((a) => a.id !== 'orchestrator').map((a) => a.id)
+  // 排除**入口 agent**（entryAgent 已可配，这里曾硬编码 'orchestrator'）——
+  // 派回用户入口没有意义。成环由 maxDelegationDepth 兜底，不靠这里。
+  const delegateTargets = config.agents
+    .filter((a) => a.id !== config.defaults.entryAgent)
+    .map((a) => ({ id: a.id, whenToUse: a.whenToUse }))
   registerBuiltins(tools, {
     store: runs,
     delegateTargets,

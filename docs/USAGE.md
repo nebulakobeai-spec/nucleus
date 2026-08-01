@@ -20,10 +20,12 @@ npm link          # 之后可以直接敲 nucleus
   events <id 前缀>              查看时间轴
 
 agent 与规则
-  agent list                    列出 agent：模型链、工具数、必填字段
+  agent list                    谁负责什么：领域、模型链、必填字段
   agent show <id>               看模型实际收到的 system prompt 与结果契约
+  agent map                     能力边界矩阵：谁能用哪些工具
   rules                         规则清单 + 遵守率
   rules stats                   只看遵守率
+  rules --agent <id>            单个 agent 的规则全貌
 
 凭据
   auth login <REF>              录入 API key（静默输入）
@@ -311,6 +313,81 @@ nucleus agent show researcher --mcp    # 把 MCP 提供的工具也算进可见�
 还会报出两件容易踩的事：`toolsAllow` 里有未注册的工具（拼错工具名或 MCP
 没连上时，模型只是「看不见」它，不会报错），以及这个 agent 能不能委派、
 能派给谁、深度与扇出上限是多少。
+
+### 谁负责什么（编排者的选路依据）
+
+```bash
+nucleus agent list
+```
+
+```
+ID              名称    什么时候派给它                                  模型链
+▸ orchestrator  编排者  用户的入口，不作为委派目标                      ollama:gemma4:31b → …
+  researcher    研究员  需要调研、查资料、核实事实、给出带来源的结论时  ollama:gemma4:31b → …
+  operator      执行者  需要读写文件、整理数据、执行具体操作时          ollama:gemma4:31b → …
+```
+
+`whenToUse` 不只是给人看的 —— 它会写进 `delegate` 的**工具描述**：
+
+```
+把一件事委派给专家。可选专家：
+  - researcher：需要调研、查资料、核实事实、给出带来源的结论时
+  - operator：需要读写文件、整理数据、执行具体操作时
+```
+
+不写的话编排者只能看到 id 字符串去猜。`researcher` / `operator` 这种英文常用词
+还能猜对，加一个 `reviewer` 或两个相近的（`web-researcher` / `data-analyst`）
+就会派错。**这是编排质量问题，不只是可视化问题。** 没声明的专家，
+`agent list` 会显式警告。
+
+### 所有 agent 的能力边界
+
+```bash
+nucleus agent map
+```
+
+```
+AGENT           delegate  read_file  write_file  write_report
+▸ orchestrator  ●         ·          ·           ·
+  researcher    ·         ·          ·           ●
+  operator      ·         ●          ●           ·
+
+● 可用   · 未授予   ✗ 显式拒绝   ? 声明了但未注册（模型看不到）
+```
+
+横过来看才发现得了的事：谁权限过大、哪个工具人人都能用、有没有第二个 agent
+也能委派（多一个就多一条成环的路）。这张表就是 **T3 能力边界的全貌** ——
+而 T3 是唯一不依赖模型配合的一层。
+
+底下会点出两类风险：多个 agent 能委派、以及**谁能执行不可重试的操作**
+（按工具**声明的** `side_effect_class` 判断，不按工具名猜 ——
+`write_report` 只写数据库，不该被算成改变外部状态）。
+
+### 单个 agent 的规则全貌
+
+```bash
+nucleus rules --agent researcher
+```
+
+按三层分开列，并且**只列它实际会碰到的**运行时规则：
+
+```
+researcher 的规则
+负责领域 需要调研、查资料、核实事实、给出带来源的结论时
+
+T3 能力边界
+  可用工具 write_report
+
+T2 结果契约
+  findings[].sources
+
+会碰到的运行时规则
+  （无 —— 它的工具集触发不到任何一条）
+触发不到（缺相应工具）：fs.workdir-boundary, delegate.max-depth, …
+```
+
+「触发不到」这一行是有意留的：把全部规则一股脑列出来会让人分不清哪条真的
+约束着它。可达性按规则**声明的强制工具**算，不按名字猜。
 
 ### 加一个专家 agent
 

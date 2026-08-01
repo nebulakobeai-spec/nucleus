@@ -30,6 +30,15 @@ export interface RuleSpec {
   enforcedBy: string
   /** 是否可由配置调整 */
   configurable: string | null
+  /**
+   * 哪些工具会强制它。
+   *
+   * 用来判断「某个 agent 是否可能触发这条规则」。必须**声明**而不是从
+   * 工具名猜 —— 我一度用 `/^(read|write)_/` 去匹配，结果把 write_report
+   * 也算成受 fs.workdir-boundary 约束（它自己构造路径、只写数据库，
+   * 根本没有那个前置检查），显示出来是假的。
+   */
+  tools: string[]
 }
 
 /** 引用处用这些常量而不是手写字符串 */
@@ -47,6 +56,7 @@ export const RULES: readonly RuleSpec[] = [
     what: '文件路径必须是工作目录内的相对路径，拒绝绝对路径与 .. 穿越',
     enforcedBy: 'read_file / write_file 的 precondition',
     configurable: null,
+    tools: ['read_file', 'write_file'],
   },
   {
     id: RULE.delegateKnownAgent,
@@ -54,6 +64,7 @@ export const RULES: readonly RuleSpec[] = [
     what: '只能委派给配置里存在的 agent',
     enforcedBy: 'delegate 的 precondition',
     configurable: 'agents',
+    tools: ['delegate'],
   },
   {
     id: RULE.delegateMaxDepth,
@@ -61,6 +72,7 @@ export const RULES: readonly RuleSpec[] = [
     what: '委派链深度到顶后不再往下派，改为自己完成或直接提交',
     enforcedBy: 'delegate 的 precondition',
     configurable: 'defaults.maxDelegationDepth',
+    tools: ['delegate'],
   },
   {
     id: RULE.delegateMaxFanout,
@@ -68,6 +80,7 @@ export const RULES: readonly RuleSpec[] = [
     what: '一棵任务树的 run 总数到顶后不再派新任务',
     enforcedBy: 'delegate 的 precondition',
     configurable: 'defaults.maxRunsPerRoot',
+    tools: ['delegate'],
   },
 ]
 

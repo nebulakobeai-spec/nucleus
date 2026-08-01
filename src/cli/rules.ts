@@ -1,5 +1,6 @@
 import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
+import { agentSpec } from '../config.js'
 import { RULES, ruleSpec } from '../runtime/rules.js'
 import { c, heading, ICON, line, strFlag, table } from './ui.js'
 
@@ -39,6 +40,18 @@ export async function rulesCmd(argv: string[], flags: Record<string, string | tr
   const days = Number(strFlag(flags, 'since') ?? 30)
 
   try {
+    const only = strFlag(flags, 'agent')
+    if (only) {
+      const cfg = n.config.agents.find((a) => a.id === only)
+      if (!cfg) {
+        line(c.red(`没有 agent「${only}」`))
+        line(c.gray(`现有：${n.config.agents.map((a) => a.id).join(', ')}`))
+        return 1
+      }
+      printAgentRules(n, only)
+      await printAdherence(n, days, only)
+      return 0
+    }
     if (argv[0] !== 'stats') {
       printRuleList(n)
     }
@@ -89,8 +102,62 @@ function printRuleList(n: Nucleus): void {
   )
 }
 
-async function printAdherence(n: Nucleus, days: number): Promise<void> {
+/**
+ * 单个 agent 视角的规则全貌。
+ *
+ * 只列**这个 agent 实际会碰到**的规则 —— fs.workdir-boundary 对没有文件
+ * 工具的 agent 是空文；delegate.* 对不能委派的 agent 也是。把全部规则一股脑
+ * 列出来会让人分不清哪条真的约束着它。
+ */
+function printAgentRules(n: Nucleus, id: string): void {
+  const cfg = n.config.agents.find((a) => a.id === id)!
+  const spec = agentSpec(cfg, n.config.defaults)
+  const tools = n.tools.forAgent(spec.toolsAllow, spec.toolsDeny).map((t) => t.name)
+
+  heading(`${id} 的规则`)
+  line(`${c.gray('负责领域')} ${cfg.whenToUse ?? c.red('（未声明）')}`)
+  line(`${c.gray('是否入口')} ${n.config.defaults.entryAgent === id ? c.cyan('是') : c.gray('否')}`)
+
+  heading('T3 能力边界')
+  line(`  ${c.gray('可用工具')} ${tools.join(', ') || c.gray('（无）')}`)
+  if (spec.toolsDeny?.length) line(`  ${c.gray('显式拒绝')} ${spec.toolsDeny.join(', ')}`)
+  const unavailable = spec.toolsAllow.filter((t) => !t.includes('*') && !n.tools.get(t))
+  if (unavailable.length) {
+    line(`  ${ICON.warn} ${c.yellow('声明了但未注册')}：${unavailable.join(', ')}`)
+  }
+  line(c.gray('  这一层最强：不给工具，模型无从违反，成本为零'))
+
+  heading('T2 结果契约')
+  if (cfg.requiredFields?.length) {
+    for (const f of cfg.requiredFields) line(`  ${c.yellow(f)}`)
+    line(c.gray('  缺了会被退回并把缺项告知模型，重试上限内改对即可'))
+  } else {
+    line(c.gray('  只有核心字段（status / summary / artifacts）'))
+  }
+
+  // 只列它可能触发的运行时规则
+  heading('会碰到的运行时规则')
+  // 按规则**声明**的强制工具判断，不猜名字
+  const reachable = RULES.filter((r) => r.tools.length === 0 || r.tools.some((t) => tools.includes(t)))
+  if (reachable.length === 0) {
+    line(c.gray('  （无 —— 它的工具集触发不到任何一条）'))
+  }
+  for (const r of reachable) {
+    line(`  ${c.yellow(r.id.padEnd(24))} ${r.what}`)
+    line(c.gray(`  ${' '.repeat(24)} 由 ${r.enforcedBy} 强制${r.configurable ? ` · 配置项 ${r.configurable}` : ''}`))
+  }
+
+  const notReachable = RULES.filter((r) => !reachable.includes(r))
+  if (notReachable.length) {
+    line()
+    line(c.gray(`触发不到（缺相应工具）：${notReachable.map((r) => r.id).join(', ')}`))
+  }
+}
+
+async function printAdherence(n: Nucleus, days: number, agentId?: string): Promise<void> {
   const since = new Date(Date.now() - days * 86_400_000).toISOString()
+  // 按 agent 过滤时 join runs 取 agent_id
+  const agentJoin = agentId ? `join runs r on r.id = a.run_id and r.agent_id = '${agentId.replace(/'/g, "''")}'` : ''
 
   // 分母：**有契约要满足**的 attempt。
   // 委派用的 attempt 从不提交结果，算进去只会把数字冲淡。
@@ -100,6 +167,7 @@ async function printAdherence(n: Nucleus, days: number): Promise<void> {
               count(e.id) filter (where e.kind = 'contract.rejected') as rejections,
               count(e.id) filter (where e.kind = 'contract.accepted') as accepted
          from run_attempts a
+         ${agentJoin}
          left join run_events e on e.run_attempt_id = a.id
         where a.provider is not null
           and a.created_at >= $1
@@ -117,7 +185,7 @@ async function printAdherence(n: Nucleus, days: number): Promise<void> {
     [since],
   )
 
-  heading(`遵守率（最近 ${days} 天）`)
+  heading(`遵守率（最近 ${days} 天${agentId ? ` · ${agentId}` : ''}）`)
   if (models.rows.length === 0) {
     line(c.gray('还没有需要满足结果契约的 attempt。'))
     line(c.gray('跑一轮真实任务后再看：nucleus ask "..." --model <模型>'))

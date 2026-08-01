@@ -95,6 +95,18 @@ export interface AgentConfig {
   id: string
   /** 显示名 */
   name: string
+  /**
+   * 一句话说清**什么时候该派给它**。
+   *
+   * 与 identity 的区别很要紧：identity 是第二人称、给这个 agent 自己读的
+   * （「你是研究专家…」）；whenToUse 是第三人称、给**编排者**读的选路依据。
+   *
+   * 没有它的时候，编排者只能看到 agent 的 id 字符串去猜派给谁 ——
+   * `researcher` 这种英文常用词还能猜对，加一个 `reviewer` 或两个相近的
+   * （`web-researcher` / `data-analyst`）就会派错。这不是可视化问题，
+   * 是编排质量问题。
+   */
+  whenToUse?: string
   /** identity + policy 的正文；prefix 由它们拼成，必须逐字节稳定 */
   identity: string
   policy?: string
@@ -275,6 +287,7 @@ export const defaultConfig: NucleusConfig = {
     {
       id: 'orchestrator',
       name: '编排者',
+      whenToUse: '用户的入口，不作为委派目标',
       identity: `你是编排者，用户的唯一入口。
 理解需求 → 拆解 → 委派给专家 → 整合结果。
 你自己不执行具体工作，一律委派。`,
@@ -284,6 +297,7 @@ export const defaultConfig: NucleusConfig = {
     {
       id: 'researcher',
       name: '研究员',
+      whenToUse: '需要调研、查资料、核实事实、给出带来源的结论时',
       identity: `你是研究专家，负责调研与信息收集。
 结论必须标注来源。`,
       // 搜索能力靠 MCP 提供 —— 配了搜索服务后把工具名加进来
@@ -294,6 +308,7 @@ export const defaultConfig: NucleusConfig = {
     {
       id: 'operator',
       name: '执行者',
+      whenToUse: '需要读写文件、整理数据、执行具体操作时',
       identity: `你是执行专家，负责脚本执行与文件操作。
 限制输出规模，只返回关键信息。`,
       toolsAllow: ['read_file', 'write_file'],

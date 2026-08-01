@@ -132,18 +132,38 @@ export interface DelegateLimits {
  * 模型收到明确原因后可以改成自己做或直接 submit。这比让 run 失败更好：
  * 委派不下去不代表任务做不成。
  */
+/** 可委派的目标：id 加一句「什么时候派给它」 */
+export interface DelegateTarget {
+  id: string
+  whenToUse?: string | undefined
+}
+
 export function delegateTool(
   store: RunStore,
-  allowedAgents: string[],
+  targets: DelegateTarget[],
   limits: DelegateLimits,
 ): ToolDefinition {
+  const allowedAgents = targets.map((t) => t.id)
+  /**
+   * 把每个专家的适用场景写进工具描述。
+   *
+   * 只给 id 列表时，编排者只能靠名字猜派给谁 —— 加一个 `reviewer`
+   * 或两个相近的专家就会派错。选路依据必须写在模型看得见的地方。
+   */
+  const roster = targets
+    .map((t) => `  - ${t.id}${t.whenToUse ? `：${t.whenToUse}` : ''}`)
+    .join('\n')
+
   return {
     name: 'delegate',
-    description: `把一件事委派给专家。可选专家：${allowedAgents.join(', ')}`,
+    description:
+      targets.length === 0
+        ? '把一件事委派给专家。当前没有可委派的专家。'
+        : `把一件事委派给专家。可选专家：\n${roster}`,
     parameters: {
       type: 'object',
       properties: {
-        agent: { type: 'string', enum: allowedAgents },
+        agent: { type: 'string', enum: allowedAgents, description: '专家 id，见上方清单' },
         task: { type: 'string', description: '给专家的完整任务描述，包含必要上下文与验收标准' },
       },
       required: ['agent', 'task'],
@@ -227,7 +247,7 @@ export function delegateTool(
 
 export function registerBuiltins(
   registry: ToolRegistry,
-  opts: { store: RunStore; delegateTargets: string[]; delegateLimits: DelegateLimits },
+  opts: { store: RunStore; delegateTargets: DelegateTarget[]; delegateLimits: DelegateLimits },
 ): void {
   registry.register(readFileTool)
   registry.register(writeFileTool)
