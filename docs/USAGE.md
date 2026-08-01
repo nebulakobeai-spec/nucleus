@@ -700,7 +700,7 @@ nucleus runs <id>      # run 树里每个节点都带成本
 ## 开发时
 
 ```bash
-npm test              # 275 个测试，全离线
+npm test              # 全离线，不需要数据库、不需要网络、不烧 token
 npm run test:watch
 npm run typecheck
 npm run build
@@ -712,7 +712,45 @@ npm run build
 nucleus ask "..." --mock
 ```
 
-mock 脚本在 `src/cli/index.ts` 的 `DEMO_SCRIPT` 里，改它可以模拟任意模型行为（包括故意的失败、循环、格式错误）—— 用来验证护栏是否生效，比等真模型犯错快得多。
+mock 脚本在 `src/cli/index.ts` 的 `DEMO_SCRIPT` 里，改它可以模拟任意模型行为（包括故意的失败、循环、格式错误）—— 用来验证护栏是否生效，比等真模型犯错快得多。`MockTurn.tools` 可以让一轮返回**多个** tool_call，用来测多专家并发委派。
+
+### 对着真模型验一遍
+
+```bash
+npm run test:live                                  # 需要本机 ollama
+NUCLEUS_LIVE_FAST_MODEL=llama3.2:latest npm run test:live
+NUCLEUS_LIVE_MODEL=gemma4:31b npm run test:live
+```
+
+离线测试保证的是「我们解析得对」，保证不了「模型现在还这么答」—— 模型换版本、
+ollama 换实现、我们改 prompt 都会让结论失效，而离线测试照样全绿。这一层就是
+补这个缺口：真调用、真数据库、真校验器。
+
+跑什么：
+
+| 用例 | 验的是 |
+|---|---|
+| 思考进 `reasoning` 不混进 `content` | 推理模型的响应被正确拆开 |
+| `submit_result` 过我们的校验器 | 真模型对结果契约的遵守情况（含 `findings[].sources`） |
+| 预算不足被识别为截断 | `finishReason === 'length'`，而不是误判成「模型不肯调工具」 |
+| 完整编排跑到静止 | 委派 → 专家 → wake → 整合，且**没有悬挂状态** |
+| 上下文装配用的是配置里的窗口 | `contextWindow` 生效，没有回落到假设值 |
+
+三条设计约束：
+
+- **只断言结构，不断言内容。** 模型每次输出都不同，断言「summary 里要提到 X」
+  会变成随机失败。断言的是：调了工具、参数是完整 JSON、校验器跑得完、
+  thinking 没混进 content。
+- **遵守率是报出来的，不是断言的。** 模型不遵守契约是模型的事实，不是我们的
+  bug —— 用例会把结果打进日志（`[live] gemma4:31b 契约遵守：一次通过`），
+  硬断言只到「我们能解析」。
+- **环境不齐就红，不报绿。** ollama 连不上时输出是「1 failed（说清原因）+
+  其余 skipped」。没有真模型却报全绿等于说谎 —— 这一层原本就是空的
+  （目录里没有匹配 `*.test.ts` 的文件，命令直接 no test files 退出），
+  假绿只是把同一个问题换层皮。
+
+慢的部分刻意用小模型（默认 `deepseek-r1:1.5b`）：本机 31B 一次调用几十秒，
+整条编排要几分钟。管线连通性用小模型验，模型能力用 `NUCLEUS_LIVE_MODEL` 单测。
 
 ---
 
