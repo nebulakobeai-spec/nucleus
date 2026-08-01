@@ -25,6 +25,7 @@ import {
   type ValidationFailure,
 } from './result-schema.js'
 import { assemble, DEFAULT_BUDGET } from '../context/assemble.js'
+import { envelopeSizes } from './envelope.js'
 import type { Permission } from './permissions.js'
 import type { RunEventSink } from './events.js'
 
@@ -75,6 +76,16 @@ interface UsageAcc {
   modelKey: string | null
   /** 上下文装配的分段用量，落库用于事后判断「是不是被裁掉了关键信息」 */
   contextBreakdown?: unknown
+}
+
+/** 委派的可统计事实：目标专家、选择理由、信封各段长度 */
+function delegateFacts(args: unknown): Record<string, unknown> {
+  const a = (args ?? {}) as { agent?: string; why?: string }
+  return {
+    target: a.agent ?? null,
+    why: typeof a.why === 'string' ? a.why : null,
+    envelope: envelopeSizes(args),
+  }
 }
 
 export interface RunOutcome {
@@ -574,6 +585,10 @@ export class Runner {
       tool: def.name,
       sideEffect: def.sideEffect,
       argsHash: ctx.fingerprint,
+      // 委派额外记下：派给谁、为什么、信封各段多长。
+      // 「派得对不对」与「信封写得够不够」都得靠这些才能事后统计 ——
+      // 硬规则只挡空值，写得敷衍只能靠度量发现
+      ...(def.name === 'delegate' ? delegateFacts(args) : {}),
     })
     const invocationId = await this.#store.recordIntent({
       runAttemptId: ctx.attemptId,

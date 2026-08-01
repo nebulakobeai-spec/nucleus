@@ -23,8 +23,8 @@ const FANOUT: MockScript = {
     {
       text: '这件事要两路并行。',
       tools: [
-        { name: 'delegate', args: { agent: 'researcher', task: '调研 A' } },
-        { name: 'delegate', args: { agent: 'operator', task: '准备 B' } },
+        { name: 'delegate', args: { agent: 'researcher', goal: '调研 A', context: '（测试用信封）', acceptance: '给出结论', why: '测试' } },
+        { name: 'delegate', args: { agent: 'operator', goal: '准备 B', context: '（测试用信封）', acceptance: '给出结论', why: '测试' } },
       ],
     },
     // ↓ 两个专家都完成后才会走到这里
@@ -176,14 +176,14 @@ describe('委派闸门', () => {
       deps: { clock: new FakeClock(), ids: new FakeIds() },
       mock: {
         orchestrator: [
-          { tool: { name: 'delegate', args: { agent: 'researcher', task: 'x' } } },
+          { tool: { name: 'delegate', args: { agent: 'researcher', goal: 'x', context: '（测试用信封）', acceptance: '给出结论', why: '测试' } } },
           { submit: { status: 'ok', summary: '收尾', artifacts: [] } },
         ],
         // 每个 researcher 先试着再派一个，被拒后才 submit ——
         // 这正是我们希望模型做的：拿到拒绝原因就改路
         researcher: Array.from({ length: 40 }, (_, i) =>
           i % 2 === 0
-            ? { tool: { name: 'delegate', args: { agent: 'researcher', task: 'x' } } }
+            ? { tool: { name: 'delegate', args: { agent: 'researcher', goal: 'x', context: '（测试用信封）', acceptance: '给出结论', why: '测试' } } }
             : {
                 submit: {
                   status: 'ok',

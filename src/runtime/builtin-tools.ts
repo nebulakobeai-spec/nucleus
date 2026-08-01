@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { envelopeJsonSchema, envelopeSizes, validateEnvelope } from './envelope.js'
 import { RULE } from './rules.js'
 import { dirname, isAbsolute, join, normalize, relative } from 'node:path'
 import type { RunStore } from '../store/runs.js'
@@ -170,9 +171,15 @@ export function delegateTool(
       type: 'object',
       properties: {
         agent: { type: 'string', enum: allowedAgents, description: '专家 id，见上方清单' },
-        task: { type: 'string', description: '给专家的完整任务描述，包含必要上下文与验收标准' },
+        ...envelopeJsonSchema(),
+        why: {
+          type: 'string',
+          description:
+            '为什么选这个专家（一句话）。它不会传给专家 —— 只用于事后核对' +
+            '「派得对不对」，所以写你真实的判断依据。',
+        },
       },
-      required: ['agent', 'task'],
+      required: ['agent', 'goal', 'context', 'acceptance', 'why'],
     },
     requires: ['delegate'],
     sideEffect: 'idempotent',
@@ -183,6 +190,21 @@ export function delegateTool(
           ok: false,
           content: `未知专家 ${a.agent}。可选：${allowedAgents.join(', ')}`,
           rule: RULE.delegateKnownAgent,
+          errorCode: 'tool.denied',
+        }
+      }
+
+      // 信封必须自足：专家看不到会话历史，这里漏了它就无从得知。
+      // 挡在 precondition 而不是靠工具描述劝导 —— 被拒的调用视为从未发生，
+      // 模型收到缺了哪一项后补上重来即可。
+      const problems = validateEnvelope(args)
+      if (problems.length) {
+        return {
+          ok: false,
+          content:
+            `任务信封不完整：\n${problems.map((p) => `- ${p.message}`).join('\n')}\n` +
+            `专家看不到这段对话，信封里没写的它一概不知道。`,
+          rule: RULE.delegateEnvelope,
           errorCode: 'tool.denied',
         }
       }
@@ -216,14 +238,16 @@ export function delegateTool(
       return null
     },
     execute: async (args, ctx) => {
-      const a = args as { agent: string; task: string }
+      const a = args as { agent: string; goal: string; context: string; acceptance: string; why?: string }
       const parent = await store.getRun(ctx.runId)
       const child = await store.createRun({
         agentId: a.agent,
         parentRunId: ctx.runId,
         rootRunId: parent?.rootRunId ?? ctx.runId,
         depth: (parent?.depth ?? 0) + 1,
-        input: { task: a.task },
+        // 只存信封三段。why 不进 —— 它是「派给谁」的推理，
+        // 对干活的专家无关，写进去还可能带偏它
+        input: { goal: a.goal, context: a.context, acceptance: a.acceptance },
         // 注意：没有 conversationId
       })
       await store.enqueueAttempt(child.id)

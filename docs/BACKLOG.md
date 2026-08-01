@@ -13,7 +13,7 @@
 
 顺序有依赖，不能打乱：
 
-1. **任务信封结构化** —— `delegate({agent, goal, context, acceptance, why})`
+1. ~~**任务信封结构化**~~ ✅ 已完成 —— `delegate({agent, goal, context, acceptance, why})`
    替掉现在的自由字符串 `task`，并定义专家实际收到的**渲染**。
    为什么先做：专家**看不到会话历史**（刻意设计，它没有对外身份），
    所以信封必须自足；而现在「包含必要上下文与验收标准」只是工具描述里的一句
@@ -21,6 +21,16 @@
    缺失率也能统计。
    附带：`why`（为什么选这个专家）让选择依据显式化，派错时它就是诊断材料。
    **必须先于 4/5**：`agent new` 的骨架里要写明「你的专家会收到什么」。
+
+   已做：`src/runtime/envelope.ts`（校验 + 渲染 + 尺寸度量）、
+   新规则 `delegate.envelope-complete`、`tool.intent` 里记下
+   `target` / `why` / 各段长度（供第 15 条「委派准确率」用）、
+   兼容老的 `{task}` 形状（数据库里已有的 run 不能因为 schema 变了就读不出来）。
+
+   **遗留**：`test/fixtures/gemma4/orchestrator-delegate.json` 是真实录制，
+   录制时参数还是 `{agent, task}`。已按新信封适配，原文保留在
+   `adaptedFrom.originalArguments` 里可审计 —— 但那不再是纯粹的录制。
+   `[需要你]` 在能访问 ollama 的机器上用新 schema 重新采集一次。
 
 2. **可声明的结果段** —— 替掉写死在 TS 里的 `'research' | 'code'`。
    现在 `CAPABILITY_SCHEMAS` 是硬编码的两个段，所以你没法让一个金融分析专家

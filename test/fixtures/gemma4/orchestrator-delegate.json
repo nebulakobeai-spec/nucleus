@@ -1,5 +1,5 @@
 {
-  "note": "gemma4:31b 真实响应，curl 采集",
+  "note": "gemma4:31b 真实响应，curl 采集。⚠ delegate 的参数形状已按新信封适配，见 adaptedFrom —— 不是原始录制。",
   "model": "gemma4:31b",
   "response": {
     "id": "chatcmpl-270",
@@ -21,7 +21,7 @@
               "type": "function",
               "function": {
                 "name": "delegate",
-                "arguments": "{\"agent\":\"researcher\",\"task\":\"请针对向量数据库（Vector Database）进行深度的选型调研。研究内容需涵盖以下方面：\\n\\n1. 主流产品清单：包括但不限于 Milvus, Pinecone, Weaviate, Qdrant, Chroma, FAISS, 以及集成向量功能的传统数据库（如 pgvector/PostgreSQL）。\\n2. 核心维度对比分析：针对上述产品，从以下维度进行详细对比：\\n    - 架构设计：(分布式 vs 单机，托管服务 vs 自建)\\n    - 性能指标：(索引速度、检索延迟、并发能力等)\\n    - 功能特性：(支持的索引算法如 HNSW/IVF, 是否支持混合搜索 Hybrid Search, 元数据过滤能力)\\n    - 易用性与生态：(API 支持, 文档完善程度, 社区活跃度)\\n    - 成本模型：(开源免费 vs 按量付费)\\n3. 适用场景推荐：针对不同的业务规模（如原型开发、中型应用、超大规模数据集）和技术栈，给出具体的选型建议。\\n4. 总结性对比表格：提供一个清晰的矩阵表，方便快速对比核心指标。\\n\\n请以结构化报告的形式输出。\"}"
+                "arguments": "{\"agent\": \"researcher\", \"goal\": \"请针对向量数据库（Vector Database）进行深度的选型调研。研究内容需涵盖以下方面：\\n\\n1. 主流产品清单：包括但不限于 Milvus, Pinecone, Weaviate, Qdrant, Chroma, FAISS, 以及集成向量功能的传统数据库（如 pgvector/PostgreSQL）。\\n2. 核心维度对比分析：针对上述产品，从以下维度进行详细对比：\\n    - 架构设计：(分布式 vs 单机，托管服务 vs 自建)\\n    - 性能指标：(索引速度、检索延迟、并发能力等)\\n    - 功能特性：(支持的索引算法如 HNSW/IVF, 是否支持混合搜索 Hybrid Search, 元数据过滤能力)\\n    - 易用性与生态：(API 支持, 文档完善程度, 社区活跃度)\\n    - 成本模型：(开源免费 vs 按量付费)\\n3. 适用场景推荐：针对不同的业务规模（如原型开发、中型应用、超大规模数据集）和技术栈，给出具体的选型建议。\\n4. 总结性对比表格：提供一个清晰的矩阵表，方便快速对比核心指标。\\n\\n请以结构化报告的形式输出。\", \"context\": \"（适配时补的，录制里没有这一段）用户只给了一句话需求，没有更多约束。\", \"acceptance\": \"（适配时补的）给出主流产品对比与选型建议，结论标注来源。\", \"why\": \"（适配时补的）需要调研与信息整理\"}"
               }
             }
           ]
@@ -34,5 +34,11 @@
       "completion_tokens": 441,
       "total_tokens": 871
     }
+  },
+  "adaptedFrom": {
+    "why": "录制时 delegate 的参数是 { agent, task }。此后信封结构化为 { agent, goal, context, acceptance, why }，旧形状会被 delegate.envelope-complete 规则拒绝。",
+    "changed": "仅把 task 的原文移入 goal，另外三段是补的（录制里不存在）。模型的意图（派给 researcher 做这件事）未改动。",
+    "originalArguments": "{\"agent\":\"researcher\",\"task\":\"请针对向量数据库（Vector Database）进行深度的选型调研。研究内容需涵盖以下方面：\\n\\n1. 主流产品清单：包括但不限于 Milvus, Pinecone, Weaviate, Qdrant, Chroma, FAISS, 以及集成向量功能的传统数据库（如 pgvector/PostgreSQL）。\\n2. 核心维度对比分析：针对上述产品，从以下维度进行详细对比：\\n    - 架构设计：(分布式 vs 单机，托管服务 vs 自建)\\n    - 性能指标：(索引速度、检索延迟、并发能力等)\\n    - 功能特性：(支持的索引算法如 HNSW/IVF, 是否支持混合搜索 Hybrid Search, 元数据过滤能力)\\n    - 易用性与生态：(API 支持, 文档完善程度, 社区活跃度)\\n    - 成本模型：(开源免费 vs 按量付费)\\n3. 适用场景推荐：针对不同的业务规模（如原型开发、中型应用、超大规模数据集）和技术栈，给出具体的选型建议。\\n4. 总结性对比表格：提供一个清晰的矩阵表，方便快速对比核心指标。\\n\\n请以结构化报告的形式输出。\"}",
+    "todo": "在能访问 ollama 的机器上用新 schema 重新采集，然后删掉这一段。"
   }
 }

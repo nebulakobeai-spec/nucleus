@@ -137,7 +137,7 @@ describe('端到端：编排者 → 专家 → 结果回流', () => {
 
     const scripts = {
       orchestrator: [
-        stubCompletion({ toolCalls: [{ name: 'delegate', args: { agent: 'albert', task: '调研 X' } }] }),
+        stubCompletion({ toolCalls: [{ name: 'delegate', args: { agent: 'albert', goal: '调研 X', context: '（测试用信封）', acceptance: '给出结论', why: '测试' } }] }),
         // 被唤醒后的第二次 attempt：整合并提交
         stubCompletion({
           toolCalls: [{ name: 'submit_result', args: { status: 'ok', summary: 'X 的调研已完成，结论见报告' } }],

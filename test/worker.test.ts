@@ -16,7 +16,7 @@ let n: Nucleus
 
 const SCRIPT: MockScript = {
   orchestrator: [
-    { tool: { name: 'delegate', args: { agent: 'researcher', task: '去查' } } },
+    { tool: { name: 'delegate', args: { agent: 'researcher', goal: '去查', context: '（测试用信封）', acceptance: '给出结论', why: '测试' } } },
     { submit: { status: 'ok', summary: '整合完毕' } },
   ],
   researcher: [

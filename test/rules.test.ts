@@ -188,7 +188,7 @@ describe('契约事件', () => {
     n = await bootWith(
       {
         orchestrator: [
-          { tool: { name: 'delegate', args: { agent: 'researcher', task: 'x' } } },
+          { tool: { name: 'delegate', args: { agent: 'researcher', goal: 'x', context: '（测试用信封）', acceptance: '给出结论', why: '测试' } } },
           { submit: { status: 'ok', summary: '整合完成', artifacts: [] } },
         ],
         researcher: [{ submit: GOOD }],
@@ -265,7 +265,7 @@ describe('遵守率', () => {
     n = await bootWith(
       {
         orchestrator: [
-          { tool: { name: 'delegate', args: { agent: 'researcher', task: 'x' } } },
+          { tool: { name: 'delegate', args: { agent: 'researcher', goal: 'x', context: '（测试用信封）', acceptance: '给出结论', why: '测试' } } },
           { submit: { status: 'ok', summary: '整合完成', artifacts: [] } },
         ],
         researcher: [{ submit: GOOD }],

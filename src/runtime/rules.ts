@@ -47,6 +47,7 @@ export const RULE = {
   delegateKnownAgent: 'delegate.known-agent',
   delegateMaxDepth: 'delegate.max-depth',
   delegateMaxFanout: 'delegate.max-fanout',
+  delegateEnvelope: 'delegate.envelope-complete',
 } as const
 
 export const RULES: readonly RuleSpec[] = [
@@ -64,6 +65,14 @@ export const RULES: readonly RuleSpec[] = [
     what: '只能委派给配置里存在的 agent',
     enforcedBy: 'delegate 的 precondition',
     configurable: 'agents',
+    tools: ['delegate'],
+  },
+  {
+    id: RULE.delegateEnvelope,
+    scope: 'precondition',
+    what: '委派时必须给出目标、背景、验收标准 —— 专家看不到会话历史，信封必须自足',
+    enforcedBy: 'delegate 的 precondition',
+    configurable: null,
     tools: ['delegate'],
   },
   {

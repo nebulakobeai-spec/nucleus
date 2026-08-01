@@ -6,6 +6,7 @@ import { ConversationStore } from '../store/conversations.js'
 import { Runner, type AgentSpec } from './runner.js'
 import { Reconciler } from './reconciler.js'
 import type { RunEventSink } from './events.js'
+import { renderEnvelope } from './envelope.js'
 import type { ChatMessage } from '../providers/types.js'
 
 export interface WorkerOptions {
@@ -302,8 +303,9 @@ export class Worker {
       const recent = await this.#conversations.recent(conversationId, 50)
       history.push(...this.#conversations.toChatMessages(recent))
     } else {
-      const task = (input as { task?: string })?.task
-      turn.push({ role: 'user', content: task ?? JSON.stringify(input ?? {}) })
+      // 子 run：任务信封。渲染集中在 envelope.ts —— 以前这里是
+      // `task ?? JSON.stringify(input)`，信封一结构化就会变成一坨 JSON 怼给专家
+      turn.push(renderEnvelope(input))
     }
 
     // 已完成的子 run：把结果作为信封的一部分传上来（引用而非全文）

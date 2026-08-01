@@ -35,7 +35,13 @@ const DEMO_SCRIPT: MockScript = {
   orchestrator: [
     {
       text: '这件事需要调研，我委派给专家。',
-      tool: { name: 'delegate', args: { agent: 'researcher', task: '调研目标主题，产出带来源的要点' } },
+      tool: { name: 'delegate', args: {
+        agent: 'researcher',
+        goal: '调研目标主题，给出可选方案与取舍',
+        context: '用户只给了一句话需求，没有更多约束；本机没有配搜索服务，用已有知识作答。',
+        acceptance: '至少两个候选方案，每条结论标注来源；完整内容写成 artifact。',
+        why: '需要调研与信息整理，researcher 的职责范围',
+      } },
     },
     // ↓ 被 wake 唤醒后的第 2 次 attempt
     {
