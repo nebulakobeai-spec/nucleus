@@ -146,6 +146,11 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
   })
 
   const worker = new Worker(db, deps, runner, agentMap(config), events, {
+    retryPolicy: {
+      maxAttempts: config.defaults.maxAttempts,
+      baseMs: config.defaults.retryBaseMs,
+      capMs: config.defaults.retryCapMs,
+    },
     workerId: config.runtime.workerId,
     leaseMs: config.runtime.leaseMs,
     workdirRoot: config.runtime.workdirRoot,

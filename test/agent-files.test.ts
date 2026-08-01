@@ -9,7 +9,7 @@ import {
   parseFrontmatter,
 } from '../src/config/agent-files.js'
 import { loadConfig } from '../src/config-file.js'
-import { agentSpec, buildSystemPrompt } from '../src/config.js'
+import { agentSpec, buildSystemPrompt, defaultConfig } from '../src/config.js'
 import { assemble, DEFAULT_BUDGET } from '../src/context/assemble.js'
 
 /**
@@ -268,15 +268,8 @@ describe('试题不进 context', () => {
 
   it('装配出的完整上下文里也不含试题 —— 这条很容易被破坏', () => {
     const { agent } = parseAgentFile('/x/analyst.md', MD)
-    const spec = agentSpec(agent!, {
-      modelChain: ['mock:local'],
-      maxSteps: 8,
-      maxCostUsd: 1,
-      entryAgent: 'analyst',
-      assumedContextWindow: 32_768,
-      maxDelegationDepth: 3,
-      maxRunsPerRoot: 32,
-    })
+    // 用 defaultConfig.defaults 而不是手抄一份 —— 每加一个默认项就要改这里
+    const spec = agentSpec(agent!, { ...defaultConfig.defaults, entryAgent: 'analyst' })
     const r = assemble({
       contract: spec.systemPrompt,
       identity: '',

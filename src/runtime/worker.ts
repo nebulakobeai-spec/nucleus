@@ -7,9 +7,12 @@ import { Runner, type AgentSpec } from './runner.js'
 import { Reconciler } from './reconciler.js'
 import type { RunEventSink } from './events.js'
 import { renderEnvelope } from './envelope.js'
+import { decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicy } from './retry.js'
 import type { ChatMessage } from '../providers/types.js'
 
 export interface WorkerOptions {
+  /** run 级重试策略；不给则用 DEFAULT_RETRY_POLICY */
+  retryPolicy?: RetryPolicy
   workerId: string
   /** 空队列时的轮询间隔 */
   idleMs?: number
@@ -68,6 +71,7 @@ export function announceText(result: {
 }
 
 export class Worker {
+  #retryPolicy: RetryPolicy
   #store: RunStore
   #conversations: ConversationStore
   #reconciler: Reconciler
@@ -82,6 +86,7 @@ export class Worker {
     private events: RunEventSink,
     private opts: WorkerOptions,
   ) {
+    this.#retryPolicy = opts.retryPolicy ?? DEFAULT_RETRY_POLICY
     this.#store = new RunStore(db, deps)
     this.#conversations = new ConversationStore(db, deps)
     this.#reconciler = new Reconciler(db, deps)
@@ -178,6 +183,7 @@ export class Worker {
       const out = await this.runner.execute({
         attemptId: attempt.id,
         fenceToken: attempt.fenceToken!,
+        attemptNo: attempt.attemptNo,
         runId: run.id,
         agent,
         history,
@@ -208,7 +214,7 @@ export class Worker {
       }
 
       await this.events.emit(attempt.id, run.id, 'attempt.finished', {
-        status: armed ? 'waiting_children' : out.status,
+        status: armed ? 'waiting_children' : out.willRetry ? 'waiting_retry' : out.status,
         errorCode: out.errorCode ?? null,
         tokens: out.tokensIn + out.tokensOut,
         costUsd: out.costUsd,
@@ -216,19 +222,48 @@ export class Worker {
       hooks.onAttemptEnd?.({
         runId: run.id,
         attemptId: attempt.id,
-        status: armed ? 'waiting_children' : out.status,
+        status: armed ? 'waiting_children' : out.willRetry ? 'waiting_retry' : out.status,
         ...(out.errorCode ? { errorCode: out.errorCode } : {}),
       })
     } catch (e) {
       if (e instanceof StaleFenceError) return true // 已被接管
       const err = e instanceof NucleusError ? e : new NucleusError('runtime.internal', String(e))
+
+      // run 级重试的决策。
+      //
+      // 以前这里一律落 terminal failed —— 而 `recovery: 'automatic'` 的错误
+      // 在界面上却写着「系统会自动重试」。四个模型同时限流 → 整条链
+      // exhausted → run 死掉 → 得重新发一遍，而 provider_events 里明明记着
+      // 「等到 xx:xx 就恢复了」。
+      const decision = decideRetry({
+        errorCode: err.code,
+        retryAfterMs: err.retryAfterMs ?? null,
+        attemptNo: attempt.attemptNo,
+        policy: this.#retryPolicy,
+      })
+
+      await this.events.emit(attempt.id, run.id, 'attempt.failed', {
+        errorCode: err.code,
+        willRetry: decision.retry,
+        delayMs: decision.retry ? decision.delayMs : null,
+        reason: decision.reason,
+        attemptNo: attempt.attemptNo,
+      })
+
       await this.#store
         .finishAttempt({
           attemptId: attempt.id,
           fenceToken: attempt.fenceToken!,
           status: 'failed',
           errorCode: err.code,
-          errorDetail: { message: err.message },
+          errorDetail: { message: err.message, ...(err.detail ?? {}) },
+          ...(decision.retry
+            ? {
+                // 逻辑 run 还没结束 —— 它在等下一次物理尝试
+                runStatusOverride: 'waiting_retry' as const,
+                retryAt: new Date(this.deps.clock.now() + decision.delayMs),
+              }
+            : {}),
         })
         .catch(() => {
           /* 交给 reconciler */
@@ -236,7 +271,7 @@ export class Worker {
       hooks.onAttemptEnd?.({
         runId: run.id,
         attemptId: attempt.id,
-        status: 'failed',
+        status: decision.retry ? 'waiting_retry' : 'failed',
         errorCode: err.code,
       })
     }

@@ -64,6 +64,16 @@ export interface NucleusConfig {
      */
     assumedContextWindow: number
     /**
+     * 一个 run 最多几次 attempt（含首次）。
+     *
+     * 超过就落 terminal failed 而不再重试 —— 无限重试会把「模型一直答不对」
+     * 变成「任务永远不结束」，那比失败更糟。
+     */
+    maxAttempts: number
+    /** 重试退避基数与上限 */
+    retryBaseMs: number
+    retryCapMs: number
+    /**
      * 委派链的最大深度。编排者是 0，它派出的专家是 1。
      *
      * 没有这道闸门时，只要有一个 agent 能委派给自己（或形成环），
@@ -352,6 +362,10 @@ export const defaultConfig: NucleusConfig = {
   defaults: {
     entryAgent: 'orchestrator',
     assumedContextWindow: 32_768,
+    maxAttempts: 4,
+    retryBaseMs: 2_000,
+    // 等一小时不如报给人
+    retryCapMs: 5 * 60_000,
     // 3 层足够「编排者 → 专家 → 子专家」，再深通常是模型在兜圈子
     maxDelegationDepth: 3,
     maxRunsPerRoot: 32,

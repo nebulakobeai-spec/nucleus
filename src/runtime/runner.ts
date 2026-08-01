@@ -26,6 +26,7 @@ import {
 } from './result-schema.js'
 import { assemble, DEFAULT_BUDGET } from '../context/assemble.js'
 import { envelopeSizes } from './envelope.js'
+import { decideRetry, DEFAULT_RETRY_POLICY, type RetryDecision, type RetryPolicy } from './retry.js'
 import type { Permission } from './permissions.js'
 import type { RunEventSink } from './events.js'
 
@@ -61,6 +62,8 @@ export interface RunnerOptions {
   schemaRetries?: number
   /** 模型未声明 contextWindow 时按这个值预算 */
   assumedContextWindow?: number
+  /** run 级重试策略 */
+  retryPolicy?: RetryPolicy
   /** 是否记录 transcript（默认开 —— 出问题后再开就来不及了） */
   captureTranscripts?: boolean
   transcriptMaxChars?: number
@@ -107,6 +110,8 @@ export interface RunOutcome {
   modelKey?: string | null
   /** 上下文装配的分段用量 */
   contextBreakdown?: unknown
+  /** 这次失败已排了重试 —— 逻辑 run 还没结束 */
+  willRetry?: boolean
 }
 
 /**
@@ -125,6 +130,7 @@ export class Runner {
   #noProgressSteps: number
   #schemaRetries: number
   #assumedContextWindow: number
+  #retryPolicy: RetryPolicy
   #captureTranscripts: boolean
   #transcriptMaxChars: number
   #heartbeatMs: number
@@ -143,6 +149,7 @@ export class Runner {
     this.#noProgressSteps = opts.noProgressSteps ?? 6
     this.#schemaRetries = opts.schemaRetries ?? 2
     this.#assumedContextWindow = opts.assumedContextWindow ?? 32_768
+    this.#retryPolicy = opts.retryPolicy ?? DEFAULT_RETRY_POLICY
     this.#captureTranscripts = opts.captureTranscripts ?? true
     this.#transcriptMaxChars = opts.transcriptMaxChars ?? 200_000
     this.#heartbeatMs = opts.heartbeatMs ?? 15_000
@@ -158,6 +165,8 @@ export class Runner {
   async execute(input: {
     attemptId: string
     fenceToken: string
+    /** 第几次尝试 —— run 级重试的决策要用它判断有没有超上限 */
+    attemptNo: number
     runId: string
     agent: AgentSpec
     /** 会话历史，按时间顺序（最旧在前）。装配器按 token 预算从旧往新裁 */
@@ -189,10 +198,27 @@ export class Runner {
         errorDetail: err.detail ?? { message: err.message },
         ...acc,
       }
-      await this.#finish(attemptId, fenceToken, outcome).catch(() => {
+      // run 级重试的决策就在这里做，因为**终态是这里写的**。
+      // 放到 worker 的 catch 里是错的：失败被 runner 捕获并返回，
+      // 异常根本传不到 worker（我第一版就犯了这个错，
+      // 结果 all_exhausted 照旧落 failed）。
+      const decision = decideRetry({
+        errorCode: err.code,
+        retryAfterMs: err.retryAfterMs ?? null,
+        attemptNo: input.attemptNo,
+        policy: this.#retryPolicy,
+      })
+      await this.events.emit(attemptId, runId, 'attempt.failed', {
+        errorCode: err.code,
+        willRetry: decision.retry,
+        delayMs: decision.retry ? decision.delayMs : null,
+        reason: decision.reason,
+        attemptNo: input.attemptNo,
+      })
+      await this.#finish(attemptId, fenceToken, outcome, decision).catch(() => {
         /* 终态写失败交给 reconciler 兜底 */
       })
-      return outcome
+      return { ...outcome, ...(decision.retry ? { willRetry: true } : {}) }
     } finally {
       clearInterval(heart)
       void runId
@@ -693,7 +719,12 @@ export class Runner {
     }
   }
 
-  async #finish(attemptId: string, fence: string, o: RunOutcome): Promise<void> {
+  async #finish(
+    attemptId: string,
+    fence: string,
+    o: RunOutcome,
+    retry?: RetryDecision,
+  ): Promise<void> {
     await this.#store.finishAttempt({
       attemptId,
       fenceToken: fence,
@@ -711,6 +742,13 @@ export class Runner {
       ...(o.modelKey ? { modelKey: o.modelKey } : {}),
       // 分段用量：事后判断「模型是不是因为历史被裁掉才答错」的唯一依据
       ...(o.contextBreakdown !== undefined ? { contextBreakdown: o.contextBreakdown } : {}),
+      // 重试与终态写入同事务 —— 否则中间崩溃会留下「waiting_retry 但队列为空」
+      ...(retry?.retry
+        ? {
+            runStatusOverride: 'waiting_retry' as const,
+            retryAt: new Date(this.deps.clock.now() + retry.delayMs),
+          }
+        : {}),
     })
   }
 }

@@ -30,6 +30,8 @@ export interface TurnResult {
   errorCode: string | null
   /** 错误里附的可操作提示（如「服务没在监听」），没有则为 null */
   hint: string | null
+  /** run 在等重试时，下一次尝试的时刻 */
+  retryAt: Date | null
 }
 
 const p = (e: RunEvent) => (e.payload ?? {}) as Record<string, unknown>
@@ -201,10 +203,14 @@ export async function runTurn(n: Nucleus, conversationId: string, text: string):
       // attempt.finished 不带恢复性，这里补上「系统会不会自己重试」
       onAttemptEnd: (i) => {
         if (i.status === 'succeeded' || i.status === 'waiting_children') return
-        pet.mood('sad')
+        // waiting_retry 不是失败 —— 猫不该哭，也不该说「需要你处理」
+        const retrying = i.status === 'waiting_retry'
+        pet.mood(retrying ? 'wait' : 'sad')
         pet.say(
           `${indentOf(i.runId)}  ${c.gray(ICON.branch)} ${statusColor(i.status)}` +
-            (i.errorCode ? ` ${c.gray(i.errorCode)} ${recoveryHint(recoveryOf(i.errorCode))}` : ''),
+            (i.errorCode
+              ? ` ${c.gray(i.errorCode)} ${retrying ? c.cyan('已排重试') : recoveryHint(recoveryOf(i.errorCode))}`
+              : ''),
         )
       },
     }))
@@ -245,7 +251,17 @@ export async function runTurn(n: Nucleus, conversationId: string, text: string):
     status: run?.status ?? 'unknown',
     errorCode: run?.errorCode ?? null,
     hint: extractHint(run?.errorDetail),
+    retryAt: run?.status === 'waiting_retry' ? await nextRetryAt(n, runId) : null,
   }
+}
+
+/** 排在队列里的下一次尝试时刻 */
+async function nextRetryAt(n: Nucleus, runId: string): Promise<Date | null> {
+  const r = await n.db.query<{ available_at: Date }>(
+    `select available_at from run_queue where run_id = $1 order by available_at limit 1`,
+    [runId],
+  )
+  return r.rows[0]?.available_at ?? null
 }
 
 /** 打印一轮的结果：回复 + 产出 + 成本行 */
@@ -259,6 +275,16 @@ export function printTurn(r: TurnResult, opts: { runCount?: number } = {}): void
       line()
       line(`  ${c.gray('产出')} ${r.artifacts.join(', ')}`)
     }
+  } else if (r.status === 'waiting_retry') {
+    // **恢复性提示必须跟着实际行为**，不能只看错误码。
+    // all_exhausted 的 recovery 是 needs_user，但 run 已经排好了重试 ——
+    // 这时显示「需要你处理」就是在说谎，而那正是我批评过的毛病
+    line(
+      `${ICON.info} ${c.cyan('已排重试')} ${c.gray(r.errorCode ?? '')}` +
+        (r.retryAt ? c.gray(` · ${r.retryAt.toLocaleTimeString()} 自动再试`) : ''),
+    )
+    if (r.hint) line(c.gray(`  ${r.hint}`))
+    line(c.gray('  这一轮没有回复，但任务没有丢 —— worker 到点会自己继续'))
   } else {
     line(
       `${ICON.warn} 未产生回复；run ${statusColor(r.status)} ${c.gray(r.errorCode ?? '')} ` +
@@ -292,9 +318,12 @@ export async function printRunList(n: Nucleus, limit = 20): Promise<void> {
     status: string
     error_code: string | null
     created_at: Date
+    retry_at: Date | null
   }>(
-    `select id, agent_id, status, error_code, created_at from runs
-      where parent_run_id is null order by created_at desc limit $1`,
+    `select r.id, r.agent_id, r.status, r.error_code, r.created_at,
+            (select min(available_at) from run_queue q where q.run_id = r.id) as retry_at
+       from runs r
+      where r.parent_run_id is null order by r.created_at desc limit $1`,
     [limit],
   )
 
@@ -308,7 +337,13 @@ export async function printRunList(n: Nucleus, limit = 20): Promise<void> {
       x.id.slice(0, 8),
       x.agent_id,
       statusColor(x.status),
-      x.error_code ? `${c.gray(x.error_code)} ${recoveryHint(recoveryOf(x.error_code))}` : '',
+      // waiting_retry 时说「等到几点」而不是错误码的恢复性 ——
+      // 后者会说「需要你处理」，而实际上系统会自己继续
+      x.status === 'waiting_retry'
+        ? `${c.gray(x.error_code ?? '')} ${c.cyan(x.retry_at ? `${new Date(x.retry_at).toLocaleTimeString()} 自动再试` : '已排重试')}`
+        : x.error_code
+          ? `${c.gray(x.error_code)} ${recoveryHint(recoveryOf(x.error_code))}`
+          : '',
       c.gray(new Date(x.created_at).toLocaleString()),
     ]),
     ['ID', 'AGENT', '状态', '错误', '时间'],

@@ -66,6 +66,7 @@ function exec(runner: Runner, ctx: { run: { id: string }; attempt: { id: string;
   return runner.execute({
     attemptId: ctx.attempt.id,
     fenceToken: ctx.attempt.fenceToken!,
+    attemptNo: 1,
     runId: ctx.run.id,
     agent,
     history: [],
@@ -261,6 +262,7 @@ describe('能力边界', () => {
     await runner.execute({
       attemptId: ctx.attempt.id,
       fenceToken: ctx.attempt.fenceToken!,
+      attemptNo: 1,
       runId: ctx.run.id,
       agent: { ...AGENT, toolsAllow: ['read'] },
       history: [],
@@ -480,6 +482,7 @@ describe('预算护栏', () => {
     const out = await runner.execute({
       attemptId: ctx.attempt.id,
       fenceToken: ctx.attempt.fenceToken!,
+      attemptNo: 1,
       runId: ctx.run.id,
       agent: { ...AGENT, maxSteps: 3 },
       history: [],
@@ -540,7 +543,7 @@ describe('工具输出处理', () => {
 // ═══════════════════════════════════════════════════════
 
 describe('失败即终态', () => {
-  it('provider 全链失败也写终态，不留悬挂', async () => {
+  it('provider 全链失败：attempt 落终态，run 转 waiting_retry 并排好下一次', async () => {
     const ctx = await startRun()
     const router = new ModelRouter(db, deps, MODELS, () => null, {
       fetch: scriptedFetch([new Response('{"error":{"message":"down"}}', { status: 500 })]),
@@ -550,10 +553,64 @@ describe('失败即终态', () => {
     const out = await exec(runner, ctx)
 
     expect(out.status).toBe('failed')
+    // **attempt 是终态且不可变**；逻辑 run 还没结束 —— 它在等下一次物理尝试
+    expect((await store.getAttempt(ctx.attempt.id))!.status).toBe('failed')
+    const run = await store.getRun(ctx.run.id)
+    expect(run!.status).toBe('waiting_retry')
+    expect(run!.endedAt).toBeNull()
+
+    // 关键：重试与终态写入同事务，所以队列里一定有下一次 —— 不存在
+    // 「waiting_retry 但队列为空」的悬挂状态
+    // 用注入的时钟比，不用 SQL 的 now() —— FakeClock 与真实时间不在同一条线上
+    const q = await db.query<{ n: number; future: boolean }>(
+      `select count(*)::int n, bool_and(available_at > $2::timestamptz) as future
+         from run_queue where run_id = $1`,
+      [ctx.run.id, deps.clock.nowIso()],
+    )
+    expect(q.rows[0]!.n).toBe(1)
+    expect(q.rows[0]!.future).toBe(true)
+  })
+
+  it('不可重试的错误仍然落 failed —— 连不上时重试永远不会成功', async () => {
+    const ctx = await startRun()
+    const router = new ModelRouter(db, deps, MODELS, () => null, {
+      fetch: scriptedFetch([
+        () => {
+          throw Object.assign(new TypeError('fetch failed'), {
+            cause: Object.assign(new Error(''), { code: 'ECONNREFUSED' }),
+          })
+        },
+      ]),
+      inPlaceRetries: 0,
+    })
+    const runner = new Runner(db, deps, router, tools, events, { heartbeatMs: 3_600_000 })
+    await exec(runner, ctx)
+
+    const run = await store.getRun(ctx.run.id)
+    expect(run!.status).toBe('failed')
+    expect(run!.errorCode).toBe('provider.unreachable')
+    expect(run!.endedAt).not.toBeNull()
+    const q = await db.query<{ n: number }>(`select count(*)::int n from run_queue where run_id = $1`, [
+      ctx.run.id,
+    ])
+    expect(q.rows[0]!.n).toBe(0)
+  })
+
+  it('达到 maxAttempts 后不再重试 —— 无限重试比失败更糟', async () => {
+    const ctx = await startRun()
+    const router = new ModelRouter(db, deps, MODELS, () => null, {
+      fetch: scriptedFetch([new Response('{"error":{"message":"down"}}', { status: 500 })]),
+      inPlaceRetries: 0,
+    })
+    const runner = new Runner(db, deps, router, tools, events, {
+      heartbeatMs: 3_600_000,
+      retryPolicy: { maxAttempts: 1, baseMs: 1000, capMs: 1000 },
+    })
+    await exec(runner, ctx)
+
     const run = await store.getRun(ctx.run.id)
     expect(run!.status).toBe('failed')
     expect(run!.endedAt).not.toBeNull()
-    expect((await store.getAttempt(ctx.attempt.id))!.status).toBe('failed')
   })
 
   it('取消时落终态且 error_code 正确', async () => {
@@ -577,6 +634,7 @@ describe('失败即终态', () => {
     const out = await runner.execute({
       attemptId: ctx.attempt.id,
       fenceToken: ctx.attempt.fenceToken!,
+      attemptNo: 1,
       runId: ctx.run.id,
       agent: AGENT,
       history: [],

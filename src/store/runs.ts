@@ -133,9 +133,19 @@ export interface FinishAttemptInput {
   modelKey?: string | null
   /** 覆盖默认的 attempt→run 状态映射，例如 failed 但还要重试 → waiting_retry */
   runStatusOverride?: RunStatus
+  /**
+   * 排一次重试。
+   *
+   * 与终态写入在**同一个事务**里 —— 否则中间崩溃会留下
+   * 「run 是 waiting_retry 但队列里什么都没有」的悬挂状态，
+   * 那正是这个项目要消灭的那类问题。
+   */
+  retryAt?: Date
 }
 
 export interface FinishAttemptResult {
+  /** 排了重试时，新 attempt 的编号 */
+  retryAttemptNo?: number | null
   runId: string
   runStatus: RunStatus
   /** 本次终态触发了哪些 wake（pending_count 归零者），已入队 */
@@ -218,9 +228,15 @@ export class RunStore {
         now,
       ],
     )
-    await q.query(`update runs set status = 'pending' where id = $1 and status = 'waiting_retry'`, [
-      runId,
-    ])
+    // 排到未来的重试**不改** waiting_retry —— 那个状态的含义就是
+    // 「在等下一次尝试」，翻成 pending 会让「任务在等什么」看不出来。
+    // 立刻可执行时才翻（reconciler 兜底重排走这条）
+    const readyNow = !opts.availableAt || opts.availableAt.getTime() <= this.deps.clock.now()
+    if (readyNow) {
+      await q.query(`update runs set status = 'pending' where id = $1 and status = 'waiting_retry'`, [
+        runId,
+      ])
+    }
     return attempt
   }
 
@@ -399,12 +415,20 @@ export class RunStore {
         ],
       )
 
-      // run 未到终态就不触发 wake（例如 waiting_retry 还要再试）
-      if (!isTerminalRunStatus) {
-        return { runId, runStatus, firedWakeIds: [], enqueuedParents: [] }
+      // 排重试：与终态写入同事务。中间崩溃会留下「waiting_retry 但队列为空」
+      // 的悬挂状态，而消灭这类状态正是这个项目的目的
+      let retryAttemptNo: number | null = null
+      if (input.retryAt) {
+        const next = await this.enqueueAttempt(runId, { availableAt: input.retryAt }, q)
+        retryAttemptNo = next.attemptNo
       }
 
-      return { runId, runStatus, ...(await this.#fireWakes(q, runId, now)) }
+      // run 未到终态就不触发 wake（例如 waiting_retry 还要再试）
+      if (!isTerminalRunStatus) {
+        return { runId, runStatus, firedWakeIds: [], enqueuedParents: [], retryAttemptNo }
+      }
+
+      return { runId, runStatus, retryAttemptNo, ...(await this.#fireWakes(q, runId, now)) }
     })
   }
 

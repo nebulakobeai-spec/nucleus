@@ -164,6 +164,7 @@ describe('端到端：编排者 → 专家 → 结果回流', () => {
     await runner.execute({
       attemptId: a1.id,
       fenceToken: a1.fenceToken!,
+      attemptNo: 1,
       runId: root.id,
       agent: { ...ORCHESTRATOR, maxSteps: 1 },
       history: [],
@@ -191,6 +192,7 @@ describe('端到端：编排者 → 专家 → 结果回流', () => {
     const childOut = await runner.execute({
       attemptId: a2.id,
       fenceToken: a2.fenceToken!,
+      attemptNo: 1,
       runId: childId,
       agent: ALBERT,
       history: [],
@@ -222,6 +224,7 @@ describe('端到端：编排者 → 专家 → 结果回流', () => {
     const rootOut = await runner.execute({
       attemptId: a3.id,
       fenceToken: a3.fenceToken!,
+      attemptNo: 1,
       runId: root.id,
       agent: ORCHESTRATOR,
       history: [],
@@ -302,6 +305,7 @@ describe('端到端：kill -9 后自动恢复', () => {
     const out = await runner.execute({
       attemptId: fresh.id,
       fenceToken: fresh.fenceToken!,
+      attemptNo: 1,
       runId: run.id,
       agent: ORCHESTRATOR,
       history: [],

@@ -18,27 +18,46 @@ export interface ErrorSpec {
   recovery: Recovery
   /** 是否可以就地重试（不换 attempt） */
   retryable: boolean
+  /**
+   * 整个 run 值得等一会儿再来。
+   *
+   * 与 `retryable` **不是一回事**：`contract.postcondition_failed` 是就地
+   * 可重试的（让模型重写），但整个 run 重来是同样的 prompt → 同样的结果，
+   * 只是慢四倍。而 `rate_limited` 反过来 —— 等一会儿真的会好。
+   *
+   * 混用这两个概念会把「模型答不对」变成「任务反复重跑」。
+   */
+  runRetryable: boolean
   /** 面向用户的一句话 */
   message: string
 }
 
+/**
+ * @param retryable    **就地**可重试（同一次调用内重试，router 用它）
+ * @param runRetryable **整个 run** 值得等一会儿再来。两者不是一回事：
+ *   `contract.postcondition_failed` 是就地可重试的（让模型重写），但整个 run
+ *   重来是同样的 prompt → 同样的结果，只是慢四倍。而 `rate_limited` 反过来 ——
+ *   等一会儿真的会好。
+ *   混用这两个概念会让「模型答不对」变成「任务反复重跑」。
+ */
 function spec(
   code: string,
   recovery: Recovery,
   retryable: boolean,
   message: string,
+  runRetryable = false,
 ): [string, ErrorSpec] {
-  return [code, { code, recovery, retryable, message }]
+  return [code, { code, recovery, retryable, message, runRetryable }]
 }
 
 export const ERRORS = new Map<string, ErrorSpec>([
   // ── provider ──────────────────────────────────────────
-  spec('provider.rate_limited', 'automatic', true, '被限流，正在等待重试'),
-  spec('provider.quota_exhausted', 'automatic', false, '该模型额度用尽，正在切换'),
-  spec('provider.all_exhausted', 'needs_user', false, '所有模型都不可用，等待额度恢复'),
+  spec('provider.rate_limited', 'automatic', true, '被限流，正在等待重试', true),
+  spec('provider.quota_exhausted', 'automatic', false, '该模型额度用尽，正在切换', true),
+  spec('provider.all_exhausted', 'needs_user', false, '所有模型都不可用，等待额度恢复', true),
   spec('provider.auth_failed', 'needs_user', false, '凭据无效，需要检查配置'),
-  spec('provider.server_error', 'automatic', true, '模型服务异常，正在重试'),
-  spec('provider.timeout', 'automatic', true, '模型响应超时'),
+  spec('provider.server_error', 'automatic', true, '模型服务异常，正在重试', true),
+  spec('provider.timeout', 'automatic', true, '模型响应超时', true),
   // 与 timeout 分开：连接被拒 / DNS 失败 / 被网络策略拦截，重试永远不会成功。
   // 归成 timeout 会让界面说「系统会自动重试」，把人往错的方向引 ——
   // 实际要做的是启动服务、改 baseUrl 或放开网络。

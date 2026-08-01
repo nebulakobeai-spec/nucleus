@@ -57,9 +57,35 @@ export class Reconciler {
     await this.#expireDeadlines(report)
     await this.#handleDeadAttempts(report)
     await this.#repairWakes(report)
+    await this.#repairStuckRetries(report)
     await this.#releaseOrphanedQueueItems(report)
 
     return report
+  }
+
+  /**
+   * 兜底：run 是 waiting_retry 但队列里没有它。
+   *
+   * 正常路径下重试的入队与终态写入在同一个事务里，所以这个状态不该出现。
+   * 但「不该出现」不等于「不会出现」—— 数据库半途失败、手工改过状态、
+   * 或者将来某处漏了事务，都会留下一个永远等不到重试的 run。
+   * 而「任务挂住却看不出来」正是这个项目要消灭的东西。
+   */
+  async #repairStuckRetries(report: ReconcileReport): Promise<void> {
+    const stuck = await this.db.query<{ id: string }>(
+      `select r.id from runs r
+        where r.status = 'waiting_retry'
+          and not exists (select 1 from run_queue q where q.run_id = r.id)
+          and not exists (
+            select 1 from run_attempts a
+             where a.run_id = r.id and a.status in ('queued', 'running')
+          )`,
+    )
+    for (const row of stuck.rows) {
+      // 立刻入队 —— 已经错过了原定的重试时刻，再等没有意义
+      await this.#store.enqueueAttempt(row.id)
+      report.requeued.push(row.id)
+    }
   }
 
   /** lease 过期 = worker 死了。判 lost 并作废 fence（旧 worker 复活也写不进）。 */

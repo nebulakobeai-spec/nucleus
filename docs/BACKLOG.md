@@ -178,7 +178,7 @@
 
 ## B. 可靠性
 
-9. **run 级重试** —— 这是剩下最大的可靠性洞，也是第 6 处「声明了没接线」。
+9. ~~**run 级重试**~~ ✅ 已完成 —— 曾是剩下最大的可靠性洞，也是第 6 处「声明了没接线」。
 
    `recovery: 'automatic'` 界面说「系统会自动重试」，但 attempt 失败后 run
    直接落 terminal `failed`，队列是空的。真正的重试只发生在一次 `chat()`
@@ -188,7 +188,31 @@
    后果就是最初抱怨的那类：四个模型同时被限流 → run 直接死 → 得重新发一遍，
    而界面还说它会自己恢复。
 
-   要做：退避 + 上限 + 调度。`run_queue.available_at` 已经有了，不用新表。
+   已做：退避 + 上限 + 调度（`run_queue.available_at` 现成，没建新表）、
+   与终态写入**同事务**（否则中间崩溃会留下「waiting_retry 但队列为空」）、
+   reconciler 兜底重排、事件流记 `attempt.failed{willRetry, delayMs, reason}`。
+
+   **过程中被迫想清楚三件事：**
+
+   一、`retryable` 与 run 级重试**不是一回事**。前者是「就地重试」（让模型
+   重写），`contract.postcondition_failed` 标着 retryable: true。照它重试会把
+   「模型答不对」变成「任务反复重跑，只是慢四倍」。所以新增 `runRetryable`，
+   只给「等一会儿真的会好」的那几个：限流、额度、服务端错误、超时、全链不可用。
+
+   二、**provider 说的时间不该被我们的退避上限截断。** `min(cap, max(backoff,
+   after))` 是错的：额度一小时后重置而 cap 是 5 分钟时，我们会在 5 分钟后去撞
+   一扇关着的门，把 attempt 预算烧完 ——「白等 15 分钟然后失败」比「等一小时
+   然后成功」差得多。上限只约束我们自己猜的退避。
+
+   三、决策必须放在 **runner** 的失败路径，不是 worker 的 catch —— 失败被
+   runner 捕获并**返回** outcome，异常根本传不到 worker。我第一版放错了，
+   结果 all_exhausted 照旧落 failed，实测才发现。
+
+   顺带：`enqueueAttempt` 原本会把 `waiting_retry` 翻成 `pending`，那样「任务
+   在等什么」就看不出来了 —— 改成只有立即可执行时才翻。以及界面的恢复性提示
+   现在**跟着实际行为**而不只看错误码：run 是 waiting_retry 时显示
+   「已排重试 · 2:24:36 PM 自动再试」，而不是 all_exhausted 的「需要你处理」。
+   后者正是我之前批评过的「界面说谎」，差点自己又犯一次。
 
 10. **compact** —— 现在超预算是**丢**最旧的消息，不是压缩。
 
