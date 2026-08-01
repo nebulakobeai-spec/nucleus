@@ -364,6 +364,16 @@ export class Runner {
 
           if (check.ok) {
             submitted = check.value
+            // contract.rejected 的正面对应。
+            //
+            // 没有它的话「一次过的比例」只能靠推断（attempt 状态 + 有没有
+            // 被退回过），而 run_attempts 上并不记录结果，推断必然把
+            // 委派后挂起的 attempt 也算成「通过」—— 分母被冲淡，
+            // 遵守率虚高。指标应当来自显式事件，不是猜。
+            await this.events.emit(attemptId, runId, 'contract.accepted', {
+              step,
+              retries: schemaRetries,
+            })
             messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content: 'ok' })
             break
           }

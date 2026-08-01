@@ -19,6 +19,12 @@ npm link          # 之后可以直接敲 nucleus
   runs [id 前缀]                列出 run / 查看 run 树
   events <id 前缀>              查看时间轴
 
+agent 与规则
+  agent list                    列出 agent：模型链、工具数、必填字段
+  agent show <id>               看模型实际收到的 system prompt 与结果契约
+  rules                         规则清单 + 遵守率
+  rules stats                   只看遵守率
+
 凭据
   auth login <REF>              录入 API key（静默输入）
   auth login <REF> --oauth      浏览器授权（device flow + PKCE）
@@ -261,6 +267,119 @@ nucleus events dc1996e0
 | `artifact.written` | 产出已登记 |
 
 **判断死活最有用的信号是「最后一个事件距今多久」**，比 status 本身有用。`tool.intent` 后长时间没有 `tool.outcome` = 工具卡住；完全没有新事件 = 真卡住。
+
+---
+
+## agent 与规则
+
+### 看一个 agent 到底是什么样
+
+```bash
+nucleus agent list
+nucleus agent show researcher
+nucleus agent show researcher --mcp    # 把 MCP 提供的工具也算进可见工具
+```
+
+`agent show` 打印的是**模型实际收到的东西**，不是配置的复述：
+
+```
+模型收到的 system prompt
+──────────────────────────────────────────
+199 字符 · 9 行 · 逐字节稳定（prompt cache 依赖这一点）
+  # 运行时契约
+  - 你在一个多 agent 编排系统中执行一次任务。
+  - 完成任务必须调用 submit_result；不要用纯文本结束。
+  ...
+  # researcher
+  你是研究专家，负责调研与信息收集。
+  结论必须标注来源。
+──────────────────────────────────────────
+
+可见工具
+  write_report             idempotent 写一份报告并登记为产出
+
+结果契约
+能力段   research
+必填     findings[].sources
+         a[].b 表示每一个元素的 b 都不能为空
+```
+
+这些都由**运行时同一条代码路径**算出（`agentSpec` / `buildPrefix` /
+`resultJsonSchema`），不是另写一份展示用的拼装逻辑 —— 否则迟早和真实请求
+不一致，而这个命令的全部价值就在于可信。
+
+还会报出两件容易踩的事：`toolsAllow` 里有未注册的工具（拼错工具名或 MCP
+没连上时，模型只是「看不见」它，不会报错），以及这个 agent 能不能委派、
+能派给谁、深度与扇出上限是多少。
+
+### 加一个专家 agent
+
+在 `nucleus.config.json` 里加一项。**注意 `agents` 是整体替换而非合并** ——
+写了这个数组就得把要用的都列上，漏了入口 agent 会在启动时报错：
+
+```jsonc
+{
+  "agents": [
+    { "id": "orchestrator", "name": "编排者",
+      "identity": "你是编排者，用户的唯一入口。\n理解需求 → 拆解 → 委派 → 整合。",
+      "toolsAllow": ["delegate"] },
+    { "id": "reviewer", "name": "审核员",
+      "identity": "你是审核员，检查结论是否有依据。\n没有来源的断言一律标出。",
+      "toolsAllow": ["read_file"],
+      "capabilities": ["research"],
+      "requiredFields": ["findings[].sources"],
+      "modelChain": ["kimi:k3"],
+      "maxSteps": 8 }
+  ]
+}
+```
+
+改完先看一眼再跑：`nucleus agent show reviewer`。
+
+### 规则有哪几层
+
+```bash
+nucleus rules
+```
+
+| 层级 | 怎么生效 | 在哪配 |
+|---|---|---|
+| **能力边界** | 不在白名单里的工具，模型**根本看不到** | `toolsAllow` / `toolsDeny` |
+| **调用前拒绝** | 工具可见，但参数不合规就被拦下并告知原因 | 见 `nucleus rules` 的配置项一列 |
+| **结果契约** | 提交的结果缺字段就退回让它重写 | `requiredFields` |
+
+三层的共同点是**都由运行时强制，不靠模型记得**。写在 `identity` /
+`policy` 正文里的软规则不属于这三层 —— 它们无法被运行时验证，也就统计不出
+遵守率。
+
+### 模型到底听不听
+
+```bash
+nucleus rules stats
+nucleus rules --since 7          # 只看最近 7 天
+```
+
+```
+模型               有契约的 attempt  一次过  被退回  遵守率
+────────────────  ────────────────  ──────  ──────  ──────
+zai:glm-5.2                     12      11       1   91.7%
+ollama:gemma4:31b                8       5       3   62.5%
+
+最常缺的字段
+  findings[].sources           4 次
+```
+
+几点读法：
+
+- **分母是「有契约要满足的 attempt」，不是所有 attempt。** 委派用的 attempt
+  从不提交结果，算进去只会把数字冲淡成无意义。这个判断来自显式的
+  `contract.accepted` / `contract.rejected` 事件，不是推断。
+- **被退回不等于失败。** 缺项会回喂给模型重写，多数情况下第二次就对了。
+  所以「遵守率 62.5%」的含义是「37.5% 的情况需要纠正一轮」，不是「失败」。
+- **同一个字段反复缺**，说明这条规则对当前模型太难。换模型或简化契约，
+  比继续往 prompt 里加话有用 —— 这也是这个数字存在的意义。
+- 报告末尾若提示「N 次装配发生了上下文降级」，要先排除这个：历史被裁掉时
+  模型可能是**没看到**要求，而不是不听话。
 
 ---
 

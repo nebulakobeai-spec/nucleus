@@ -364,3 +364,15 @@ describe('上下文降级的显示', () => {
     expect(l).toMatch(/裁掉 3 条历史.*丢弃摘要.*收缩约束/)
   })
 })
+
+describe('契约通过的显示', () => {
+  it('一次写对不占行 —— 那是常态', () => {
+    expect(renderEvent(ev('contract.accepted', { step: 2, retries: 0 }), '')).toBeNull()
+  })
+
+  it('退回后才通过要说出来，否则只看到被退回、不知道后来成没成', () => {
+    const l = renderEvent(ev('contract.accepted', { step: 4, retries: 2 }), '')
+    expect(l).toContain('结果通过')
+    expect(l).toContain('退回 2 次后')
+  })
+})

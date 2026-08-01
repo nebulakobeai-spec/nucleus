@@ -94,6 +94,14 @@ export function renderEvent(e: RunEvent, indent: string): string | null {
       )
     }
 
+    // 一次就写对是常态，不占行。退回后才通过要说出来 ——
+    // 否则只看到「被退回」而不知道后来到底成没成
+    case 'contract.accepted': {
+      const retries = Number(q['retries'] ?? 0)
+      if (retries === 0) return null
+      return br + c.green(`结果通过`) + c.gray(`（退回 ${retries} 次后）`)
+    }
+
     case 'rule.violation':
       return br + c.yellow(`${q['tool']} 被规则拦下`) + c.gray(` ${q['rule'] ?? ''}`)
 

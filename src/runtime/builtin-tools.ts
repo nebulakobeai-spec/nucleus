@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { RULE } from './rules.js'
 import { dirname, isAbsolute, join, normalize, relative } from 'node:path'
 import type { RunStore } from '../store/runs.js'
 import { toolError, type ToolDefinition, type ToolRegistry } from './tools.js'
@@ -35,7 +36,7 @@ export const readFileTool: ToolDefinition = {
       return {
         ok: false,
         content: '路径必须是工作目录内的相对路径，不允许绝对路径或 .. 穿越。',
-        rule: 'fs.workdir-boundary',
+        rule: RULE.fsWorkdirBoundary,
         errorCode: 'tool.denied',
       }
     }
@@ -71,7 +72,7 @@ export const writeFileTool: ToolDefinition = {
       return {
         ok: false,
         content: '路径必须是工作目录内的相对路径，不允许绝对路径或 .. 穿越。',
-        rule: 'fs.workdir-boundary',
+        rule: RULE.fsWorkdirBoundary,
         errorCode: 'tool.denied',
       }
     }
@@ -154,7 +155,7 @@ export function delegateTool(
         return {
           ok: false,
           content: `未知专家 ${a.agent}。可选：${allowedAgents.join(', ')}`,
-          rule: 'delegate.known-agent',
+          rule: RULE.delegateKnownAgent,
           errorCode: 'tool.denied',
         }
       }
@@ -167,7 +168,7 @@ export function delegateTool(
           content:
             `委派深度已达上限 ${limits.maxDepth}，不能再往下派。` +
             `请自己完成剩下的部分，或用现有信息 submit_result。`,
-          rule: 'delegate.max-depth',
+          rule: RULE.delegateMaxDepth,
           errorCode: 'tool.denied',
         }
       }
@@ -181,7 +182,7 @@ export function delegateTool(
           content:
             `这棵任务树已有 ${total} 个子任务，达到上限 ${limits.maxRunsPerRoot}。` +
             `请合并剩下的工作或直接 submit_result。`,
-          rule: 'delegate.max-fanout',
+          rule: RULE.delegateMaxFanout,
           errorCode: 'tool.denied',
         }
       }

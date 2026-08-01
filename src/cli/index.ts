@@ -8,6 +8,8 @@ import { recoveryOf } from '../errors.js'
 import type { MockScript } from '../providers/mock.js'
 import { authList, authLogin, authLogout, authRefresh, authTest, credentialStatus } from './auth.js'
 import { mcpCall, mcpEnable, mcpList, mcpTools } from './mcp.js'
+import { agentList, agentShow } from './agent.js'
+import { rulesCmd } from './rules.js'
 import { bundleCmd, replayCmd } from './bundle.js'
 import { loadConfig } from '../config-file.js'
 import { c, duration, heading, ICON, line, money, parseArgv, recoveryHint, statusColor, table, strFlag } from './ui.js'
@@ -399,6 +401,11 @@ ${c.bold('对话与诊断')}
   runs [id 前缀]      列出 run / 查看 run 树
   events <id 前缀>    查看 timeline
 
+${c.bold('agent 与规则')}
+  agent list                  列出 agent：模型链、工具数、必填字段
+  agent show <id>             看模型实际收到的 system prompt 与结果契约
+  rules                       规则遵守率：谁不听哪条规则
+
 ${c.bold('凭据')}
   auth login <REF>            录入 API key（静默输入，不回显）
   auth login <REF> --oauth    浏览器授权（device flow + PKCE）
@@ -496,6 +503,23 @@ export async function main(argv: string[]): Promise<number> {
           return 1
       }
     }
+    case 'agent': {
+      const sub = rest[0]
+      const args = rest.slice(1)
+      switch (sub) {
+        case 'list':
+        case 'ls':
+        case undefined:
+          return agentList(args, flags)
+        case 'show':
+          return agentShow(args, flags)
+        default:
+          // 省一步：nucleus agent researcher 等价于 agent show researcher
+          return agentShow(rest, flags)
+      }
+    }
+    case 'rules':
+      return rulesCmd(rest, flags)
     case 'bundle':
       return bundleCmd(rest, flags)
     case 'replay':
