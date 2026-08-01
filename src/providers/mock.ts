@@ -51,6 +51,51 @@ function whichAgent(system: string, known: string[]): string {
   return known[0] ?? 'unknown'
 }
 
+/**
+ * 按 JSON Schema 合成一份能过校验的结果。
+ *
+ * 只处理这个项目的结果 schema 会用到的形状（对象 / 数组 / 标量），
+ * 够用即止 —— 目标是「满足契约」，不是通用的 schema 伪造器。
+ */
+export function synthesizeResult(schema: unknown): Record<string, unknown> {
+  const base: Record<string, unknown> = { status: 'ok', summary: '(mock 合成的结果)' }
+  const s = schema as
+    | { properties?: Record<string, Record<string, unknown>>; required?: string[] }
+    | undefined
+  if (!s?.properties) return base
+
+  for (const [name, decl] of Object.entries(s.properties)) {
+    if (name in base) continue
+    base[name] = fake(decl, name)
+  }
+  return base
+}
+
+function fake(decl: Record<string, unknown>, name: string): unknown {
+  switch (decl['type']) {
+    case 'string':
+      // enum 存在时必须取其中一个，否则过不了校验
+      return Array.isArray(decl['enum']) ? decl['enum'][0] : `mock-${name}`
+    case 'number':
+    case 'integer':
+      return 1
+    case 'boolean':
+      return true
+    case 'array': {
+      const items = decl['items'] as Record<string, unknown> | undefined
+      // 一个元素就够：`a[].b` 的语义是「每一个元素的 b 都非空」，
+      // 给一个满足的元素即可验证契约可满足
+      return items ? [fake(items, name)] : [`mock-${name}`]
+    }
+    case 'object': {
+      const props = (decl['properties'] ?? {}) as Record<string, Record<string, unknown>>
+      return Object.fromEntries(Object.entries(props).map(([k, v]) => [k, fake(v, k)]))
+    }
+    default:
+      return `mock-${name}`
+  }
+}
+
 export function mockProviderFetch(script: MockScript): FetchLike {
   const cursors = new Map<string, number>()
   const agents = Object.keys(script)
@@ -59,6 +104,7 @@ export function mockProviderFetch(script: MockScript): FetchLike {
     const body = JSON.parse(String(init.body)) as {
       messages: Array<{ role: string; content: string }>
       stream?: boolean
+      tools?: Array<{ function?: { name?: string; parameters?: unknown } }>
     }
     const system = body.messages.find((m) => m.role === 'system')?.content ?? ''
     const agent = whichAgent(system, agents)
@@ -66,7 +112,16 @@ export function mockProviderFetch(script: MockScript): FetchLike {
     const i = cursors.get(agent) ?? 0
     cursors.set(agent, i + 1)
     const turns = script[agent] ?? []
-    const turn: MockTurn = turns[i] ?? { submit: { status: 'ok', summary: '(mock 脚本已用尽)' } }
+    // 脚本用尽（或这个 agent 根本没写脚本）时，**照着请求里的 submit_result
+    // schema 合成一份满足契约的结果**。
+    //
+    // 原来只回一个固定的 { status, summary }，于是任何声明了 requiredFields
+    // 的专家（analyst 要 metrics[].source）在 mock 下必然被退回、必然失败 ——
+    // 而 `agent try --mock` 恰恰是给这类专家用的：它想验的是「契约可满足、
+    // 管线跑得通」，不是「模型答得好」。
+    const submitSchema = body.tools?.find((t) => t.function?.name === 'submit_result')?.function
+      ?.parameters
+    const turn: MockTurn = turns[i] ?? { submit: synthesizeResult(submitSchema) }
 
     const usage = {
       prompt_tokens: turn.usage?.in ?? 200 + i * 50,

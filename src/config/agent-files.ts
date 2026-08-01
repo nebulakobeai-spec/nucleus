@@ -204,6 +204,9 @@ export function parseCases(text: string): string[] {
 }
 
 /** 默认目录：项目根下的 `agents/` */
+/** 目录里这些文件不是 agent 定义 */
+const SKIP = new Set(['readme.md', 'index.md', 'notes.md'])
+
 export const DEFAULT_AGENTS_DIR = 'agents'
 
 export function loadAgentFiles(dir: string = DEFAULT_AGENTS_DIR): AgentLoadResult {
@@ -215,6 +218,9 @@ export function loadAgentFiles(dir: string = DEFAULT_AGENTS_DIR): AgentLoadResul
 
   for (const name of readdirSync(root).sort()) {
     if (!name.endsWith('.md') || name.endsWith('.cases.md')) continue
+    // 目录里放说明是很自然的事。跳过一个**明确的**名单而不是「解析不出就跳过」——
+    // 后者会把 frontmatter 写错的真 agent 也静默跳掉
+    if (SKIP.has(name.toLowerCase()) || name.startsWith('_') || name.startsWith('.')) continue
     const path = join(root, name)
     let text: string
     try {

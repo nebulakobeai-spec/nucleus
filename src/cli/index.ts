@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { ask, boot, type Nucleus } from '../boot.js'
-import { defaultConfig, isMockOnly } from '../config.js'
+import { defaultConfig, isMockOnly, type NucleusConfig } from '../config.js'
 import { withExampleAgents } from '../examples/agents.js'
 import { loadEnvFile } from '../env.js'
 import { chatLoop } from './chat.js'
@@ -34,38 +34,76 @@ import { c, duration, heading, ICON, line, money, parseArgv, recoveryHint, statu
  * 编排者**不保持活着**。子 run 终态时同事务唤醒，第 2 次 attempt 才整合。
  * 这正是真实模型该有的行为节奏。
  */
-const DEMO_SCRIPT: MockScript = {
-  orchestrator: [
-    {
-      text: '这件事需要调研，我委派给专家。',
-      tool: { name: 'delegate', args: {
-        agent: 'researcher',
-        goal: '调研目标主题，给出可选方案与取舍',
-        context: '用户只给了一句话需求，没有更多约束；本机没有配搜索服务，用已有知识作答。',
-        acceptance: '至少两个候选方案，每条结论标注来源；完整内容写成 artifact。',
-        why: '需要调研与信息整理，researcher 的职责范围',
-      } },
-    },
-    // ↓ 被 wake 唤醒后的第 2 次 attempt
-    {
-      submit: {
-        status: 'ok',
-        summary: '调研完成：专家确认方向可行，关键依据已整理成报告。',
-        artifacts: [],
+/**
+ * 演示脚本。
+ *
+ * **按实际存在的专家生成**，不能写死。原来硬编码派给 `researcher` ——
+ * 于是任何自定义了专家的项目里 `nucleus ask --mock` 都会被
+ * `delegate.known-agent` 拦下，而那看起来像 bug 而不是脚本过期。
+ *
+ * 编排者第 1 次 attempt 只做委派 —— 委派后 worker 会 arm wake 并结束本轮，
+ * 编排者**不保持活着**。子 run 终态时同事务唤醒，第 2 次 attempt 才整合。
+ * 这正是真实模型该有的行为节奏。
+ *
+ * 专家那边不写脚本：mock 会照着 submit_result 的 schema 合成一份满足契约的
+ * 结果，所以任何专家（包括声明了 requiredFields 的）都能跑完。
+ */
+function demoScript(config: NucleusConfig): MockScript {
+  const expert = config.agents.find((a) => a.id !== config.defaults.entryAgent)
+  const entry = config.defaults.entryAgent
+
+  if (!expert) {
+    // 没有专家时编排者直接作答 —— 这也是全新安装的正常状态
+    return {
+      [entry]: [{ submit: { status: 'ok', summary: '（mock）还没有专家，我直接作答。', artifacts: [] } }],
+    }
+  }
+
+  // 专家有 artifact 权限时让它写一份报告 —— verify 要验「完整内容进 artifact」
+  // 这条链路。没有该权限的专家就跳过，不能假定所有项目的专家都能出产物。
+  const canWrite = (expert.permissions ?? []).includes('artifact')
+  return {
+    ...(canWrite
+      ? {
+          [expert.id]: [
+            {
+              tool: {
+                name: 'write_report',
+                args: {
+                  title: 'mock 演示报告',
+                  content: '## 结论\n（mock）可行。\n\n## 依据\n见来源。',
+                },
+              },
+            },
+            // 第二轮不写脚本 —— 走 schema 合成，任何契约都能满足
+          ],
+        }
+      : {}),
+    [entry]: [
+      {
+        text: '这件事需要专业判断，我委派给专家。',
+        tool: {
+          name: 'delegate',
+          args: {
+            agent: expert.id,
+            goal: '按你的职责处理用户这次的请求',
+            context:
+              '用户只给了一句话需求，没有更多约束；本机没有配外部服务，用已有知识作答。',
+            acceptance: '给出结论与依据；完整内容写成 artifact 后在 artifacts 中引用。',
+            why: `${expert.id} 的职责范围覆盖这件事`,
+          },
+        },
       },
-    },
-  ],
-  researcher: [
-    { tool: { name: 'write_report', args: { title: '主题调研', content: '## 结论\n可行。\n\n## 依据\n见来源。' } } },
-    {
-      submit: {
-        status: 'ok',
-        summary: '主题可行，关键依据已整理成报告。',
-        findings: [{ claim: '该方向可行', sources: ['内部知识', '已有实践'] }],
-        artifacts: ['reports/主题调研.md'],
+      // ↓ 被 wake 唤醒后的第 2 次 attempt
+      {
+        submit: {
+          status: 'ok',
+          summary: `（mock）已整合 ${expert.id} 的结果。`,
+          artifacts: [],
+        },
       },
-    },
-  ],
+    ],
+  }
 }
 
 async function open(flags: Record<string, string | true>): Promise<Nucleus> {
@@ -108,7 +146,7 @@ async function open(flags: Record<string, string | true>): Promise<Nucleus> {
     config,
     databaseUrl: dbUrl,
     dataDir: dbUrl ? null : (dataDir ?? '.nucleus-data/pglite'),
-    ...(useMock ? { mock: DEMO_SCRIPT } : {}),
+    ...(useMock ? { mock: demoScript(config) } : {}),
   })
 }
 
@@ -390,7 +428,8 @@ async function verify(flags: Record<string, string | true>): Promise<number> {
   heading('nucleus verify')
   // verify 是离线冒烟，需要一个专家才能验完整的委派链路。
   // 示例专家不在 defaultConfig 里 —— 专家由用户定义
-  const n = await boot({ config: withExampleAgents(defaultConfig), mock: DEMO_SCRIPT })
+  const cfg = withExampleAgents(defaultConfig)
+  const n = await boot({ config: cfg, mock: demoScript(cfg) })
   const results: Array<[string, boolean, string]> = []
 
   try {

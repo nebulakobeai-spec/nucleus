@@ -98,6 +98,11 @@ export class ToolRegistry {
    * 不在白名单里的工具**根本不会出现在给模型的定义中** ——
    * 模型看不到就无从调用，这比任何 prompt 约束都强。
    */
+  /** 全部已注册工具 —— 诊断与生成 agent 定义时要看完整目录 */
+  all(): ToolDefinition[] {
+    return [...this.#tools.values()]
+  }
+
   /**
    * 某个 agent 能看到的工具。
    *

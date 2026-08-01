@@ -4,6 +4,19 @@ import { dirname, join, resolve } from 'node:path'
 import { loadConfig } from '../config-file.js'
 import { DEFAULT_AGENTS_DIR } from '../config/agent-files.js'
 import { GRANTABLE, PERMISSION_SPECS } from '../runtime/permissions.js'
+import { createInterface } from 'node:readline/promises'
+import { isMockOnly } from '../config.js'
+import type { Nucleus } from '../boot.js'
+import {
+  bootForProposal,
+  buildPrompt,
+  printPermissions,
+  proposalSchema,
+  renderAgentMd,
+  renderCasesMd,
+  validateProposal,
+  type ProposedAgent,
+} from './agent-propose.js'
 import { c, heading, ICON, line, strFlag } from './ui.js'
 
 /**
@@ -154,10 +167,176 @@ function casesScaffold(id: string): string {
 `
 }
 
+/**
+ * 让模型提一份定义。
+ *
+ * 走真实 router —— 与跑任务是同一条调用路径，所以模型链、熔断、用量统计
+ * 都照常生效，不是另开一个「工具用」的通道。
+ */
+async function propose(
+  n: Nucleus,
+  id: string,
+  description: string,
+): Promise<{ proposal: ProposedAgent; model: string; tokens: number } | null> {
+  const res = await n.router.chat(n.config.defaults.modelChain, {
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是设计 agent 定义的助手。只调用 propose_agent 提交结果，不要输出别的。',
+      },
+      { role: 'user', content: buildPrompt(n, id, description) },
+    ],
+    tools: [
+      {
+        name: 'propose_agent',
+        description: '提交这个专家 agent 的设计',
+        parameters: proposalSchema(),
+      },
+    ],
+  })
+
+  const call = res.toolCalls.find((t) => t.name === 'propose_agent')
+  if (!call) {
+    line(`${ICON.fail} 模型没有调用 propose_agent`)
+    line(c.gray(`  它说：${res.content.slice(0, 200) || '(无输出)'}`))
+    line(c.gray('  换个模型试试：--model <key>'))
+    return null
+  }
+  let parsed: ProposedAgent
+  try {
+    parsed = JSON.parse(call.arguments) as ProposedAgent
+  } catch (e) {
+    line(`${ICON.fail} 模型给的参数不是合法 JSON：${(e as Error).message}`)
+    return null
+  }
+  return {
+    proposal: parsed,
+    model: res.modelKey,
+    tokens: res.usage.tokensIn + res.usage.tokensOut,
+  }
+}
+
+/** 读一行确认。非 TTY 下必须显式 --yes —— 授权决定不该被管道悄悄通过 */
+async function confirm(question: string, flags: Record<string, string | true>): Promise<boolean> {
+  if (flags['yes'] === true) return true
+  if (!process.stdin.isTTY) {
+    line(`${ICON.fail} 非交互环境下需要 --yes 才能写入`)
+    line(c.gray('  权限是授权决定，不该被管道悄悄通过'))
+    return false
+  }
+  process.stdout.write(`${question} [y/N] `)
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    for await (const l of rl) return /^y(es)?$/i.test(l.trim())
+  } finally {
+    rl.close()
+  }
+  return false
+}
+
+async function describeFlow(
+  id: string,
+  description: string,
+  dir: string,
+  flags: Record<string, string | true>,
+): Promise<number> {
+  const n = await bootForProposal(flags)
+  try {
+    if (isMockOnly(n.config)) {
+      // mock 生成出来的是垃圾，但看起来像样 —— 这比报错更糟
+      line(`${ICON.fail} 当前只有 mock 模型，生成不出有用的定义`)
+      line(c.gray('  配置真实模型：cp nucleus.config.example.json nucleus.config.json'))
+      line(c.gray('  或者不带 --describe，先生成空骨架自己填'))
+      return 1
+    }
+
+    heading(`让模型设计 ${id}`)
+    line(c.gray(`模型链：${n.config.defaults.modelChain.join(' → ')}`))
+    line(c.gray(`已知：${n.tools.all().length} 个工具 · ${n.config.agents.length} 个现有 agent`))
+    line()
+
+    const got = await propose(n, id, description)
+    if (!got) return 1
+    const { proposal, model, tokens } = got
+
+    const problems = validateProposal(n, id, proposal)
+    const fatal = problems.filter((p) => p.fatal)
+
+    heading('提案')
+    line(`${c.gray('何时用')} ${proposal.whenToUse}`)
+    line()
+    line(c.gray('正文（模型收到的 prompt）：'))
+    for (const l of proposal.identity.trim().split('\n')) line(`  ${l}`)
+    line()
+    line(c.gray('建议权限：'))
+    printPermissions(proposal.permissions ?? [])
+    if (proposal.rationale) {
+      line()
+      line(c.gray(`理由：${proposal.rationale}`))
+    }
+    if (proposal.resultFields && Object.keys(proposal.resultFields).length) {
+      line()
+      line(c.gray(`结果字段：${Object.keys(proposal.resultFields).join(', ')}`))
+      if (proposal.requiredFields?.length) {
+        line(c.gray(`必填：${proposal.requiredFields.join(', ')}`))
+      }
+    }
+    line()
+    line(c.gray(`试题 ${proposal.cases?.length ?? 0} 道 · ${model} · ${tokens} tokens`))
+
+    if (problems.length) {
+      heading('检查')
+      for (const p of problems) {
+        line(`${p.fatal ? ICON.fail : ICON.warn} ${c.gray(p.field)} ${p.message}`)
+      }
+    }
+    if (fatal.length) {
+      line()
+      line(c.red(`有 ${fatal.length} 项必须修正，未写入。`))
+      line(c.gray('  重跑一次，或不带 --describe 自己写'))
+      return 1
+    }
+
+    line()
+    // 权限是授权决定，必须显式确认 —— 模型顺手给个 execute 是真会发生的
+    if (!(await confirm(`写入 ${dir}/${id}.md？`, flags))) {
+      line(c.gray('未写入。'))
+      return 1
+    }
+
+    const path = resolve(join(dir, `${id}.md`))
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, renderAgentMd(id, proposal), 'utf8')
+    const casesPath = path.replace(/\.md$/, '.cases.md')
+    if (proposal.cases?.length && !existsSync(casesPath)) {
+      await writeFile(casesPath, renderCasesMd(id, proposal.cases), 'utf8')
+    }
+
+    line(`${ICON.ok} ${path}`)
+    if (proposal.cases?.length) line(`${ICON.ok} ${casesPath}`)
+    line()
+    line('接下来：')
+    line(`  ${c.cyan(`nucleus agent show ${id}`)} —— 看模型实际会收到什么`)
+    line(`  ${c.cyan(`nucleus agent try ${id} --n 3`)} —— 跑试题集`)
+    line()
+    line(
+      c.gray(
+        '模型不知道你的数据源与验收标准，所以 whenToUse 会「读起来合理但偏泛」。' +
+          '靠上面那个循环修，不是靠再生成一遍。',
+      ),
+    )
+    return 0
+  } finally {
+    await n.close()
+  }
+}
+
 export async function agentNew(argv: string[], flags: Record<string, string | true>): Promise<number> {
   const id = argv[0]
   if (!id) {
-    line(c.red('用法：nucleus agent new <id> [--dir agents]'))
+    line(c.red('用法：nucleus agent new <id> [--describe "…"] [--dir agents]'))
+    line(c.gray('  --describe 让模型据你的描述生成完整定义（需要真实模型）'))
     line(c.gray('  id 会成为文件名与 agent id：小写字母、数字、连字符'))
     return 1
   }
@@ -167,6 +346,7 @@ export async function agentNew(argv: string[], flags: Record<string, string | tr
   }
 
   const dir = strFlag(flags, 'dir') ?? process.env['NUCLEUS_AGENTS_DIR'] ?? DEFAULT_AGENTS_DIR
+  const describe = strFlag(flags, 'describe')
   const path = resolve(join(dir, `${id}.md`))
   const casesPath = path.replace(/\.md$/, '.cases.md')
 
@@ -175,6 +355,8 @@ export async function agentNew(argv: string[], flags: Record<string, string | tr
     line(c.gray('  改它就行；要看模型实际收到什么：nucleus agent show ' + id))
     return 1
   }
+
+  if (describe) return describeFlow(id, describe, dir, flags)
 
   // 已有专家的 id —— 写进骨架提醒不要语义重叠
   let existing: string[] = []
