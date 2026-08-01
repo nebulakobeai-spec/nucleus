@@ -17,8 +17,16 @@ import { c, heading, ICON, line, strFlag, table, visibleLength } from './ui.js'
  * 拼装逻辑 —— 那样迟早和真实请求不一致，而这个命令的全部价值就在于可信。
  */
 
+/** 额外带回 agent 来源与试题集 —— 「这个 agent 哪来的」必须答得出 */
+let lastLoaded: { agentSources: Record<string, string>; cases: Record<string, string[]> } = {
+  agentSources: {},
+  cases: {},
+}
+
 async function open(flags: Record<string, string | true>): Promise<Nucleus> {
-  const { config } = await loadConfig(strFlag(flags, 'config'))
+  const loaded = await loadConfig(strFlag(flags, 'config'))
+  const { config } = loaded
+  lastLoaded = { agentSources: loaded.agentSources, cases: loaded.cases }
   return boot({
     config,
     databaseUrl: strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null,
@@ -43,11 +51,14 @@ export async function agentList(_argv: string[], flags: Record<string, string | 
           a.name,
           // 「什么时候派给它」——编排者的选路依据，也是人最想先看到的一列
           a.whenToUse ?? c.red('（未声明）'),
-          c.gray(spec.modelChain.join(' → ')),
-          a.requiredFields?.length ? c.yellow(String(a.requiredFields.length)) : c.gray('0'),
+          // 两种来源并存，所以「这个 agent 哪来的」必须一眼看到
+          c.gray(sourceLabel(lastLoaded.agentSources[a.id])),
+          (lastLoaded.cases[a.id]?.length ?? 0) > 0
+            ? String(lastLoaded.cases[a.id]!.length)
+            : c.gray('—'),
         ]
       }),
-      ['ID', '名称', '什么时候派给它', '模型链', '必填'],
+      ['ID', '名称', '什么时候派给它', '来源', '试题'],
     )
     line()
     line(c.gray(`▸ 入口 agent（用户提问先落到它手上）`))
@@ -63,6 +74,14 @@ export async function agentList(_argv: string[], flags: Record<string, string | 
   } finally {
     await n.close()
   }
+}
+
+/** 绝对路径太长，只显示相对于 agents/ 的部分 */
+function sourceLabel(src: string | undefined): string {
+  if (!src) return '?'
+  if (src === '(config)') return 'config'
+  const i = src.lastIndexOf('/agents/')
+  return i >= 0 ? src.slice(i + 1) : src
 }
 
 export async function agentShow(argv: string[], flags: Record<string, string | true>): Promise<number> {
@@ -87,6 +106,14 @@ export async function agentShow(argv: string[], flags: Record<string, string | t
 
     heading(`${id}${isEntry ? c.cyan('（入口）') : ''}`)
     line(`${c.gray('名称')}     ${cfg.name}`)
+    line(`${c.gray('来源')}     ${sourceLabel(lastLoaded.agentSources[id])}`)
+    const myCases = lastLoaded.cases[id] ?? []
+    line(
+      `${c.gray('试题')}     ` +
+        (myCases.length
+          ? `${myCases.length} 道（${sourceLabel(lastLoaded.agentSources[id])?.replace(/\.md$/, '.cases.md')}）`
+          : c.gray('（无 —— agent try 需要它来做回归对比）')),
+    )
     line(
       `${c.gray('何时用')}   ` +
         (cfg.whenToUse ?? c.red('（未声明 —— 编排者只能靠 id 猜是否该派给它）')),

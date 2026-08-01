@@ -41,6 +41,13 @@ export interface NucleusConfig {
    * 不配置就用不了 OAuth；四家 provider 都支持 API key，OAuth 非必需。
    */
   oauthProviders?: Record<string, OAuthProviderDeclaration>
+  /**
+   * 专家定义所在目录，默认 `agents/`。
+   *
+   * 给「某个专家只想在某台机器上有」留的口子；也可以用
+   * NUCLEUS_AGENTS_DIR 覆盖。
+   */
+  agentsDir?: string
   defaults: {
     modelChain: string[]
     maxSteps: number

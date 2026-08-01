@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { defaultConfig, type NucleusConfig } from './config.js'
+import { DEFAULT_AGENTS_DIR, loadAgentFiles } from './config/agent-files.js'
 import { GRANTABLE, isPermission } from './runtime/permissions.js'
 import { validateResultFields } from './runtime/result-schema.js'
 
@@ -23,11 +24,20 @@ export interface LoadedConfig {
   path: string | null
   /** 覆盖了哪些顶层键，doctor 展示用 */
   overrides: string[]
+  /** 每个 agent 来自哪 —— 两种来源并存时，「这个 agent 哪来的」必须答得出 */
+  agentSources: Record<string, string>
+  /** agents/ 目录里的试题集 */
+  cases: Record<string, string[]>
 }
 
 export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   const path = explicitPath ?? findConfigFile()
-  if (!path) return { config: defaultConfig, path: null, overrides: [] }
+  if (!path) {
+    // 没有配置文件也要读 agents/ —— 否则「只用 md 定义专家」这条路走不通
+    const merged = mergeAgentFiles(defaultConfig, agentsDir(defaultConfig))
+    validate(merged.config, '(内置默认)')
+    return { config: merged.config, path: null, overrides: [], ...merged.meta }
+  }
 
   let raw: string
   try {
@@ -44,8 +54,49 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   }
 
   const { config, overrides } = merge(defaultConfig, parsed)
-  validate(config, path)
-  return { config, path, overrides }
+  const merged = mergeAgentFiles(config, agentsDir(config))
+  validate(merged.config, path)
+  return { config: merged.config, path, overrides, ...merged.meta }
+}
+
+function agentsDir(cfg: NucleusConfig): string {
+  return process.env['NUCLEUS_AGENTS_DIR'] ?? cfg.agentsDir ?? DEFAULT_AGENTS_DIR
+}
+
+/**
+ * 把 `agents/*.md` 合并进配置。
+ *
+ * **文件优先于 JSON**：同 id 时以文件为准。理由是文件是更专门的表达方式，
+ * 而且「我明明改了 agents/x.md 却没生效」比反过来更难排查。
+ * 冲突会在 agentSources 里显示成文件路径，所以不会是无声的。
+ */
+function mergeAgentFiles(
+  cfg: NucleusConfig,
+  dir: string,
+): { config: NucleusConfig; meta: { agentSources: Record<string, string>; cases: Record<string, string[]> } } {
+  const sources: Record<string, string> = {}
+  const cases: Record<string, string[]> = {}
+  for (const a of cfg.agents) sources[a.id] = '(config)'
+
+  const { files, errors } = loadAgentFiles(dir)
+  if (errors.length) {
+    throw new Error(
+      `agents/ 里有 ${errors.length} 个文件解析失败：\n` +
+        errors.map((e) => `  · ${e.path}：${e.message}`).join('\n'),
+    )
+  }
+  if (files.length === 0) return { config: cfg, meta: { agentSources: sources, cases } }
+
+  const byId = new Map(cfg.agents.map((a) => [a.id, a]))
+  for (const f of files) {
+    byId.set(f.agent.id, f.agent)
+    sources[f.agent.id] = f.path
+    if (f.cases.length) cases[f.agent.id] = f.cases
+  }
+  return {
+    config: { ...cfg, agents: [...byId.values()] },
+    meta: { agentSources: sources, cases },
+  }
 }
 
 function findConfigFile(): string | null {
