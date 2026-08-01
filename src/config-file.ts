@@ -34,6 +34,7 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   const path = explicitPath ?? findConfigFile()
   if (!path) {
     // 没有配置文件也要读 agents/ —— 否则「只用 md 定义专家」这条路走不通
+    declaredInConfigFile = new Set()
     const merged = mergeAgentFiles(defaultConfig, agentsDir(defaultConfig))
     validate(merged.config, '(内置默认)')
     return { config: merged.config, path: null, overrides: [], ...merged.meta }
@@ -53,6 +54,7 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
     throw new Error(`配置文件 ${path} 不是合法 JSON：${(e as Error).message}`)
   }
 
+  declaredInConfigFile = new Set((parsed.agents ?? []).map((a) => a.id))
   const { config, overrides } = merge(defaultConfig, parsed)
   const merged = mergeAgentFiles(config, agentsDir(config))
   validate(merged.config, path)
@@ -70,13 +72,22 @@ function agentsDir(cfg: NucleusConfig): string {
  * 而且「我明明改了 agents/x.md 却没生效」比反过来更难排查。
  * 冲突会在 agentSources 里显示成文件路径，所以不会是无声的。
  */
+/** 这个 id 是否在用户的配置文件里显式出现过 */
+let declaredInConfigFile = new Set<string>()
+const configHasAgent = (id: string) => declaredInConfigFile.has(id)
+
 function mergeAgentFiles(
   cfg: NucleusConfig,
   dir: string,
 ): { config: NucleusConfig; meta: { agentSources: Record<string, string>; cases: Record<string, string[]> } } {
   const sources: Record<string, string> = {}
   const cases: Record<string, string[]> = {}
-  for (const a of cfg.agents) sources[a.id] = '(config)'
+  // 区分「内置默认」与「你的配置文件」—— 它们是两回事：
+  // 前者编译进代码（将来会被移除，见 BACKLOG A8），后者是你写的
+  const builtinIds = new Set(defaultConfig.agents.map((a) => a.id))
+  for (const a of cfg.agents) {
+    sources[a.id] = builtinIds.has(a.id) && !configHasAgent(a.id) ? '(内置默认)' : '(配置文件)'
+  }
 
   const { files, errors } = loadAgentFiles(dir)
   if (errors.length) {

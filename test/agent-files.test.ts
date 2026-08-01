@@ -190,8 +190,9 @@ describe('与 nucleus.config.json 并存', () => {
       const { config, agentSources, cases } = await loadConfig(join(dir, 'nucleus.config.json'))
       expect(config.agents.map((a) => a.id)).toContain('analyst')
       expect(agentSources['analyst']).toContain('analyst.md')
-      // 内置的三个仍在，来源标成 config
-      expect(agentSources['orchestrator']).toBe('(config)')
+      // 内置的三个仍在，且与「你的配置文件」区分开 —— 它们是两回事：
+      // 前者编译进代码（A8 会移除），后者是你写的
+      expect(agentSources['orchestrator']).toBe('(内置默认)')
       expect(cases['analyst']).toBeUndefined()
     } finally {
       delete process.env['NUCLEUS_AGENTS_DIR']
@@ -299,5 +300,84 @@ describe('试题不进 context', () => {
     const { agent } = parseAgentFile('/x/analyst.md', `---\nname: x\ncases: [不该被接受]\n---\n正文`)
     // cases 不在 KNOWN_KEYS 里，写在定义文件里会被报成未知键
     expect(agent).toBeUndefined()
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// agent new 的骨架
+// ═══════════════════════════════════════════════════════
+
+describe('scaffold', () => {
+  it('生成的骨架能直接被解析，不需要先改', async () => {
+    const { scaffold } = await import('../src/cli/agent-new.js')
+    const { agent, errors } = parseAgentFile('/x/reviewer.md', scaffold('reviewer', []))
+    expect(errors).toEqual([])
+    expect(agent!.id).toBe('reviewer')
+    expect(agent!.permissions).toEqual(['read'])
+  })
+
+  it('**说明不进 prompt** —— 第一版把它们写在正文里，prompt 涨到 1504 字符', async () => {
+    const { scaffold } = await import('../src/cli/agent-new.js')
+    const { agent } = parseAgentFile('/x/reviewer.md', scaffold('reviewer', ['analyst：做分析']))
+    const prompt = buildSystemPrompt(agent!)
+
+    // markdown 正文里没有注释 —— `#` 是标题，而正文整段就是 identity。
+    // 所以说明必须放在 frontmatter 的 # 行里（解析器会跳过）
+    for (const marker of [
+      'whenToUse 怎么写',
+      '可授予的权限',
+      '你的专家会收到什么',
+      '现有专家',
+      '同义反复',
+      'analyst：做分析',
+    ]) {
+      expect(prompt, marker).not.toContain(marker)
+    }
+    // 正文本身还在
+    expect(prompt).toContain('这段正文就是模型收到的 system prompt')
+    // 骨架的 prompt 应当很短 —— 长了说明又漏了说明文本进去
+    expect(prompt.length).toBeLessThan(500)
+  })
+
+  it('骨架里带上现有专家，提醒不要语义重叠', async () => {
+    const { scaffold } = await import('../src/cli/agent-new.js')
+    const text = scaffold('reviewer', ['analyst：做分析'])
+    // 在文件里（给人看）
+    expect(text).toContain('analyst：做分析')
+    // 但在 frontmatter 的注释区，所以解析不出来
+    const { data } = parseFrontmatter(text)
+    expect(JSON.stringify(data)).not.toContain('analyst：做分析')
+  })
+
+  it('权限说明里连风险一起列 —— LLM 或人顺手给个 execute 是真会发生的', async () => {
+    const { scaffold } = await import('../src/cli/agent-new.js')
+    const text = scaffold('x', [])
+    expect(text).toContain('execute')
+    expect(text).toContain('基本等于拿到本机权限')
+  })
+})
+
+describe('来源标签', () => {
+  it('内置默认 / 配置文件 / md 文件三者分开', async () => {
+    const dir = await fixture({
+      'nucleus.config.json': JSON.stringify({
+        models: [{ key: 'mock:local', provider: 'mock', model: 'mock', baseUrl: 'http://mock.invalid/v1' }],
+        // agents 是整体替换，内置三个会被顶掉，所以 entryAgent 要跟着改 ——
+        // 写这条测试时我自己踩了这个坑，校验把它拦下来了
+        defaults: { modelChain: ['mock:local'], entryAgent: 'custom' },
+        agents: [{ id: 'custom', name: '自定义', identity: '正文', permissions: [] }],
+      }),
+      'agents/analyst.md': MD,
+    })
+    process.env['NUCLEUS_AGENTS_DIR'] = join(dir, 'agents')
+    try {
+      const { agentSources } = await loadConfig(join(dir, 'nucleus.config.json'))
+      expect(agentSources['custom']).toBe('(配置文件)')
+      // 内置三个被顶掉了，所以标签里不该再出现它们
+      expect(agentSources['researcher']).toBeUndefined()
+      expect(agentSources['analyst']).toContain('analyst.md')
+    } finally {
+      delete process.env['NUCLEUS_AGENTS_DIR']
+    }
   })
 })

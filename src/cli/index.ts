@@ -9,6 +9,7 @@ import type { MockScript } from '../providers/mock.js'
 import { authList, authLogin, authLogout, authRefresh, authTest, credentialStatus } from './auth.js'
 import { mcpCall, mcpEnable, mcpList, mcpTools } from './mcp.js'
 import { agentList, agentMap, agentShow } from './agent.js'
+import { agentNew } from './agent-new.js'
 import { artifactCat, artifactList } from './artifact.js'
 import { rulesCmd } from './rules.js'
 import { bundleCmd, replayCmd } from './bundle.js'
@@ -434,6 +435,7 @@ ${c.bold('agent 与规则')}
   agent list                  列出 agent：模型链、工具数、必填字段
   agent show <id>             看模型实际收到的 system prompt 与结果契约
   agent map                   能力边界矩阵：谁能用哪些工具
+  agent new <id>              生成专家定义骨架（含写法说明）
   rules                       规则遵守率：谁不听哪条规则
   artifact list [run]         产出清单
   artifact cat <路径>         读产出内容
@@ -547,6 +549,8 @@ export async function main(argv: string[]): Promise<number> {
           return agentShow(args, flags)
         case 'map':
           return agentMap(args, flags)
+        case 'new':
+          return agentNew(args, flags)
         default:
           // 省一步：nucleus agent researcher 等价于 agent show researcher
           return agentShow(rest, flags)

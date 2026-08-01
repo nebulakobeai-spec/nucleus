@@ -79,7 +79,7 @@ export async function agentList(_argv: string[], flags: Record<string, string | 
 /** 绝对路径太长，只显示相对于 agents/ 的部分 */
 function sourceLabel(src: string | undefined): string {
   if (!src) return '?'
-  if (src === '(config)') return 'config'
+  if (src.startsWith('(')) return src.slice(1, -1)
   const i = src.lastIndexOf('/agents/')
   return i >= 0 ? src.slice(i + 1) : src
 }
