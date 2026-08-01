@@ -37,11 +37,17 @@ export interface MockScript {
 /**
  * 从 system prompt 里识别是哪个 agent。
  * 约定：identity 段首行形如 `# <agentId>`。
+ *
+ * **直接把 id 抽出来，而不是在已知列表里匹配。** 原来匹配不到就退回
+ * `known[0]`，于是脚本里没写的 agent 会拿到别人的剧本 —— `agent try` 试一个
+ * 新专家时正好撞上这个：它拿到编排者的 delegate 剧本，而那个工具根本没注册。
+ *
+ * 抽不出来的 agent 会走到 turns 为空的分支，拿到默认的 submit 兜底，
+ * 这才是「脚本里没写这个 agent」该有的行为。
  */
 function whichAgent(system: string, known: string[]): string {
-  for (const id of known) {
-    if (new RegExp(`^#\\s*${id}\\b`, 'im').test(system)) return id
-  }
+  const m = /^#\s*([a-z][a-z0-9-]*)\s*$/im.exec(system)
+  if (m) return m[1]!
   return known[0] ?? 'unknown'
 }
 

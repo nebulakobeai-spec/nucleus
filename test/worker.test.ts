@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { boot, ask, type Nucleus } from '../src/boot.js'
-import { defaultConfig, withExampleAgents } from '../src/config.js'
+import { defaultConfig } from '../src/config.js'
+import { withExampleAgents } from '../src/examples/agents.js'
 import type { MockScript } from '../src/providers/mock.js'
 import { FakeIds, FakeClock } from '../src/seams.js'
 

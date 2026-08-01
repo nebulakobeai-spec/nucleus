@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { ask, boot, type Nucleus } from '../src/boot.js'
-import { defaultConfig, type NucleusConfig, withExampleAgents } from '../src/config.js'
+import { defaultConfig, type NucleusConfig } from '../src/config.js'
+import { withExampleAgents } from '../src/examples/agents.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import {
   envelopeSizes,

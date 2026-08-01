@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { ask, boot, type Nucleus } from '../../src/boot.js'
-import { EXAMPLE_AGENTS, agentSpec, defaultConfig, type NucleusConfig, withExampleAgents } from '../../src/config.js'
+import { agentSpec, defaultConfig, type NucleusConfig } from '../../src/config.js'
+import { EXAMPLE_AGENTS, withExampleAgents } from '../../src/examples/agents.js'
 import type { ModelConfig } from '../../src/providers/types.js'
 import { ModelRouter } from '../../src/providers/router.js'
 import { PgliteDb } from '../../src/db/pglite.js'

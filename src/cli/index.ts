@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { ask, boot, type Nucleus } from '../boot.js'
-import { defaultConfig, isMockOnly, withExampleAgents } from '../config.js'
+import { defaultConfig, isMockOnly } from '../config.js'
+import { withExampleAgents } from '../examples/agents.js'
 import { loadEnvFile } from '../env.js'
 import { chatLoop } from './chat.js'
 import { printRunList, printRunTree, printTurn, runTurn } from './turn.js'
@@ -10,6 +11,7 @@ import { authList, authLogin, authLogout, authRefresh, authTest, credentialStatu
 import { mcpCall, mcpEnable, mcpList, mcpTools } from './mcp.js'
 import { agentList, agentMap, agentShow } from './agent.js'
 import { agentNew } from './agent-new.js'
+import { agentTry } from './agent-try.js'
 import { artifactCat, artifactList } from './artifact.js'
 import { rulesCmd } from './rules.js'
 import { bundleCmd, replayCmd } from './bundle.js'
@@ -450,6 +452,7 @@ ${c.bold('agent 与规则')}
   agent show <id>             看模型实际收到的 system prompt 与结果契约
   agent map                   能力边界矩阵：谁能用哪些工具
   agent new <id>              生成专家定义骨架（含写法说明）
+  agent try <id> [任务]        只跑这一个专家：--n 重复、--compare 与旧版并排
   rules                       规则遵守率：谁不听哪条规则
   artifact list [run]         产出清单
   artifact cat <路径>         读产出内容
@@ -565,6 +568,8 @@ export async function main(argv: string[]): Promise<number> {
           return agentMap(args, flags)
         case 'new':
           return agentNew(args, flags)
+        case 'try':
+          return agentTry(args, flags)
         default:
           // 省一步：nucleus agent researcher 等价于 agent show researcher
           return agentShow(rest, flags)
