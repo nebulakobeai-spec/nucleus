@@ -293,6 +293,7 @@ export class Runner {
       const res = await this.router.chat(agent.modelChain, {
         messages,
         tools: wire,
+        attemptId,
         ...(agent.temperature !== undefined ? { temperature: agent.temperature } : {}),
         ...(agent.maxTokens !== undefined ? { maxTokens: agent.maxTokens } : {}),
         signal,

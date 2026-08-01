@@ -37,6 +37,14 @@ export interface ToolDef {
 }
 
 export interface ChatRequest {
+  /**
+   * 关联的 attempt。
+   *
+   * 用于把 provider 事件与用量明细挂到具体 attempt 上 —— 「这次 429 是哪个
+   * 任务触发的」要答得出。可选：`agent new --describe` 这类工具性调用没有 attempt。
+   */
+  attemptId?: string | null
+
   model: string
   messages: ChatMessage[]
   tools?: ToolDef[]

@@ -13,6 +13,7 @@ import { agentList, agentMap, agentShow } from './agent.js'
 import { agentNew } from './agent-new.js'
 import { agentTry } from './agent-try.js'
 import { artifactCat, artifactList } from './artifact.js'
+import { providersCmd } from './providers.js'
 import { rulesCmd } from './rules.js'
 import { bundleCmd, replayCmd } from './bundle.js'
 import { loadConfig } from '../config-file.js'
@@ -493,6 +494,7 @@ ${c.bold('agent 与规则')}
   agent new <id>              生成专家定义骨架（含写法说明）
   agent try <id> [任务]        只跑这一个专家：--n 重复、--compare 与旧版并排
   rules                       规则遵守率：谁不听哪条规则
+  providers [log]             provider 层：熔断、失败、跳过原因、用量
   artifact list [run]         产出清单
   artifact cat <路径>         读产出内容
 
@@ -631,6 +633,9 @@ export async function main(argv: string[]): Promise<number> {
           return artifactCat(rest, flags)
       }
     }
+    case 'providers':
+    case 'provider':
+      return providersCmd(rest, flags)
     case 'rules':
       return rulesCmd(rest, flags)
     case 'bundle':

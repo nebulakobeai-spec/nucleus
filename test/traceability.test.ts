@@ -197,3 +197,115 @@ describe('bundle 带上决定行为的东西', () => {
     expect(JSON.stringify(c.agents)).toContain('研究专家')
   })
 })
+
+// ═══════════════════════════════════════════════════════
+// provider 层：熔断、429、fallback、失败
+// ═══════════════════════════════════════════════════════
+
+describe('provider 事件', () => {
+  /** 两个都连不上的模型 —— 制造真实的失败与熔断 */
+  function failingChain(): NucleusConfig {
+    const c = cfg()
+    c.models = [
+      { key: 'a:one', provider: 'ollama', model: 'one', baseUrl: 'http://127.0.0.1:19998/v1' },
+      { key: 'b:two', provider: 'ollama', model: 'two', baseUrl: 'http://127.0.0.1:19999/v1' },
+      ...c.models,
+    ]
+    c.defaults.modelChain = ['a:one', 'b:two']
+    return c
+  }
+
+  async function events(kind?: string) {
+    const r = await n!.db.query<{
+      key: string
+      kind: string
+      error_code: string | null
+      detail: Record<string, unknown>
+    }>(
+      kind
+        ? `select key, kind, error_code, detail from provider_events where kind = $1 order by id`
+        : `select key, kind, error_code, detail from provider_events order by id`,
+      kind ? [kind] : [],
+    )
+    return r.rows
+  }
+
+  it('选路决策记下**被跳过的候选与原因** —— 「为什么用了链上第 3 个」', async () => {
+    n = await boot({
+      config: cfg(),
+      deps: { clock: new FakeClock(), ids: new FakeIds() },
+      mock: SCRIPT,
+    })
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    await ask(n, conv.id, 'x')
+
+    const picked = await events('picked')
+    expect(picked.length).toBeGreaterThan(0)
+    // 链上只有一个模型时 skipped 为空，但字段必须在 —— 结构稳定才好查
+    expect(picked[0]!.detail).toHaveProperty('skipped')
+    expect(picked[0]!.detail).toHaveProperty('chain')
+  })
+
+  it('失败记下错误码、根因提示与连续失败次数', async () => {
+    n = await boot({ config: failingChain(), deps: { clock: new FakeClock(), ids: new FakeIds() } })
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    await ask(n, conv.id, 'x')
+
+    const failed = await events('failed')
+    expect(failed.length).toBeGreaterThan(0)
+    expect(failed[0]!.error_code).toBe('provider.unreachable')
+    // 根因提示 —— 只报错误码等于让人自己猜
+    expect(String(failed[0]!.detail['hint'])).toContain('出网权限')
+    expect(failed[0]!.detail['consecutiveErrors']).toBeGreaterThan(0)
+  })
+
+  it('熔断状态变化单独一条 —— 「什么时候打开的、因为什么、开到几点」', async () => {
+    n = await boot({ config: failingChain(), deps: { clock: new FakeClock(), ids: new FakeIds() } })
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    // 反复失败直到熔断
+    for (let i = 0; i < 4; i++) await ask(n, conv.id, `x${i}`)
+
+    const opened = await events('breaker.open')
+    expect(opened.length).toBeGreaterThan(0)
+    expect(opened[0]!.detail['from']).toBe('closed')
+    expect(opened[0]!.detail['until']).toBeTruthy()
+  })
+
+  it('全链不可用单独记 —— 「429 打挂整条 fallback 链」就是这一条', async () => {
+    n = await boot({ config: failingChain(), deps: { clock: new FakeClock(), ids: new FakeIds() } })
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    for (let i = 0; i < 5; i++) await ask(n, conv.id, `x${i}`)
+
+    const ex = await events('exhausted')
+    expect(ex.length).toBeGreaterThan(0)
+    // 每个模型各自为什么不可用、几点恢复
+    const per = ex[0]!.detail['perModel'] as Array<{ key: string; reason: string }>
+    expect(per.length).toBe(2)
+    expect(per[0]!.reason).toBe('熔断中')
+    expect(ex[0]!.detail['earliestAvailableAt']).toBeTruthy()
+  })
+})
+
+describe('usage_log', () => {
+  it('逐次调用的用量落库 —— 这张表建了从来没人写过', async () => {
+    const runId = await run()
+    const u = await n!.db.query<{ n: number; tin: number }>(
+      `select count(*)::int n, sum(u.tokens_in)::int tin from usage_log u
+         join run_attempts a on a.id = u.run_attempt_id
+         join runs r on r.id = a.run_id where r.root_run_id = $1`,
+      [runId],
+    )
+    // 4 次模型调用
+    expect(u.rows[0]!.n).toBeGreaterThanOrEqual(3)
+    expect(u.rows[0]!.tin).toBeGreaterThan(0)
+  })
+
+  it('挂在 attempt 上 —— 「这次 429 是哪个任务触发的」要答得出', async () => {
+    const runId = await run()
+    const u = await n!.db.query<{ n: number }>(
+      `select count(*)::int n from usage_log where run_attempt_id is null`,
+    )
+    expect(u.rows[0]!.n).toBe(0)
+    expect(runId).toBeTruthy()
+  })
+})

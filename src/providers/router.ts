@@ -1,7 +1,7 @@
 import { NucleusError } from '../errors.js'
 import type { Deps } from '../seams.js'
 import type { Db } from '../db/types.js'
-import { ProviderHealth } from './health.js'
+import { ProviderHealth, type ProviderEventSink } from './health.js'
 import { OpenAICompatProvider, type FetchLike } from './openai-compat.js'
 import { AnthropicProvider } from './anthropic.js'
 import { costOf, type ChatRequest, type ChatResponse, type ModelConfig, type Provider } from './types.js'
@@ -30,6 +30,39 @@ export interface RouteResult extends ChatResponse {
  * 全链不可用时抛 `provider.all_exhausted` 并带上最早可用时间，
  * 由上层把 run 转成 waiting_retry，不浪费调用。
  */
+/**
+ * provider 层事件落库。
+ *
+ * 与 run_events 分开：熔断状态变化可能发生在 reconciler 里，与任何 run 无关；
+ * 而「最近一小时 provider 出了什么问题」这个问题也不该按 run 去翻。
+ */
+class DbProviderEvents {
+  constructor(
+    private db: Db,
+    private clock: Deps['clock'],
+    private attemptId: string | null = null,
+  ) {}
+
+  async record(e: { key: string; kind: string; errorCode?: string | null; detail?: unknown }): Promise<void> {
+    await this.db
+      .query(
+        `insert into provider_events (at, key, kind, error_code, run_attempt_id, detail)
+         values ($1,$2,$3,$4,$5,$6::jsonb)`,
+        [
+          this.clock.nowIso(),
+          e.key,
+          e.kind,
+          e.errorCode ?? null,
+          this.attemptId,
+          JSON.stringify(e.detail ?? {}),
+        ],
+      )
+      .catch(() => {
+        /* 记录失败不该拖垮调用 —— 但错误本身仍会照常上抛 */
+      })
+  }
+}
+
 export class ModelRouter {
   #health: ProviderHealth
   #fetch: FetchLike | undefined
@@ -76,6 +109,32 @@ export class ModelRouter {
     return Number.isFinite(min) ? min : assumed
   }
 
+  /** 逐次调用的用量明细 —— usage_log 建了从来没人写 */
+  async #recordUsage(
+    cfg: ModelConfig,
+    res: { usage: { tokensIn: number; tokensOut: number; cacheRead: number } },
+    req: { attemptId?: string | null },
+  ): Promise<void> {
+    await this.db
+      .query(
+        `insert into usage_log (run_attempt_id, provider, model, tokens_in, tokens_out, cache_read, cost_usd, created_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          req.attemptId ?? null,
+          cfg.provider,
+          cfg.model,
+          res.usage.tokensIn,
+          res.usage.tokensOut,
+          res.usage.cacheRead,
+          costOf(cfg, res.usage),
+          this.deps.clock.nowIso(),
+        ],
+      )
+      .catch(() => {
+        /* 用量记录失败不该拖垮调用 */
+      })
+  }
+
   async chat(chainKeys: string[], req: Omit<ChatRequest, 'model'>): Promise<RouteResult> {
     const chain = chainKeys.map((k) => {
       const m = this.models.get(k)
@@ -83,6 +142,11 @@ export class ModelRouter {
       return m
     })
 
+    const events: ProviderEventSink = new DbProviderEvents(
+      this.db,
+      this.deps.clock,
+      req.attemptId ?? null,
+    )
     const attempts: Array<{ key: string; errorCode: string }> = []
     const tried = new Set<string>()
     let lastError: NucleusError | null = null
@@ -93,6 +157,23 @@ export class ModelRouter {
 
       const pick = await this.#health.pick(remaining)
       if (!('model' in pick)) {
+        // 全链不可用是**最该被记下的那一次** —— 「429 打挂整条 fallback 链」
+        // 就是这一条。以前只抛错不落库，于是事后只能看到 run 失败，
+        // 看不到当时每个模型各自为什么不可用、几点恢复
+        await events.record({
+          key: chainKeys.join(','),
+          kind: 'exhausted',
+          errorCode: 'provider.all_exhausted',
+          detail: {
+            chain: chainKeys,
+            earliestAvailableAt: pick.earliestAvailableAt?.toISOString() ?? null,
+            perModel: pick.perModel.map((p) => ({
+              key: p.key,
+              reason: p.reason,
+              availableAt: p.availableAt?.toISOString() ?? null,
+            })),
+          },
+        })
         throw new NucleusError('provider.all_exhausted', '所有模型都不可用', {
           detail: {
             earliestAvailableAt: pick.earliestAvailableAt?.toISOString() ?? null,
@@ -111,9 +192,42 @@ export class ModelRouter {
       const cfg = pick.model
       tried.add(cfg.key)
 
+      // 选路决策：选了谁、为什么，以及**被跳过的候选与原因**。
+      // 后者以前只在全链失败时才有，于是「为什么用了链上第 3 个」答不出
+      await events.record({
+        key: cfg.key,
+        kind: 'picked',
+        detail: {
+          reason: pick.reason,
+          chain: chainKeys,
+          skipped: pick.skipped.map((sk) => ({
+            key: sk.key,
+            reason: sk.reason,
+            availableAt: sk.availableAt?.toISOString() ?? null,
+          })),
+        },
+      })
+
+      const startedAt = this.deps.clock.now()
       try {
         const res = await this.#callWithRetry(cfg, req)
         await this.#health.noteSuccess(cfg.key, res.rateLimit)
+        await events.record({
+          key: cfg.key,
+          kind: 'ok',
+          detail: {
+            latencyMs: this.deps.clock.now() - startedAt,
+            tokensIn: res.usage.tokensIn,
+            tokensOut: res.usage.tokensOut,
+            cacheRead: res.usage.cacheRead,
+            // 学到的额度 —— 下次 preflight 的依据
+            remainingRequests: res.rateLimit?.remainingRequests ?? null,
+            resetAt: res.rateLimit?.resetAt ? new Date(res.rateLimit.resetAt).toISOString() : null,
+          },
+        })
+        // 逐次调用的用量明细。usage_log 这张表建了从来没人写过，
+        // 于是成本分析只能到 attempt 级聚合
+        await this.#recordUsage(cfg, res, req)
         return {
           ...res,
           modelKey: cfg.key,
@@ -125,9 +239,36 @@ export class ModelRouter {
         // 取消不是 provider 的问题，直接上抛
         if (err.code === 'runtime.cancelled') throw err
         lastError = err
+        const before = await this.#health.get(cfg.key)
         await this.#health.noteFailure(cfg.key, err.code, {
           retryAfterMs: err.retryAfterMs,
         })
+        const after = await this.#health.get(cfg.key)
+        await events.record({
+          key: cfg.key,
+          kind: 'failed',
+          errorCode: err.code,
+          detail: {
+            latencyMs: this.deps.clock.now() - startedAt,
+            message: err.message.slice(0, 500),
+            retryAfterMs: err.retryAfterMs ?? null,
+            consecutiveErrors: after.consecutiveErrors,
+            hint: (err.detail as { hint?: string } | undefined)?.hint ?? null,
+          },
+        })
+        // 熔断状态变化单独记一条 —— 「什么时候打开的、因为什么、开到几点」
+        if (before.breakerState !== after.breakerState) {
+          await events.record({
+            key: cfg.key,
+            kind: `breaker.${after.breakerState}`,
+            errorCode: err.code,
+            detail: {
+              from: before.breakerState,
+              until: after.breakerUntil?.toISOString() ?? null,
+              consecutiveErrors: after.consecutiveErrors,
+            },
+          })
+        }
         attempts.push({ key: cfg.key, errorCode: err.code })
         if (err.code === 'provider.bad_request') throw err // 换模型也没用
       }

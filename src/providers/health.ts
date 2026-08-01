@@ -17,6 +17,13 @@ export interface ModelHealth {
 export interface PreflightPick {
   model: ModelConfig
   reason: string
+  /**
+   * 被跳过的候选及原因。
+   *
+   * 以前只在**全链失败**时才有这个信息，于是「为什么用了链上第 3 个」
+   * 答不出来。选中时同样要记。
+   */
+  skipped: Array<{ key: string; reason: string; availableAt: Date | null }>
 }
 
 export interface PreflightUnavailable {
@@ -43,6 +50,21 @@ export interface HealthOptions {
  * 现实前提：没有哪家提供可靠的「剩余额度」查询 API。所以是
  * **被动学习**（解析响应头 + 429）+ **本地令牌桶**（无响应头的家）。
  */
+/**
+ * provider 层事件的落点。
+ *
+ * 注入而不是让 ProviderHealth 直接写表：它同时被 router 与 reconciler 用，
+ * 而后者的熔断状态变化与任何 run 都无关。
+ */
+export interface ProviderEventSink {
+  record(e: {
+    key: string
+    kind: string
+    errorCode?: string | null
+    detail?: unknown
+  }): Promise<void>
+}
+
 export class ProviderHealth {
   #errorThreshold: number
   #breakerMs: number
@@ -147,7 +169,8 @@ export class ProviderHealth {
 
     candidates.sort((a, b) => a.score - b.score)
     const best = candidates[0]!
-    return { model: best.cfg, reason: best.reason }
+    // 连同被跳过的原因一起返回 —— 「为什么用了链上第 3 个」要答得出
+    return { model: best.cfg, reason: best.reason, skipped: perModel }
   }
 
   /** 本地令牌桶：给没有 rate-limit 响应头的 provider 兜底。 */

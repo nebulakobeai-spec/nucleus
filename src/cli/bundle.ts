@@ -222,8 +222,14 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
         [rootId],
       )
 
-      const transcripts = await n.db.query(
-        `select t.* from transcripts t
+      // --no-transcripts：transcript 里有完整的 prompt 与模型回复，
+      // 虽然过 redactText，但内容本身可能是你不想外传的
+      const transcripts = flags['no-transcripts'] === true
+        ? { rows: [] as unknown[] }
+        : await n.db.query(
+        // 带上 agent 与 attempt 号：transcript 挂在 attempt 上，同一个 step 1
+        // 会在不同 agent、不同 attempt 上各出现一次，只看 step 分不清
+        `select t.*, r.agent_id, r.depth, a.attempt_no from transcripts t
            join run_attempts a on a.id = t.run_attempt_id
            join runs r on r.id = a.run_id
           where r.root_run_id = $1
@@ -304,6 +310,14 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
     }
     line()
     line(c.gray('已脱敏，可直接提交。本地复现：nucleus replay <文件>'))
+    if (flags['no-transcripts'] === true) {
+      line(
+        `${ICON.warn} ${c.yellow('已省略 transcript')}` +
+          c.gray(' —— 「模型为什么那么做」将无法追溯，只剩状态与用量'),
+      )
+    } else if ((bundle.run?.transcripts.length ?? 0) > 0) {
+      line(c.gray('包含 prompt 与模型回复；不想外传时加 --no-transcripts'))
+    }
     return 0
   } finally {
     await n.close()
@@ -378,6 +392,9 @@ export async function replayCmd(argv: string[], _flags: Record<string, string | 
     // 「为什么派给了这个专家」「为什么忽略了验收标准」只有这里答得出
     const ts = (bundle.run.transcripts ?? []) as Array<{
       step: number
+      agent_id?: string
+      attempt_no?: number
+      depth?: number
       truncated: boolean
       request: { messages?: Array<{ role: string; content: string }>; tools?: string[] }
       response: {
@@ -392,8 +409,11 @@ export async function replayCmd(argv: string[], _flags: Record<string, string | 
       heading(`模型往返（${ts.length} 次）`)
       for (const t of ts) {
         const msgs = t.request.messages ?? []
+        const who = t.agent_id
+          ? `${'  '.repeat(t.depth ?? 0)}${c.cyan(t.agent_id)} ${c.gray(`#${t.attempt_no}`)} step ${t.step}`
+          : `step ${t.step}`
         line(
-          `${c.bold(`step ${t.step}`)} ${c.gray(`${t.response.model ?? '?'} · ${msgs.length} 条消息 · 可用工具 ${(t.request.tools ?? []).join(', ') || '无'}`)}` +
+          `${c.bold(who)} ${c.gray(`${t.response.model ?? '?'} · ${msgs.length} 条消息 · 可用工具 ${(t.request.tools ?? []).join(', ') || '无'}`)}` +
             (t.truncated ? ` ${c.yellow('（已截断）')}` : ''),
         )
         // 最后一条用户消息通常是任务信封或工具结果 —— 最能说明它当时看到了什么

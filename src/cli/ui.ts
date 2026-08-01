@@ -187,6 +187,7 @@ const BOOLEAN_FLAGS = new Set([
   'oauth',
   'no-keychain',
   'no-browser',
+  'no-transcripts',
   'help',
 ])
 
