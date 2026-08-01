@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { Permission } from './runtime/permissions.js'
 import type { ModelConfig } from './providers/types.js'
 import type { AgentSpec } from './runtime/runner.js'
 import type { McpServerConfig } from './mcp/protocol.js'
@@ -111,9 +112,30 @@ export interface AgentConfig {
   identity: string
   policy?: string
   modelChain?: string[]
-  /** T3：能力边界。不在白名单里的工具模型根本看不到 */
-  toolsAllow: string[]
+  /**
+   * 授予的权限 —— T3 能力边界的**主关**。
+   *
+   * 工具声明自己需要什么权限，这里授予权限。新接一个会写文件的 MCP 工具时，
+   * 没有 `write` 的 agent 自动看不到它，配置一个字都不用改。
+   * 空数组 = 没有任何工具（fail closed），但仍然可以直接 submit_result 作答。
+   */
+  permissions?: Permission[]
+  /**
+   * 按名字**收窄**（可选）。
+   *
+   * 用于「给了 read，但只许用 postgres 那个读，不许读文件」。
+   * 与权限是**与**关系：名字在这里但权限没给，依然看不到；反之亦然。
+   * 不填表示不收窄。
+   */
+  toolsAllow?: string[]
   toolsDeny?: string[]
+  /**
+   * 结果 schema 的附加段（research → findings[].sources 等）。
+   *
+   * 注意这与上面的 `permissions` 是两件事：它决定**要交出什么**，
+   * 不决定**允许做什么**。名字里的「capabilities」是历史遗留，
+   * 语义上更接近「结果类型」。
+   */
   capabilities?: Array<'research' | 'code'>
   /** 由启用的规则推导出的必填字段 */
   requiredFields?: string[]
@@ -140,11 +162,12 @@ export function agentSpec(cfg: AgentConfig, defaults: NucleusConfig['defaults'])
     id: cfg.id,
     systemPrompt: buildSystemPrompt(cfg),
     modelChain: cfg.modelChain ?? defaults.modelChain,
-    toolsAllow: cfg.toolsAllow,
+    permissions: cfg.permissions ?? [],
     maxSteps: cfg.maxSteps ?? defaults.maxSteps,
     maxCostUsd: cfg.maxCostUsd ?? defaults.maxCostUsd,
   }
   if (cfg.maxTokens !== undefined) spec.maxTokens = cfg.maxTokens
+  if (cfg.toolsAllow) spec.toolsAllow = cfg.toolsAllow
   if (cfg.toolsDeny) spec.toolsDeny = cfg.toolsDeny
   if (cfg.capabilities || cfg.requiredFields) {
     spec.resultSpec = {
@@ -291,8 +314,8 @@ export const defaultConfig: NucleusConfig = {
       identity: `你是编排者，用户的唯一入口。
 理解需求 → 拆解 → 委派给专家 → 整合结果。
 你自己不执行具体工作，一律委派。`,
-      // T3：只有 delegate，没有 exec/write —— 物理上无法自己动手
-      toolsAllow: ['delegate'],
+      // 只有 delegate 与 user：物理上无法自己读写或执行
+      permissions: ['delegate', 'user'],
     },
     {
       id: 'researcher',
@@ -300,8 +323,9 @@ export const defaultConfig: NucleusConfig = {
       whenToUse: '需要调研、查资料、核实事实、给出带来源的结论时',
       identity: `你是研究专家，负责调研与信息收集。
 结论必须标注来源。`,
-      // 搜索能力靠 MCP 提供 —— 配了搜索服务后把工具名加进来
-      toolsAllow: ['write_report'],
+      // read 读资料 + artifact 出报告。没有 write/execute/network ——
+      // 出网靠 MCP 提供搜索服务，加上 network 后相应工具会自动出现
+      permissions: ['read', 'artifact'],
       capabilities: ['research'],
       requiredFields: ['findings[].sources'],
     },
@@ -311,7 +335,7 @@ export const defaultConfig: NucleusConfig = {
       whenToUse: '需要读写文件、整理数据、执行具体操作时',
       identity: `你是执行专家，负责脚本执行与文件操作。
 限制输出规模，只返回关键信息。`,
-      toolsAllow: ['read_file', 'write_file'],
+      permissions: ['read', 'write', 'artifact'],
     },
   ],
   defaults: {

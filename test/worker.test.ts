@@ -148,9 +148,11 @@ describe('委派 → 挂起 → 唤醒', () => {
 describe('worker 的能力边界', () => {
   it('编排者只有 delegate —— 物理上无法自己动手', async () => {
     const spec = n.config.agents.find((a) => a.id === 'orchestrator')!
-    expect(spec.toolsAllow).toEqual(['delegate'])
+    // 授予的是**权限**而不是工具名单：没有 read/write/execute，
+    // 所以任何需要它们的工具（包括以后新接的 MCP 工具）都自动不可见
+    expect(spec.permissions).toEqual(['delegate', 'user'])
 
-    const visible = n.tools.forAgent(spec.toolsAllow).map((t) => t.name)
+    const visible = n.tools.forAgent(spec.permissions!).map((t) => t.name)
     expect(visible).toEqual(['delegate'])
     expect(visible).not.toContain('write_file')
   })

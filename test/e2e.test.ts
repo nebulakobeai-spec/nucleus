@@ -68,6 +68,7 @@ const ORCHESTRATOR: AgentSpec = {
   id: 'orchestrator',
   systemPrompt: 'You are Nebula, the orchestrator.',
   modelChain: ['test:m'],
+  permissions: ['read', 'write', 'delegate', 'user'],
   toolsAllow: ['delegate'],
   maxSteps: 10,
 }
@@ -76,6 +77,7 @@ const ALBERT: AgentSpec = {
   id: 'albert',
   systemPrompt: 'You are Albert, the researcher.',
   modelChain: ['test:m'],
+  permissions: ['read', 'write', 'delegate', 'user'],
   toolsAllow: ['write_report'],
   maxSteps: 10,
 }
@@ -101,6 +103,7 @@ describe('端到端：编排者 → 专家 → 结果回流', () => {
         required: ['agent', 'task'],
       },
       sideEffect: 'idempotent',
+      requires: [],
       execute: async (args, ctx) => {
         const a = args as { agent: string; task: string }
         const child = await store.createRun({
@@ -121,6 +124,7 @@ describe('端到端：编排者 → 专家 → 结果回流', () => {
       description: '写调研报告',
       parameters: { type: 'object', properties: { content: { type: 'string' } }, required: ['content'] },
       sideEffect: 'idempotent',
+      requires: [],
       execute: async (args, ctx) => {
         const ref = await ctx.writeArtifact({
           path: 'report.md',
@@ -263,6 +267,7 @@ describe('端到端：kill -9 后自动恢复', () => {
       description: 'w',
       parameters: {},
       sideEffect: 'pure',
+      requires: [],
       execute: async () => ({ ok: true, content: 'done' }),
     })
 
@@ -316,6 +321,7 @@ describe('端到端：kill -9 后自动恢复', () => {
       description: '发邮件',
       parameters: {},
       sideEffect: 'non_idempotent',
+      requires: [],
       execute: async () => {
         sendCount++
         // 模拟：邮件真的发出去了，但进程在写结果前崩溃

@@ -370,7 +370,7 @@ describe('agents 整体替换的坑', () => {
     await expect(
       withConfig({
         agents: [
-          { id: 'reviewer', name: '审核员', identity: '你是审核员。', toolsAllow: ['read_file'] },
+          { id: 'reviewer', name: '审核员', identity: '你是审核员。', permissions: ['read'] },
         ],
       }),
     ).rejects.toThrow(/entryAgent 指向不存在的 agent/)
@@ -378,7 +378,7 @@ describe('agents 整体替换的坑', () => {
 
   it('报错要说清「整体替换而非合并」—— 否则看不出该怎么改', async () => {
     const err = await withConfig({
-      agents: [{ id: 'reviewer', name: '审核员', identity: 'x', toolsAllow: [] }],
+      agents: [{ id: 'reviewer', name: '审核员', identity: 'x', permissions: [] }],
     }).catch((e: Error) => e)
     expect((err as Error).message).toContain('整体替换')
     // 还要列出现有的 agent，省得再去翻配置
@@ -388,8 +388,8 @@ describe('agents 整体替换的坑', () => {
   it('把入口 agent 一起列上就正常', async () => {
     const { config } = await withConfig({
       agents: [
-        { id: 'orchestrator', name: '编排者', identity: '你是编排者。', toolsAllow: ['delegate'] },
-        { id: 'reviewer', name: '审核员', identity: '你是审核员。', toolsAllow: ['read_file'] },
+        { id: 'orchestrator', name: '编排者', identity: '你是编排者。', permissions: ['delegate'] },
+        { id: 'reviewer', name: '审核员', identity: '你是审核员。', permissions: ['read'] },
       ],
     })
     expect(config.agents.map((a) => a.id)).toEqual(['orchestrator', 'reviewer'])
@@ -398,7 +398,7 @@ describe('agents 整体替换的坑', () => {
 
   it('也可以改 entryAgent 指向新 agent，不必保留 orchestrator', async () => {
     const { config } = await withConfig({
-      agents: [{ id: 'reviewer', name: '审核员', identity: '你是审核员。', toolsAllow: [] }],
+      agents: [{ id: 'reviewer', name: '审核员', identity: '你是审核员。', permissions: [] }],
       defaults: { entryAgent: 'reviewer' },
     })
     expect(config.defaults.entryAgent).toBe('reviewer')
@@ -407,7 +407,7 @@ describe('agents 整体替换的坑', () => {
   it('有 delegate 权限但没有可委派目标时报错', async () => {
     await expect(
       withConfig({
-        agents: [{ id: 'solo', name: '独行', identity: 'x', toolsAllow: ['delegate'] }],
+        agents: [{ id: 'solo', name: '独行', identity: 'x', permissions: ['delegate'] }],
         defaults: { entryAgent: 'solo' },
       }),
     ).rejects.toThrow(/没有任何可委派的目标/)

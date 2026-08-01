@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { defaultConfig, type NucleusConfig } from './config.js'
+import { GRANTABLE, isPermission } from './runtime/permissions.js'
 
 /**
  * 配置文件加载。
@@ -114,7 +115,25 @@ function validate(cfg: NucleusConfig, path: string): void {
     if (agentIds.has(a.id)) errors.push(`agent id 重复：${a.id}`)
     agentIds.add(a.id)
     if (!a.identity?.trim()) errors.push(`agent ${a.id} 缺少 identity`)
-    if (!Array.isArray(a.toolsAllow)) errors.push(`agent ${a.id} 缺少 toolsAllow`)
+    // permissions 是主关；toolsAllow 只是可选的收窄
+    if (a.permissions !== undefined && !Array.isArray(a.permissions)) {
+      errors.push(`agent ${a.id} 的 permissions 必须是数组`)
+    }
+    for (const p of a.permissions ?? []) {
+      if (!isPermission(p)) {
+        errors.push(`agent ${a.id} 声明了未知权限「${p}」（可用：${GRANTABLE.join(', ')}）`)
+      }
+      // 哨兵权限存在的意义就是没人能拿到它
+      if (p === 'unclassified') {
+        errors.push(
+          `agent ${a.id} 不能授予 unclassified —— 它是未分类 MCP 工具的哨兵，` +
+            `要让某个工具可见请在 mcpPolicies.permissions 里给它分类`,
+        )
+      }
+    }
+    if (a.toolsAllow !== undefined && !Array.isArray(a.toolsAllow)) {
+      errors.push(`agent ${a.id} 的 toolsAllow 必须是数组`)
+    }
     for (const chainKey of a.modelChain ?? []) {
       if (!knownModel(chainKey)) {
         errors.push(`agent ${a.id} 的 modelChain 引用了不存在的模型 ${chainKey}`)
@@ -136,7 +155,7 @@ function validate(cfg: NucleusConfig, path: string): void {
 
   // delegate 的目标必须存在，否则编排者会在运行时才发现委派不出去
   for (const a of cfg.agents) {
-    if (!a.toolsAllow.includes('delegate')) continue
+    if (!(a.permissions ?? []).includes('delegate')) continue
     const targets = cfg.agents.filter((x) => x.id !== a.id)
     if (targets.length === 0) {
       errors.push(`agent ${a.id} 有 delegate 权限，但没有任何可委派的目标 agent`)

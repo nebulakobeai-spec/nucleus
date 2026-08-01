@@ -28,6 +28,7 @@ export const readFileTool: ToolDefinition = {
     properties: { path: { type: 'string', description: '相对工作目录的路径' } },
     required: ['path'],
   },
+  requires: ['read'],
   sideEffect: 'pure',
   precondition: (args, ctx) => {
     const p = (args as { path?: string }).path
@@ -64,6 +65,7 @@ export const writeFileTool: ToolDefinition = {
     required: ['path', 'content'],
   },
   // 同路径同内容重写结果一致 → idempotent
+  requires: ['write'],
   sideEffect: 'idempotent',
   precondition: (args, ctx) => {
     const p = (args as { path?: string }).path
@@ -99,6 +101,10 @@ export const writeReportTool: ToolDefinition = {
     },
     required: ['title', 'content'],
   },
+  // artifact 而不是 write：路径由它自己拼（slug 正则把 / 和 . 都替换掉）、
+  // 只写 artifacts 表不落盘，所以和「写文件」是两类效果。
+  // 单独一项的用处是编排者拿不到它 —— 它该整合而非自己写报告。
+  requires: ['artifact'],
   sideEffect: 'idempotent',
   execute: async (args, ctx) => {
     const a = args as { title: string; content: string }
@@ -168,6 +174,7 @@ export function delegateTool(
       },
       required: ['agent', 'task'],
     },
+    requires: ['delegate'],
     sideEffect: 'idempotent',
     precondition: async (args, ctx) => {
       const a = args as { agent?: string }

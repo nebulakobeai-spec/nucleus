@@ -116,9 +116,9 @@ export async function agentShow(argv: string[], flags: Record<string, string | t
 
     // ── 可见工具（T3 能力边界）──
     heading('可见工具')
-    const visible = n.tools.forAgent(spec.toolsAllow, spec.toolsDeny).map((t) => t.name)
-    const missing = spec.toolsAllow.filter((t) => !t.includes('*') && !n.tools.get(t))
-    for (const t of n.tools.forAgent(spec.toolsAllow, spec.toolsDeny)) {
+    const visible = n.tools.forAgent(spec.permissions, spec.toolsAllow, spec.toolsDeny).map((t) => t.name)
+    const missing = (spec.toolsAllow ?? []).filter((t) => !t.includes('*') && !n.tools.get(t))
+    for (const t of n.tools.forAgent(spec.permissions, spec.toolsAllow, spec.toolsDeny)) {
       // 描述可能是多行的（delegate 会列出所有可委派专家），截断会把清单切掉
       const [head, ...rest] = t.description.split('\n')
       line(`  ${t.name.padEnd(24)} ${c.gray(t.sideEffect)} ${c.gray(head ?? '')}`)
@@ -126,7 +126,8 @@ export async function agentShow(argv: string[], flags: Record<string, string | t
     }
     if (visible.length === 0) line(c.gray('  （无）'))
     line()
-    line(c.gray(`toolsAllow: ${spec.toolsAllow.join(', ') || '（空）'}`))
+    line(c.gray(`权限：${spec.permissions.join(', ') || '（无 —— 看不到任何工具）'}`))
+    if (spec.toolsAllow?.length) line(c.gray(`按名字收窄：${spec.toolsAllow.join(', ')}`))
     if (spec.toolsDeny?.length) line(c.gray(`toolsDeny:  ${spec.toolsDeny.join(', ')}`))
     if (missing.length) {
       line()
@@ -141,7 +142,7 @@ export async function agentShow(argv: string[], flags: Record<string, string | t
     }
     // 委派关系是双向的，两边都要能看到
     const delegators = n.config.agents.filter(
-      (a) => a.id !== id && a.toolsAllow.includes('delegate') && id !== n.config.defaults.entryAgent,
+      (a) => a.id !== id && (a.permissions ?? []).includes('delegate') && id !== n.config.defaults.entryAgent,
     )
     if (delegators.length) {
       line()
@@ -197,7 +198,7 @@ export async function agentMap(_argv: string[], flags: Record<string, string | t
     // 列 = 所有被任何 agent 声明过的工具（含通配），按被引用次数排
     const counts = new Map<string, number>()
     for (const { spec } of specs) {
-      for (const t of spec.toolsAllow) counts.set(t, (counts.get(t) ?? 0) + 1)
+      for (const t of n.tools.forAgent(spec.permissions, spec.toolsAllow, spec.toolsDeny)) counts.set(t.name, (counts.get(t.name) ?? 0) + 1)
     }
     const tools = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([t]) => t)
 
@@ -211,21 +212,26 @@ export async function agentMap(_argv: string[], flags: Record<string, string | t
       (cfg.id === entry ? c.cyan('▸ ') : '  ') + cfg.id,
       ...tools.map((t) => {
         if (spec.toolsDeny?.includes(t)) return c.red('✗')
-        if (!spec.toolsAllow.includes(t)) return c.gray('·')
-        // 声明了但没注册 —— 模型看不到它，却容易被误认为「有这个能力」
-        return t.includes('*') || n.tools.get(t) ? c.green('●') : c.yellow('?')
+        const visible = n.tools
+          .forAgent(spec.permissions, spec.toolsAllow, spec.toolsDeny)
+          .some((x) => x.name === t)
+        if (visible) return c.green('●')
+        // 区分「没授权」和「授权了但被名字收窄挡住」—— 排查时是两件事
+        const lacking = n.tools.missingPermissions(spec.permissions, t)
+        return lacking.length ? c.gray(lacking.join('+')) : c.yellow('·')
       }),
     ])
     table(rows, ['AGENT', ...tools])
 
     line()
     line(
-      `${c.green('●')} 可用   ${c.gray('·')} 未授予   ${c.red('✗')} 显式拒绝   ` +
-        `${c.yellow('?')} 声明了但未注册（模型看不到）`,
+      `${c.green('●')} 可用   ${c.gray('权限名')} 缺这个权限   ` +
+        `${c.yellow('·')} 权限够但被 toolsAllow 收窄挡住   ${c.red('✗')} 显式拒绝`,
     )
+    line(c.gray('缺权限时直接显示缺哪个 —— 排查时「没授权」和「被名字挡住」是两件事'))
 
     // 几条一眼能看出的风险，直接点出来而不是让人自己数
-    const delegators = specs.filter((x) => x.spec.toolsAllow.includes('delegate'))
+    const delegators = specs.filter((x) => x.spec.permissions.includes('delegate'))
     if (delegators.length > 1) {
       line()
       line(
@@ -241,7 +247,7 @@ export async function agentMap(_argv: string[], flags: Record<string, string | t
       .map((x) => ({
         id: x.cfg.id,
         tools: n.tools
-          .forAgent(x.spec.toolsAllow, x.spec.toolsDeny)
+          .forAgent(x.spec.permissions, x.spec.toolsAllow, x.spec.toolsDeny)
           .filter((t) => t.sideEffect === 'non_idempotent')
           .map((t) => t.name),
       }))
@@ -253,7 +259,7 @@ export async function agentMap(_argv: string[], flags: Record<string, string | t
           c.gray('  —— 结果未知时不会自动重跑，转 needs_human_confirmation'),
       )
     }
-    const idle = specs.filter((x) => x.spec.toolsAllow.length === 0)
+    const idle = specs.filter((x) => x.spec.permissions.length === 0)
     if (idle.length) {
       line(
         `${ICON.warn} ${c.yellow(`${idle.map((x) => x.cfg.id).join(', ')} 没有任何工具`)}` +

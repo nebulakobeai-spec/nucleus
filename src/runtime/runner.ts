@@ -24,6 +24,7 @@ import {
   type ValidationFailure,
 } from './result-schema.js'
 import { assemble, DEFAULT_BUDGET } from '../context/assemble.js'
+import type { Permission } from './permissions.js'
 import type { RunEventSink } from './events.js'
 
 export interface AgentSpec {
@@ -31,7 +32,10 @@ export interface AgentSpec {
   /** 静态 prompt 前缀（identity + policy）。必须逐字节稳定，见 §5 */
   systemPrompt: string
   modelChain: string[]
-  toolsAllow: string[]
+  /** 授予的权限 —— 工具可见性的主关 */
+  permissions: Permission[]
+  /** 按名字收窄（可选），与权限是与关系 */
+  toolsAllow?: string[]
   toolsDeny?: string[]
   resultSpec?: ResultSchemaSpec
   maxSteps?: number
@@ -201,7 +205,7 @@ export class Runner {
     const maxSteps = agent.maxSteps ?? 20
     const spec = agent.resultSpec ?? {}
 
-    const toolDefs = this.tools.forAgent(agent.toolsAllow, agent.toolsDeny)
+    const toolDefs = this.tools.forAgent(agent.permissions, agent.toolsAllow, agent.toolsDeny)
     const wire: ToolDef[] = [
       ...toolDefs.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
       {

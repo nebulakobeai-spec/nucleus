@@ -88,7 +88,7 @@ function printRuleList(n: Nucleus): void {
     rows.push([
       a.id,
       a.requiredFields?.length ? c.yellow(a.requiredFields.join(', ')) : c.gray('—'),
-      a.toolsAllow.join(', ') || c.gray('（无工具）'),
+      (a.permissions ?? []).join(', ') || c.gray('（无权限）'),
     ])
   }
   table(rows, ['AGENT', '必填字段（postcondition）', '可用工具（capability）'])
@@ -112,16 +112,18 @@ function printRuleList(n: Nucleus): void {
 function printAgentRules(n: Nucleus, id: string): void {
   const cfg = n.config.agents.find((a) => a.id === id)!
   const spec = agentSpec(cfg, n.config.defaults)
-  const tools = n.tools.forAgent(spec.toolsAllow, spec.toolsDeny).map((t) => t.name)
+  const tools = n.tools.forAgent(spec.permissions, spec.toolsAllow, spec.toolsDeny).map((t) => t.name)
 
   heading(`${id} 的规则`)
   line(`${c.gray('负责领域')} ${cfg.whenToUse ?? c.red('（未声明）')}`)
   line(`${c.gray('是否入口')} ${n.config.defaults.entryAgent === id ? c.cyan('是') : c.gray('否')}`)
 
   heading('T3 能力边界')
+  line(`  ${c.gray('授予权限')} ${spec.permissions.join(', ') || c.gray('（无）')}`)
   line(`  ${c.gray('可用工具')} ${tools.join(', ') || c.gray('（无）')}`)
+  if (spec.toolsAllow?.length) line(`  ${c.gray('名字收窄')} ${spec.toolsAllow.join(', ')}`)
   if (spec.toolsDeny?.length) line(`  ${c.gray('显式拒绝')} ${spec.toolsDeny.join(', ')}`)
-  const unavailable = spec.toolsAllow.filter((t) => !t.includes('*') && !n.tools.get(t))
+  const unavailable = (spec.toolsAllow ?? []).filter((t) => !t.includes('*') && !n.tools.get(t))
   if (unavailable.length) {
     line(`  ${ICON.warn} ${c.yellow('声明了但未注册')}：${unavailable.join(', ')}`)
   }

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { NucleusError } from '../errors.js'
+import { permitted, type Permission } from './permissions.js'
 import type { SideEffectClass } from '../domain.js'
 
 /**
@@ -53,6 +54,13 @@ export interface ToolDefinition {
   /** 无默认值：不声明则拒绝注册 */
   sideEffect: SideEffectClass
   /**
+   * 需要哪些权限才能看到并调用它。
+   *
+   * 与 sideEffect 正交：权限回答「允许它做吗」，副作用等级回答
+   * 「出错了能重跑吗」。空数组表示纯计算、不需要授权。
+   */
+  requires: Permission[]
+  /**
    * 前置检查。返回非 null 即拒绝执行，其内容原样回给模型。
    * 这就是「规则贴在动作旁边」—— 不是搬运，是同一份文本的另一种用途。
    */
@@ -90,12 +98,34 @@ export class ToolRegistry {
    * 不在白名单里的工具**根本不会出现在给模型的定义中** ——
    * 模型看不到就无从调用，这比任何 prompt 约束都强。
    */
-  forAgent(allow: string[], deny: string[] = []): ToolDefinition[] {
+  /**
+   * 某个 agent 能看到的工具。
+   *
+   * 三道关，顺序固定：
+   *   ① **权限**（主关）—— 工具要求的权限必须全部被授予。没授权就看不见，
+   *      所以「新接一个会写文件的 MCP 工具」不会静默扩权给任何人。
+   *   ② `toolsAllow` 按名字**收窄**（可选）—— 用于「给了 read 权限，但只许用
+   *      postgres 那个读，不许读文件」。不填表示不收窄。
+   *   ③ `toolsDeny` 排除。
+   *
+   * 注意 ① 和 ② 是**与**关系而不是或：名字在白名单里但权限没给，依然看不到。
+   * 反过来也一样。授权只会更严，不会因为写了名字而放宽。
+   */
+  forAgent(grants: readonly Permission[], allow?: string[], deny: string[] = []): ToolDefinition[] {
     const denied = new Set(deny)
     return [...this.#tools.values()].filter((t) => {
       if (denied.has(t.name)) return false
+      if (!permitted(grants, t.requires)) return false
+      if (!allow || allow.length === 0) return true
       return allow.includes('*') || allow.includes(t.name) || allow.some((p) => matchGlob(p, t.name))
     })
+  }
+
+  /** 工具因为缺哪些权限而不可见 —— 诊断用 */
+  missingPermissions(grants: readonly Permission[], toolName: string): Permission[] {
+    const t = this.#tools.get(toolName)
+    if (!t) return []
+    return t.requires.filter((r) => !grants.includes(r))
   }
 
   get size(): number {

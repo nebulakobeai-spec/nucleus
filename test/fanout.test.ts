@@ -168,7 +168,7 @@ describe('委派闸门', () => {
   /** 让某个 agent 能委派，并把上限调小以便快速触达 */
   async function recursive(limits: { maxDelegationDepth?: number; maxRunsPerRoot?: number }) {
     const c = config()
-    c.agents.find((a) => a.id === 'researcher')!.toolsAllow.push('delegate')
+    c.agents.find((a) => a.id === 'researcher')!.permissions!.push('delegate')
     Object.assign(c.defaults, limits)
 
     return boot({

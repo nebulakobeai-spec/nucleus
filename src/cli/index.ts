@@ -143,7 +143,7 @@ async function doctor(flags: Record<string, string | true>): Promise<number> {
     // toolsAllow 引用了不存在的工具时，模型只是「看不到」它，没有任何报错 ——
     // 拼错工具名或 MCP 没连上都会这样，必须显式报出来
     for (const a of config.agents) {
-      const missing = a.toolsAllow.filter((t) => !t.includes('*') && !tools.get(t))
+      const missing = (a.toolsAllow ?? []).filter((t) => !t.includes('*') && !tools.get(t))
       if (missing.length) {
         checks.push({
           name: `agent ${a.id} 的工具`,

@@ -1,5 +1,6 @@
 import type { SideEffectClass } from '../domain.js'
-import { toolError, type ToolDefinition, type ToolRegistry } from '../runtime/tools.js'
+import { matchGlob, toolError, type ToolDefinition, type ToolRegistry } from '../runtime/tools.js'
+import { UNCLASSIFIED, type Permission } from '../runtime/permissions.js'
 import type { McpClient, ResolvedMcpTool } from './client.js'
 import { renderContent } from './client.js'
 
@@ -22,6 +23,17 @@ export interface McpToolPolicy {
 export interface McpRegisterOptions {
   /** 副作用声明，按顺序匹配，先命中先用 */
   policies?: McpToolPolicy[]
+  /**
+   * 权限声明，按顺序匹配。
+   *
+   * MCP 协议不表达权限，所以必须在这里映射。**没有匹配到任何一条的工具
+   * 会要求哨兵权限 `unclassified`，任何 agent 都授予不了它** ——
+   * 也就是说未分类的 MCP 工具一律不可见。
+   *
+   * fail-closed 是刻意的：默认可见等于每接一个 server 就静默扩权一次，
+   * 而 server 什么时候新增了一个会写文件的工具，你不会收到通知。
+   */
+  permissions?: Array<{ pattern: string; requires: Permission[] }>
   /** 未匹配任何规则时的默认值 */
   fallback?: SideEffectClass
   timeoutMs?: number
@@ -65,6 +77,14 @@ export function classifySideEffect(
   }
 }
 
+/** 按 pattern 匹配出工具需要的权限；没匹配到就要求哨兵（不可授予） */
+export function classifyPermissions(name: string, opts: McpRegisterOptions): Permission[] {
+  for (const p of opts.permissions ?? []) {
+    if (matchGlob(p.pattern, name)) return p.requires
+  }
+  return UNCLASSIFIED
+}
+
 export function mcpToolDefinition(
   tool: ResolvedMcpTool,
   client: McpClient,
@@ -77,6 +97,7 @@ export function mcpToolDefinition(
     description: tool.description,
     parameters: tool.parameters,
     sideEffect,
+    requires: classifyPermissions(tool.name, opts),
     execute: async (args) => {
       try {
         const res = await client.call(tool.name, args, opts.timeoutMs)

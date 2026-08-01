@@ -96,13 +96,19 @@ describe('规则注册表', () => {
 
   it('可达性按声明算，不按工具名猜', async () => {
     n = await bootWith({ researcher: [{ submit: GOOD }] })
-    const researcherTools = n!.tools
-      .forAgent(['write_report'])
-      .map((t) => t.name)
-    const reachable = RULES.filter((r) => r.tools.some((t) => researcherTools.includes(t)))
+    // 只授予「产出结果」所需的权限（write_report 不需要任何权限）
+    const bare = n!.tools.forAgent(['artifact']).map((t) => t.name)
+    expect(bare).toEqual(['write_report'])
     // write_report 自己构造路径、只写数据库，没有 workdir 前置检查 ——
     // 用 /^(read|write)_/ 猜会把它错算成受 fs.workdir-boundary 约束
-    expect(reachable).toEqual([])
+    expect(RULES.filter((r) => r.tools.some((t) => bare.includes(t)))).toEqual([])
+
+    // 给了 read 才看得到 read_file，那条规则才真的管着它
+    const withRead = n!.tools.forAgent(['read', 'artifact']).map((t) => t.name)
+    expect(withRead).toContain('read_file')
+    expect(RULES.filter((r) => r.tools.some((t) => withRead.includes(t))).map((r) => r.id)).toEqual([
+      'fs.workdir-boundary',
+    ])
   })
 
   it('可配置的规则指向真实存在的配置项', () => {

@@ -28,6 +28,7 @@ const AGENT: AgentSpec = {
   id: 'albert',
   systemPrompt: 'You are Albert.',
   modelChain: ['test:m'],
+  permissions: ['read', 'write', 'delegate', 'user'],
   toolsAllow: ['*'],
   maxSteps: 10,
 }
@@ -105,6 +106,7 @@ describe('agent loop', () => {
       description: '读文件',
       parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
       sideEffect: 'pure',
+      requires: [],
       execute: async (args) => {
         calls.push(args)
         return { ok: true, content: '文件内容' }
@@ -248,8 +250,8 @@ describe('submit_result 契约', () => {
 
 describe('能力边界', () => {
   it('白名单外的工具不出现在给模型的定义中', async () => {
-    tools.register({ name: 'read', description: 'r', parameters: {}, sideEffect: 'pure', execute: async () => ({ ok: true, content: '' }) })
-    tools.register({ name: 'exec', description: 'e', parameters: {}, sideEffect: 'non_idempotent', execute: async () => ({ ok: true, content: '' }) })
+    tools.register({ name: 'read', description: 'r', parameters: {}, requires: [], sideEffect: 'pure', execute: async () => ({ ok: true, content: '' }) })
+    tools.register({ name: 'exec', description: 'e', parameters: {}, requires: [], sideEffect: 'non_idempotent', execute: async () => ({ ok: true, content: '' }) })
 
     const f = scriptedFetch([submit({ status: 'ok', summary: 'ok' })])
     const router = new ModelRouter(db, deps, MODELS, () => null, { fetch: f, inPlaceRetries: 0 })
@@ -274,7 +276,7 @@ describe('能力边界', () => {
   })
 
   it('调用被拒绝的工具时给出明确反馈而非崩溃', async () => {
-    tools.register({ name: 'exec', description: 'e', parameters: {}, sideEffect: 'non_idempotent', execute: async () => ({ ok: true, content: 'ran' }) })
+    tools.register({ name: 'exec', description: 'e', parameters: {}, requires: [], sideEffect: 'non_idempotent', execute: async () => ({ ok: true, content: 'ran' }) })
     const ctx = await startRun()
     const out = await exec(
       runnerWith([
@@ -308,6 +310,7 @@ describe('前置检查', () => {
       description: 'w',
       parameters: { type: 'object', properties: { path: { type: 'string' } } },
       sideEffect: 'idempotent',
+      requires: [],
       precondition: (args) => {
         const p = (args as { path: string }).path
         if (p.endsWith('.py') && !p.startsWith('scripts/')) {
@@ -363,6 +366,7 @@ describe('工具意图日志', () => {
       description: 'f',
       parameters: {},
       sideEffect: 'non_idempotent',
+      requires: [],
       execute: async () => {
         throw new Error('boom')
       },
@@ -392,6 +396,7 @@ describe('工具意图日志', () => {
       description: 'p',
       parameters: {},
       sideEffect: 'idempotent',
+      requires: [],
       execute: async () => ({ ok: true, content: 'ok' }),
     })
     const ctx = await startRun()
@@ -422,6 +427,7 @@ describe('预算护栏', () => {
       description: 's',
       parameters: {},
       sideEffect: 'pure',
+      requires: [],
       execute: async () => {
         runs++
         return { ok: true, content: '同样的结果' }
@@ -458,6 +464,7 @@ describe('预算护栏', () => {
       description: 't',
       parameters: {},
       sideEffect: 'pure',
+      requires: [],
       execute: async () => ({ ok: true, content: 'ok' }),
     })
     let n = 0
@@ -504,6 +511,7 @@ describe('工具输出处理', () => {
       description: 'f',
       parameters: {},
       sideEffect: 'pure',
+      requires: [],
       maxOutputChars: 200,
       execute: async () => ({ ok: true, content: '网页内容'.repeat(500) }),
     })
@@ -555,6 +563,7 @@ describe('失败即终态', () => {
       description: 's',
       parameters: {},
       sideEffect: 'pure',
+      requires: [],
       execute: async () => {
         ctl.abort()
         return { ok: true, content: 'done' }
