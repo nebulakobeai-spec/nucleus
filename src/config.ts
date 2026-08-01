@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Permission } from './runtime/permissions.js'
+import type { ResultFields } from './runtime/result-schema.js'
 import type { ModelConfig } from './providers/types.js'
 import type { AgentSpec } from './runtime/runner.js'
 import type { McpServerConfig } from './mcp/protocol.js'
@@ -137,6 +138,18 @@ export interface AgentConfig {
    * 语义上更接近「结果类型」。
    */
   capabilities?: Array<'research' | 'code'>
+  /**
+   * 自己声明的结果字段。
+   *
+   * 内置预设（research / code）只是用**同一套词表**写的两个例子 ——
+   * 一个金融分析专家可以要求交出
+   * `metrics: { type: 'object[]', fields: { name: 'string', value: 'number',
+   * asOf: 'string', source: 'string' } }`，不必迁就那两个预设。
+   *
+   * 声明只描述**形状**；哪些必填由 requiredFields 决定（两处都能要求必填
+   * 会让「为什么这里报错」变得难说清）。
+   */
+  resultFields?: ResultFields
   /** 由启用的规则推导出的必填字段 */
   requiredFields?: string[]
   maxSteps?: number
@@ -169,9 +182,10 @@ export function agentSpec(cfg: AgentConfig, defaults: NucleusConfig['defaults'])
   if (cfg.maxTokens !== undefined) spec.maxTokens = cfg.maxTokens
   if (cfg.toolsAllow) spec.toolsAllow = cfg.toolsAllow
   if (cfg.toolsDeny) spec.toolsDeny = cfg.toolsDeny
-  if (cfg.capabilities || cfg.requiredFields) {
+  if (cfg.capabilities || cfg.requiredFields || cfg.resultFields) {
     spec.resultSpec = {
       ...(cfg.capabilities ? { capabilities: cfg.capabilities } : {}),
+      ...(cfg.resultFields ? { fields: cfg.resultFields } : {}),
       ...(cfg.requiredFields ? { requiredFields: cfg.requiredFields } : {}),
     }
   }

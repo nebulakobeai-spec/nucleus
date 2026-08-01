@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { defaultConfig, type NucleusConfig } from './config.js'
 import { GRANTABLE, isPermission } from './runtime/permissions.js'
+import { validateResultFields } from './runtime/result-schema.js'
 
 /**
  * 配置文件加载。
@@ -133,6 +134,11 @@ function validate(cfg: NucleusConfig, path: string): void {
     }
     if (a.toolsAllow !== undefined && !Array.isArray(a.toolsAllow)) {
       errors.push(`agent ${a.id} 的 toolsAllow 必须是数组`)
+    }
+    // 结果字段声明写错时应当启动就报 —— 否则要等某个 run 提交结果时
+    // 才发现生成出来的 schema 是坏的，而那时错误信息指向的是模型
+    for (const p of validateResultFields(a.resultFields)) {
+      errors.push(`agent ${a.id} 的 resultFields.${p.field}：${p.message}`)
     }
     for (const chainKey of a.modelChain ?? []) {
       if (!knownModel(chainKey)) {

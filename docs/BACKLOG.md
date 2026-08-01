@@ -32,12 +32,21 @@
    `adaptedFrom.originalArguments` 里可审计 —— 但那不再是纯粹的录制。
    `[需要你]` 在能访问 ollama 的机器上用新 schema 重新采集一次。
 
-2. **可声明的结果段** —— 替掉写死在 TS 里的 `'research' | 'code'`。
+2. ~~**可声明的结果段**~~ ✅ 已完成 —— 替掉写死在 TS 里的 `'research' | 'code'`。
    现在 `CAPABILITY_SCHEMAS` 是硬编码的两个段，所以你没法让一个金融分析专家
    必须交出 `metrics[{name, value, asOf, source}]`。
    而 `resultJsonSchema` / `validateResult` / `agent show` 三处已经是数据驱动的，
    只是数据源写死了。
    **必须先于 5**：否则 LLM 生成定义时，输出形状只能在 research/code 里选。
+
+   已做：小词表（scalar / `string[]` / `number[]` / `object[]`）、
+   内置预设**用同一套词表表达**所以只有一条代码路径、声明本身在配置加载期
+   校验（保留名、未知类型、object[] 缺 fields）、`resultJsonSchema` 里
+   per-capability 的 if/else 全部删掉。
+
+   一个立刻还债的例子：我一开始把 object[] 的元素限制成标量，结果**连
+   research 预设自己都表达不了**（`findings[].sources` 是字符串数组）——
+   用同一套词表表达内置预设的好处就在这里，词表不够用会当场暴露。
 
 3. **`agents/*.md` 加载器**
    - 一个专家一个文件，天然增量（加文件不会删掉别人）
