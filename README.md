@@ -302,6 +302,7 @@ tier 2 的 fixture 由真实模型产生，不是手写的 —— 手写 stub �
 | | |
 |---|---|
 | [`DESIGN.md`](./DESIGN.md) | 设计决策与取舍，含修正记录 |
+| [`docs/BACKLOG.md`](./docs/BACKLOG.md) | 待办：要做什么、为什么、哪些还没定 |
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) | 部署到另一台机器的完整步骤 |
 | [`docs/USAGE.md`](./docs/USAGE.md) | 命令参考与日常操作 |
 | [`nucleus.config.example.json`](./nucleus.config.example.json) | 配置示例（带注释） |
