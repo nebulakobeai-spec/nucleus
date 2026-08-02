@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { defaultConfig, type NucleusConfig } from './config.js'
 import { DEFAULT_AGENTS_DIR, loadAgentFiles } from './config/agent-files.js'
 import { GRANTABLE, isPermission } from './runtime/permissions.js'
@@ -113,14 +113,32 @@ function mergeAgentFiles(
   }
 }
 
-function findConfigFile(): string | null {
-  const dir = process.env['NUCLEUS_CONFIG_DIR'] ?? process.cwd()
+/**
+ * 找配置文件：**从当前目录逐级向上**，到文件系统根为止。
+ *
+ * 原来只看 cwd 一层。而 `nucleus` 是 npm link 到 PATH 的全局命令，
+ * 所以从项目子目录、或者从 home 目录跑它是完全正常的用法 ——
+ * 那时配置**静默失效**，回落到内置默认（只有 mock），然后：
+ *
+ *   run 失败 → provider.unreachable → 提示「检查 baseUrl 与 DNS」
+ *
+ * 而真正的原因是「配置文件没找到」。一个正确的报错指向错误的方向，
+ * 比没有报错更费时间。git / npm / tsconfig 都是向上搜的，照做。
+ */
+export function findConfigFile(from = process.env['NUCLEUS_CONFIG_DIR'] ?? process.cwd()): string | null {
   if (process.env['NUCLEUS_CONFIG']) return resolve(process.env['NUCLEUS_CONFIG'])
-  for (const name of CONFIG_FILENAMES) {
-    const p = resolve(dir, name)
-    if (existsSync(p)) return p
+
+  let dir = resolve(from)
+  for (;;) {
+    for (const name of CONFIG_FILENAMES) {
+      const p = resolve(dir, name)
+      if (existsSync(p)) return p
+    }
+    const parent = dirname(dir)
+    // dirname('/') === '/' —— 到根了
+    if (parent === dir) return null
+    dir = parent
   }
-  return null
 }
 
 /**

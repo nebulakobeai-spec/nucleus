@@ -24,8 +24,8 @@ import {
   scheduleToggle,
 } from './schedule.js'
 import { bundleCmd, replayCmd } from './bundle.js'
-import { loadConfig } from '../config-file.js'
-import { c, duration, heading, ICON, line, money, parseArgv, recoveryHint, statusColor, table, strFlag, resolveConversationId } from './ui.js'
+import { findConfigFile, loadConfig } from '../config-file.js'
+import { c, duration, heading, ICON, line, money, parseArgv, recoveryHint, statusColor, table, strFlag, resolveConversationId, unknownFlags } from './ui.js'
 
 /**
  * Nucleus CLI。
@@ -120,10 +120,31 @@ async function open(flags: Record<string, string | true>): Promise<Nucleus> {
   const dataDir = strFlag(flags, 'data') ?? process.env['NUCLEUS_PGLITE_DIR'] ?? null
   const useMock = flags['mock'] === true || !!flags['mock'] || process.env['NUCLEUS_MOCK'] === '1'
 
-  const { config: loaded } = await loadConfig(
+  const { config: loaded, path: configPath } = await loadConfig(
     typeof flags['config'] === 'string' ? flags['config'] : undefined,
   )
   const config = { ...loaded }
+
+  /**
+   * 没找到配置文件时**必须说出来**。
+   *
+   * `nucleus` 是全局命令，从项目外的目录跑它是完全正常的用法 —— 那时配置
+   * 静默失效，回落到内置默认（只有 mock）。原来的症状链是：
+   *
+   *   run 失败 → provider.unreachable → 「检查 baseUrl 与 DNS」
+   *
+   * 而真正的原因是「你不在项目目录里」。现在配置发现会逐级向上找，
+   * 但真的找不到时也要在第一行就讲清楚，而不是让人去查 DNS。
+   */
+  if (!configPath && !useMock) {
+    line(
+      `${ICON.warn} ${c.yellow('没找到 nucleus.config.json')}` +
+        c.gray(`（从 ${process.cwd()} 逐级向上找过）`),
+    )
+    line(c.gray('  正在用内置默认配置 —— 里面**只有 mock 模型**，跑不出真实结果。'))
+    line(c.gray('  在项目目录里跑，或者用 --config <路径> / NUCLEUS_CONFIG 指定。'))
+    line()
+  }
   if (flags['model']) {
     const chain = String(flags['model']).split(',')
     config.defaults = { ...config.defaults, modelChain: chain }
@@ -209,6 +230,22 @@ async function doctor(flags: Record<string, string | true>): Promise<number> {
 
     checks.push({ name: '工具注册', ok: n.tools.size > 0, detail: `${n.tools.size} 个` })
     const { config, tools } = n
+
+    /**
+     * **配置文件的实际路径。** 这条要排在前面。
+     *
+     * 「配了但没被读到」是最省时间的一条自检：nucleus 是全局命令，从项目外
+     * 的目录跑它会静默回落到内置默认（只有 mock），而症状是 run 报
+     * provider.unreachable + 「检查 DNS」—— 指向完全错误的方向。
+     */
+    const found = findConfigFile()
+    checks.push({
+      name: '配置文件',
+      ok: found !== null,
+      detail:
+        found ??
+        `没找到（从 ${process.cwd()} 逐级向上找过）—— 正在用内置默认，只有 mock 模型`,
+    })
 
     // 模型链：没配真实模型时会静默落到 mock，回答是假的
     checks.push({
@@ -613,6 +650,28 @@ export async function main(argv: string[]): Promise<number> {
   const { positional, flags } = parseArgv(argv)
   const cmd = positional[0]
   const rest = positional.slice(1)
+
+  /**
+   * 认不出的参数要报出来。
+   *
+   * 不致命（脚本里可能带着无害的多余参数），但**必须可见** ——
+   * 打错的参数静默生效过一次：`nucleus runs --bundle <id>` 里 `--bundle`
+   * 把 id 吃掉当了自己的值，于是列出了全部 run，看起来像「这个 run 不见了」。
+   * 解析已经改成未知参数不吃值，这里再补一句提醒。
+   */
+  const unknown = unknownFlags(flags)
+  if (unknown.length) {
+    line(
+      `${ICON.warn} ${c.yellow(`未知参数：${unknown.map((f) => '--' + f).join(' ')}`)}` +
+        c.gray('（已忽略）'),
+    )
+    // 最常见的成因是把子命令写成了参数
+    for (const f of unknown) {
+      if (['bundle', 'replay', 'events', 'schedule', 'artifact'].includes(f)) {
+        line(c.gray(`  ${f} 是子命令不是参数：nucleus ${f} …`))
+      }
+    }
+  }
 
   switch (cmd) {
     case 'ask':

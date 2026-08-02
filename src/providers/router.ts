@@ -142,6 +142,35 @@ export class ModelRouter {
       return m
     })
 
+    /**
+     * mock 模型必须在**发请求之前**被拦住。
+     *
+     * `provider: 'mock'` 不是一个 provider 实现 —— 它只是一条 baseUrl 指向
+     * `mock.invalid` 的普通配置，mock 性完全来自 boot 时换掉 fetch。
+     * 所以没装 mock fetch 就直接去做 DNS 解析，结果是：
+     *
+     *   provider.unreachable · reason: getaddrinfo ENOTFOUND mock.invalid
+     *   hint: 域名解析不了 —— 检查 baseUrl 拼写与 DNS
+     *
+     * 那条提示把人指向 baseUrl 和 DNS，而真正的原因是**还没配置任何真实模型**
+     * （常见成因：从项目外的目录跑 nucleus，配置文件没被找到）。
+     * 一个正确的报错指向错误的方向，比没有报错更费时间。
+     */
+    if (!this.#fetch && chain.every((m) => m.provider === 'mock')) {
+      throw new NucleusError(
+        'config.no_real_model',
+        `模型链里只有 mock（${chainKeys.join(', ')}），而没有开 --mock —— 还没有可用的真实模型`,
+        {
+          detail: {
+            chain: chainKeys,
+            hint:
+              '两种可能：① 确实没配模型 → 在 nucleus.config.json 里声明（见 nucleus.config.example.json）；' +
+              '② 配了但没被读到 → 跑 nucleus doctor 看它报的配置文件路径',
+          },
+        },
+      )
+    }
+
     const events: ProviderEventSink = new DbProviderEvents(
       this.db,
       this.deps.clock,

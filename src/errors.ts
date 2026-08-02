@@ -73,6 +73,10 @@ export const ERRORS = new Map<string, ErrorSpec>([
   spec('tool.unavailable', 'needs_user', false, '工具在当前环境不可用'),
   // 配置问题，不是运行时内部错误 —— 报成 runtime.internal 会让人去查代码
   spec('config.agent_not_found', 'needs_user', false, '配置里找不到该 agent'),
+  // mock 模型在没装 mock fetch 时会真的去解析 mock.invalid，然后报
+  // provider.unreachable +「检查 DNS」—— 把人指向完全错误的方向。
+  // 真正的原因是「还没配置任何真实模型」，所以它自己一个码
+  spec('config.no_real_model', 'needs_user', false, '模型链里只有 mock，还没配置真实模型'),
   spec('tool.denied', 'needs_user', false, '该 agent 无权使用此工具'),
   spec('tool.timeout', 'automatic', true, '工具执行超时'),
   spec('tool.crashed', 'automatic', true, '工具崩溃'),

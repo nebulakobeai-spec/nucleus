@@ -8,7 +8,7 @@ import { withExampleAgents } from '../src/examples/agents.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import { loadEnvFile, parseEnv } from '../src/env.js'
 import { runChatCommand, type ChatSession } from '../src/cli/chat.js'
-import { parseArgv, strFlag } from '../src/cli/ui.js'
+import { parseArgv, strFlag, unknownFlags } from '../src/cli/ui.js'
 import { loadConfig, stripJsonComments } from '../src/config-file.js'
 import type { MockScript } from '../src/providers/mock.js'
 
@@ -350,6 +350,40 @@ describe('parseArgv', () => {
     expect(flags['mock']).toBe(true)
     expect(flags['no-browser']).toBe(true)
     expect(positional).toEqual(['ask', 'x'])
+  })
+
+  /**
+   * **未知参数绝不能吃掉位置参数。**
+   *
+   * 真实踩到的：`nucleus runs --bundle 49e12302` —— `--bundle` 不是 runs 的
+   * 参数，但它把 id 当成自己的值吃掉了，于是 runs 收到空 argv，
+   * **列出了全部 run 而不是那一个**。看起来像「这个 run 不见了」。
+   *
+   * 原来的实现维护一份布尔白名单，不在名单里的就吞下一个 token。
+   * 现在反过来：只有声明了带值的参数才吞。
+   */
+  it('未知参数不吃掉位置参数', () => {
+    const { positional, flags } = parseArgv(['runs', '--bundle', '49e12302'])
+    expect(flags['bundle']).toBe(true)
+    expect(positional).toEqual(['runs', '49e12302'])
+  })
+
+  it('未知参数会被报出来 —— 打错的名字不该静默生效', () => {
+    expect(unknownFlags(parseArgv(['runs', '--bundle', 'x']).flags)).toEqual(['bundle'])
+    expect(unknownFlags(parseArgv(['ask', '--mdel', 'x']).flags)).toEqual(['mdel'])
+  })
+
+  it('已知参数不会被误报', () => {
+    const { flags } = parseArgv([
+      'ask', 'x', '--mock', '--model', 'a:b', '--conv', 'abc',
+      '--db', 'postgres://x', '--no-transcripts', '--catch-up',
+    ])
+    expect(unknownFlags(flags)).toEqual([])
+  })
+
+  it('未知参数用 --key=value 写法时仍然拿到值', () => {
+    // 这条是为了说明「未知」只影响会不会吞下一个 token，不影响显式赋值
+    expect(parseArgv(['--whatever=7']).flags['whatever']).toBe('7')
   })
 })
 

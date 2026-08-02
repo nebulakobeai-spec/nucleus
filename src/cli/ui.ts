@@ -181,15 +181,69 @@ export function resolveDb(flags: Record<string, string | true>): {
  * 后面的问题当成自己的值吃掉，命令直接变成「缺少参数」——
  * 而「开关放在前面」恰恰是最自然的写法。
  */
-const BOOLEAN_FLAGS = new Set([
+/**
+ * **带值的参数**。其余一律当布尔。
+ *
+ * 原来反过来：维护一份布尔白名单，不在名单里的就吞掉下一个 token 当值。
+ * 于是打错一个参数名会静默改变行为 —— 真实踩到的是：
+ *
+ *     nucleus runs --bundle 49e12302
+ *
+ * `--bundle` 不是 runs 的参数，但它把 `49e12302` 当成自己的值吃掉了，
+ * 于是 runs 收到空 argv，**列出了全部 run 而不是那一个**。看起来像
+ * 「这个 run 不见了」，实际是参数解析。
+ *
+ * 反过来之后，未知参数最多是被忽略（而且会报出来），绝不会吃掉位置参数。
+ * 代价是新增带值参数时要记得加进这份名单 —— 有测试守着常用的那些。
+ */
+const VALUE_FLAGS = new Set([
+  'acceptance',
+  'agent',
+  'args',
+  'catch-up-max',
+  'compare',
+  'config',
+  'context',
+  'conv',
+  'credentials',
+  'cron',
+  'data',
+  'db',
+  'describe',
+  'dir',
+  'goal',
+  'limit',
+  'log',
+  'method',
+  'model',
+  'n',
+  'out',
+  'provider',
+  'run',
+  'since',
+  'timezone',
+  'tz',
+  'value',
+])
+
+/** 已知的布尔参数。只用于「这个名字打错了吗」的判断，不影响解析 */
+const KNOWN_BOOLEAN_FLAGS = new Set([
   'mock',
   'stdin',
   'oauth',
   'no-keychain',
   'no-browser',
   'no-transcripts',
+  'catch-up',
+  'mcp',
+  'yes',
   'help',
 ])
+
+/** 参数名认不认识 —— 认不出的报出来，别让打错的参数静默生效 */
+export function unknownFlags(flags: Record<string, string | true>): string[] {
+  return Object.keys(flags).filter((k) => !VALUE_FLAGS.has(k) && !KNOWN_BOOLEAN_FLAGS.has(k))
+}
 
 /**
  * 取一个带值参数。
@@ -253,7 +307,9 @@ export function parseArgv(argv: string[]): { positional: string[]; flags: Record
     }
 
     const key = a.slice(2)
-    if (BOOLEAN_FLAGS.has(key)) {
+    // 只有声明了带值的参数才吃下一个 token。未知参数一律当布尔 ——
+    // 否则打错一个名字就会静默吞掉位置参数
+    if (!VALUE_FLAGS.has(key)) {
       flags[key] = true
       continue
     }
@@ -262,6 +318,7 @@ export function parseArgv(argv: string[]): { positional: string[]; flags: Record
       flags[key] = next
       i++
     } else {
+      // 写了名字没给值 —— 存 true，由 strFlag 兜住（见下）
       flags[key] = true
     }
   }
