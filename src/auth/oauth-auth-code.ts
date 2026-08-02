@@ -46,7 +46,18 @@ export interface AuthCodeProviderConfig {
 export interface CallbackServer {
   /** 收到合法回调时 resolve 出 code */
   waitForCode: Promise<string>
-  close: () => void
+  /**
+   * 关闭并释放端口。
+   *
+   * **返回 Promise：端口真正被释放是异步的。** 想 await 的可以 await，
+   * 不 await 的照旧（`server.close()` 仍然是合法调用）。
+   *
+   * 为什么这不只是测试的方便：回调端口是**固定的**（provider 那边注册的
+   * redirect_uri 写死了端口）。所以「上一次登录失败后重试」必然要重新绑同一个
+   * 端口 —— 而不能 await 关闭的话，只能靠 sleep 一个猜出来的时长，
+   * 在负载下就是随机的 EADDRINUSE。
+   */
+  close: () => Promise<void>
   /** 实际监听的地址；端口被占时为 null */
   listeningOn: string | null
 }
@@ -255,14 +266,14 @@ export class AuthCodeClient {
     return {
       waitForCode,
       listeningOn,
-      close: () => {
-        try {
-          server.close()
+      close: () =>
+        new Promise<void>((resolve) => {
+          if (!server.listening) return resolve()
+          // 先强制断掉存活连接再等 close —— 顺序反了的话 keep-alive 连接
+          // 会把 close 拖到超时，端口迟迟不释放
           server.closeAllConnections?.()
-        } catch {
-          /* 已关闭 */
-        }
-      },
+          server.close(() => resolve())
+        }),
     }
   }
 

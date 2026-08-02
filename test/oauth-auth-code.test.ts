@@ -272,8 +272,9 @@ const canListen = await (async () => {
 describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
   let servers: Array<{ close: () => void }> = []
 
-  afterEach(() => {
-    for (const s of servers) s.close()
+  afterEach(async () => {
+    // await：否则下一个测试可能在端口还没释放时就去绑
+    await Promise.all(servers.map((s) => s.close()))
     servers = []
   })
 
@@ -345,16 +346,28 @@ describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
     await expect(client.startCallbackServer('S')).rejects.toThrow(/loopback/)
   })
 
-  it('close 之后端口被释放', async () => {
+  /**
+   * 回调端口是**固定的**（provider 那边注册的 redirect_uri 写死了端口），
+   * 所以「登录失败后重试」必然要重新绑同一个端口。close 必须可 await ——
+   * 原来这里是 `close()` 然后 sleep 50ms，在负载下就是随机的 EADDRINUSE，
+   * 而这一组平时被跳过（本机 listen 是 EPERM），所以那次随机失败很难被抓到。
+   */
+  it('close 之后端口立刻可以重新绑定（不靠 sleep 猜）', async () => {
     const port = 39006
     const server = await new AuthCodeClient(cfgWithPort(port)).startCallbackServer('S')
     expect(server.listeningOn).not.toBeNull()
-    server.close()
-    await new Promise((r) => setTimeout(r, 50))
+    await server.close()
 
     const again = await new AuthCodeClient(cfgWithPort(port)).startCallbackServer('S')
     servers.push(again)
     expect(again.listeningOn).not.toBeNull()
+  })
+
+  it('重复 close 不抛', async () => {
+    const port = 39007
+    const server = await new AuthCodeClient(cfgWithPort(port)).startCallbackServer('S')
+    await server.close()
+    await expect(server.close()).resolves.toBeUndefined()
   })
 })
 

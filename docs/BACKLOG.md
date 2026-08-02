@@ -427,10 +427,28 @@
 
 ## F. 诚实性与技术债
 
-19. **README / DESIGN 的现状段改准**。它现在有过时之处：说「前沿模型遵守率
-    未知」（真实 GLM 已验，0 次契约退回）、四个订阅模型的风险项（模型已移出
-    默认配置）、以及把「context 装配」列在已完成里（那句在接线之前不成立）。
+19. ~~**README / DESIGN 的现状段改准**~~ ✅ README 已改（DESIGN 待查）。
+    原来说「前沿模型遵守率未知」（真实 GLM 已验，0 次契约退回）、
+    把「context 装配」列在已完成里（接线之前那句不成立）、
+    还把 `toolsAllow` 当主闸门（现在 permission 才是）。
     **一份会骗人的现状清单比没有更糟。**
+
+19b. **`oauth-auth-code.test.ts` 里有 8 个测试在本机永远跳过**
+    （`describe.skipIf(!canListen)`，本机 `listen` 是 EPERM）。
+
+    这不是无害的：有一次全套跑出 `1 failed | 742 passed` 且**没有 skipped**
+    —— 沙箱那一瞬间允许了绑定端口，于是这 8 个跑了起来，其中一个失败。
+    之后 16 轮（含 3 轮满负载）都复现不了，因为 `listen` 又变回 EPERM。
+
+    读代码定位到的成因是 `close 之后端口被释放` 那条：`close()` 是
+    fire-and-forget，测试 sleep 50ms 就去重新绑同一个端口，负载下不够。
+    已修 —— `close()` 改成返回 Promise。这不只是测试的方便：**回调端口是固定的**
+    （provider 注册的 redirect_uri 写死了端口），所以「登录失败后重试」必然要
+    重新绑同一个端口，而不能 await 就只能 sleep 一个猜出来的时长。
+
+    但**这条修复我验证不了** —— 得在允许绑定端口的机器上跑一次
+    `npx vitest run test/oauth-auth-code.test.ts` 并确认 0 skipped。
+    在那之前，这 8 个测试的状态是「写了但从没执行过」。
 
 20. **6 张建了从没写过的表** —— 每张代表一个只有 schema 的功能：
     `tasks` + `activity_logs`（任务看板 / 计划式编排）、`prompt_versions`

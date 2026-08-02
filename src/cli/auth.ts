@@ -318,12 +318,13 @@ async function authCodeFlowLogin(
   try {
     code = await Promise.race([server.waitForCode, manual.promise])
   } catch (e) {
-    server.close()
+    await server.close()
     manual.cancel()
     line(`${ICON.fail} ${(e as Error).message}`)
     return 1
   } finally {
-    server.close()
+    // await：端口是固定的，登录失败后重试要能立刻重新绑上
+    await server.close()
     manual.cancel()
   }
 
