@@ -1,6 +1,7 @@
 import type { Db, Queryable } from '../db/types.js'
 import type { Deps } from '../seams.js'
 import type { ChatMessage } from '../providers/types.js'
+import type { ConversationSummary } from '../context/compact.js'
 
 export interface Conversation {
   id: string
@@ -14,9 +15,31 @@ export interface Conversation {
   archivedAt: Date | null
   createdAt: Date
   updatedAt: Date
+  /** 结构化摘要的 JSON。null = 还没压缩过 */
+  summary: ConversationSummary | null
+  /** 摘要覆盖到哪条消息（含）。它之后的消息仍然逐条进 context */
+  summaryThroughSeq: number
+  /** 摘了几代。增量摘要会逐代失真，代数是判断可信度的依据 */
+  summaryGeneration: number
 }
 
 export type MessageRole = 'user' | 'assistant' | 'system_note'
+
+/** 一次压缩的账。摘要是有损且不可逆的，所以每次都留档 */
+export interface CompactionRecord {
+  generation: number
+  fromSeq: number
+  throughSeq: number
+  messageCount: number
+  tokensBefore: number
+  tokensAfter: number
+  /** 摘要正文（JSON 文本）或失败原因 */
+  summary: string
+  provider: string | null
+  model: string | null
+  outcome: 'ok' | 'failed'
+  createdAt: Date
+}
 
 export interface Message {
   id: string
@@ -44,7 +67,24 @@ const toConv = (r: any): Conversation => ({
   archivedAt: r.archived_at,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
+  summary: parseSummary(r.summary),
+  summaryThroughSeq: r.summary_through_seq ?? 0,
+  summaryGeneration: r.summary_generation ?? 0,
 })
+
+/**
+ * 摘要存的是 JSON 文本。解析失败时**当作没有摘要**而不是抛 ——
+ * 一个坏摘要不该让整个会话打不开；下一次压缩会覆盖它。
+ */
+function parseSummary(raw: unknown): ConversationSummary | null {
+  if (!raw) return null
+  if (typeof raw === 'object') return raw as ConversationSummary
+  try {
+    return JSON.parse(String(raw)) as ConversationSummary
+  } catch {
+    return null
+  }
+}
 
 const toMsg = (r: any): Message => ({
   id: r.id,
@@ -194,6 +234,142 @@ export class ConversationStore {
       if (m.role === 'system_note') return { role: 'user' as const, content: `[系统] ${m.content}` }
       return { role: m.role as 'user' | 'assistant', content: m.content }
     })
+  }
+
+  // ── Compact：摘要 ──────────────────────────────────────
+
+  /**
+   * 写入一次压缩的结果。
+   *
+   * **摘要与账本同事务，且都不动 messages。** 消息永不删除 ——
+   * 摘要失败时退化成「装配器照常裁剪」，而不是数据丢失。
+   * 代价是库会一直长，但那是磁盘问题；反过来是正确性问题。
+   *
+   * `generation` 用条件更新做 CAS：两个 run 同时压缩时只有一个能落地，
+   * 另一个撞 unique(conversation_id, generation) 后重新读到新摘要即可。
+   */
+  async recordCompaction(input: {
+    conversationId: string
+    summary: ConversationSummary
+    fromSeq: number
+    throughSeq: number
+    messageCount: number
+    tokensBefore: number
+    tokensAfter: number
+    provider?: string | null
+    model?: string | null
+  }): Promise<{ generation: number } | null> {
+    return this.db.tx(async (tx) => {
+      const cur = await tx.query<{ summary_generation: number; summary_through_seq: number }>(
+        `select summary_generation, summary_through_seq from conversations where id = $1`,
+        [input.conversationId],
+      )
+      const row = cur.rows[0]
+      if (!row) return null
+      // 别人已经压到更远的位置了 —— 放弃这次，不要把摘要往回退
+      if (row.summary_through_seq >= input.throughSeq) return null
+
+      const generation = row.summary_generation + 1
+      await tx.query(
+        `insert into compactions
+           (conversation_id, generation, from_seq, through_seq, message_count,
+            tokens_before, tokens_after, summary, provider, model, outcome, created_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ok',$11)`,
+        [
+          input.conversationId,
+          generation,
+          input.fromSeq,
+          input.throughSeq,
+          input.messageCount,
+          input.tokensBefore,
+          input.tokensAfter,
+          JSON.stringify(input.summary),
+          input.provider ?? null,
+          input.model ?? null,
+          this.deps.clock.nowIso(),
+        ],
+      )
+      await tx.query(
+        `update conversations
+            set summary = $2, summary_through_seq = $3, summary_generation = $4,
+                summary_updated_at = $5, updated_at = $5
+          where id = $1 and summary_generation = $6`,
+        [
+          input.conversationId,
+          JSON.stringify(input.summary),
+          input.throughSeq,
+          generation,
+          this.deps.clock.nowIso(),
+          row.summary_generation,
+        ],
+      )
+      return { generation }
+    })
+  }
+
+  /**
+   * 压缩失败也记一行。
+   *
+   * 「模型忘了我说过什么」这类问题的成因可能是**压缩根本没成功** ——
+   * 那时消息没退役、摘要没生成，症状却和「摘丢了」一模一样。
+   * 不留账的话这两种情况分不开。
+   */
+  async recordCompactionFailure(input: {
+    conversationId: string
+    fromSeq: number
+    throughSeq: number
+    messageCount: number
+    tokensBefore: number
+    error: string
+  }): Promise<void> {
+    // generation 用负数避免与成功的那串冲突：失败不推进代数
+    const n = await this.db.query<{ n: number }>(
+      `select coalesce(min(generation), 0) - 1 as n from compactions where conversation_id = $1`,
+      [input.conversationId],
+    )
+    await this.db.query(
+      `insert into compactions
+         (conversation_id, generation, from_seq, through_seq, message_count,
+          tokens_before, tokens_after, summary, outcome, created_at)
+       values ($1,$2,$3,$4,$5,$6,0,$7,'failed',$8)
+       on conflict (conversation_id, generation) do nothing`,
+      [
+        input.conversationId,
+        n.rows[0]?.n ?? -1,
+        input.fromSeq,
+        input.throughSeq,
+        input.messageCount,
+        input.tokensBefore,
+        input.error,
+        this.deps.clock.nowIso(),
+      ],
+    )
+  }
+
+  /** 压缩历史。给 `nucleus conv compactions` 与诊断包用 */
+  async compactions(conversationId: string, limit = 20): Promise<CompactionRecord[]> {
+    const r = await this.db.query<Record<string, unknown>>(
+      // **按 id 排，不按 created_at。** bigserial 严格跟随插入顺序；
+      // created_at 在同一毫秒内（或 FakeClock 下）完全相同，排序不稳定 ——
+      // 而这张表的价值全在于「哪一代丢的」，顺序错了就指错代。
+      // 也不按 generation 排：失败的记录用负数代，那样会把它们全排到一头
+      `select * from compactions where conversation_id = $1
+        order by id desc limit ${Number(limit) | 0}`,
+      [conversationId],
+    )
+    return r.rows.map((x) => ({
+      generation: x['generation'] as number,
+      fromSeq: x['from_seq'] as number,
+      throughSeq: x['through_seq'] as number,
+      messageCount: x['message_count'] as number,
+      tokensBefore: x['tokens_before'] as number,
+      tokensAfter: x['tokens_after'] as number,
+      summary: x['summary'] as string,
+      provider: (x['provider'] as string) ?? null,
+      model: (x['model'] as string) ?? null,
+      outcome: x['outcome'] as 'ok' | 'failed',
+      createdAt: new Date(x['created_at'] as string),
+    }))
   }
 
   // ── 串行化：同一会话内只允许一个活跃 run ─────────────

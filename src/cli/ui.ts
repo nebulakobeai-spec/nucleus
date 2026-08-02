@@ -199,6 +199,33 @@ const BOOLEAN_FLAGS = new Set([
  * 「convId.slice is not a function」—— 错误信息完全指不到参数上。
  * 这里统一把「没给值」归成 undefined，由调用方决定默认值或报错。
  */
+/**
+ * `--conv` 按前缀解析。
+ *
+ * 终端打印的是 8 位短 id（`会话 fb8e550c`），而 uuid 列直接拿这个去查会报
+ * `invalid input syntax for type uuid` —— **界面给了一个粘不回去的值**。
+ * `runs` / `bundle` 早就支持前缀了，这里不支持只是漏了。
+ */
+export async function resolveConversationId(
+  db: { query: <T>(sql: string, params?: unknown[]) => Promise<{ rows: T[] }> },
+  input: string,
+): Promise<{ id: string } | { error: string }> {
+  const s = input.trim()
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return { id: s }
+  if (!/^[0-9a-f]{2,}$/i.test(s)) return { error: `「${s}」不像会话 id` }
+
+  const r = await db.query<{ id: string }>(
+    `select id from conversations where id::text like $1 order by updated_at desc limit 5`,
+    [`${s}%`],
+  )
+  if (r.rows.length === 0) return { error: `没有以「${s}」开头的会话` }
+  // 前缀撞车要报出来，不能随便挑一个 —— 挑错会把消息追加到别人的会话里
+  if (r.rows.length > 1) {
+    return { error: `「${s}」匹配到 ${r.rows.length} 个会话：${r.rows.map((x) => x.id.slice(0, 12)).join(', ')}` }
+  }
+  return { id: r.rows[0]!.id }
+}
+
 export function strFlag(
   flags: Record<string, string | true>,
   name: string,

@@ -96,6 +96,82 @@ function fake(decl: Record<string, unknown>, name: string): unknown {
   }
 }
 
+/**
+ * 合成一份摘要。
+ *
+ * 刻意从提示词里**真的抄出用户说过的话**，而不是回一句固定文本 ——
+ * 「约束必须活过压缩」是这块唯一要紧的性质，mock 要能让它被测到。
+ * 回固定文本的话，测试就只能验「压缩跑通了」，验不了「压缩没丢东西」。
+ */
+export function synthesizeSummary(
+  messages: Array<{ role: string; content: string }>,
+): Record<string, unknown> {
+  const text = messages.map((m) => m.content).join('\n')
+  const constraints: string[] = []
+  const add = (x: string) => {
+    const v = x.trim().slice(0, 200)
+    if (v && !constraints.includes(v)) constraints.push(v)
+  }
+  const LOOKS_LIKE_CONSTRAINT = /不要|必须|不能|别|禁止/
+
+  /**
+   * **只扫两个位置，不扫整段提示词。**
+   *
+   * 提示词里我自己那段「## 要求」也写满了「不要写空话」「必须保留」，
+   * 全文乱扫会把它们当成用户约束 —— 于是测试可能因为**错误的原因**通过
+   * （断言「约束活下来了」，而活下来的其实是提示词自己的话）。
+   */
+  let inRetiring = false
+  let inPrevConstraints = false
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+
+    // ① 退役消息区：只取 `[user] …` 那些行
+    if (line.startsWith('## 这次要退役的对话')) {
+      inRetiring = true
+      inPrevConstraints = false
+      continue
+    }
+    if (line.startsWith('## 要求')) {
+      inRetiring = false
+      continue
+    }
+    // ② 已有摘要里的约束段 —— 增量摘要必须继承它，否则第二代就丢了
+    if (line.startsWith('### 用户明确提过的要求')) {
+      inPrevConstraints = true
+      inRetiring = false
+      continue
+    }
+    if (inPrevConstraints && line.startsWith('###')) {
+      inPrevConstraints = false
+      continue
+    }
+
+    if (inRetiring) {
+      const m = /^\[user\]\s*(.+)$/.exec(line)
+      if (m && LOOKS_LIKE_CONSTRAINT.test(m[1]!)) add(m[1]!)
+    } else if (inPrevConstraints) {
+      const m = /^-\s+(.+)$/.exec(line)
+      if (m) add(m[1]!)
+    }
+  }
+
+  return {
+    constraints,
+    decisions: [],
+    open: [],
+    artifacts: [],
+    context: '（mock 压缩）',
+  }
+}
+
+function mockJson(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
 export function mockProviderFetch(script: MockScript): FetchLike {
   const cursors = new Map<string, number>()
   const agents = Object.keys(script)
@@ -106,6 +182,42 @@ export function mockProviderFetch(script: MockScript): FetchLike {
       stream?: boolean
       tools?: Array<{ function?: { name?: string; parameters?: unknown } }>
     }
+    /**
+     * 压缩请求单独认出来。
+     *
+     * 两个理由：
+     *  1. 它**没有 system 消息**，所以 whichAgent 认不出来，会随便挑一个 agent
+     *  2. 更要紧的是它**不该消耗 agent 的脚本游标** —— 一次压缩会把后面的剧本
+     *     全错位，而症状是「某个专家突然走了别人的分支」，极难追
+     */
+    const summaryTool = body.tools?.find((t) => t.function?.name === 'submit_summary')
+    if (summaryTool) {
+      return mockJson({
+        id: 'chatcmpl-mock-compact',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [
+                {
+                  id: 'call_compact',
+                  type: 'function',
+                  function: {
+                    name: 'submit_summary',
+                    arguments: JSON.stringify(synthesizeSummary(body.messages)),
+                  },
+                },
+              ],
+            },
+            finish_reason: 'tool_calls',
+          },
+        ],
+        usage: { prompt_tokens: 300, completion_tokens: 60 },
+      })
+    }
+
     const system = body.messages.find((m) => m.role === 'system')?.content ?? ''
     const agent = whichAgent(system, agents)
 

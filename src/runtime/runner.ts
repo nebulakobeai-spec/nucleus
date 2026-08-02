@@ -139,7 +139,7 @@ export class Runner {
   constructor(
     private db: Db,
     private deps: Deps,
-    private router: ModelRouter,
+    readonly router: ModelRouter,
     private tools: ToolRegistry,
     private events: RunEventSink,
     opts: RunnerOptions = {},
@@ -162,6 +162,16 @@ export class Runner {
    * **永远不抛异常**（除 StaleFenceError）—— 所有失败路径都写终态，
    * 因为「不存在没收到」依赖的正是这一点。
    */
+  /**
+   * 这条链的有效窗口（取链上最小值）。
+   *
+   * 暴露出来是为了让压缩判定用**同一个口径** —— 两处各算一份的话，
+   * 阈值和实际裁剪会对不上，而那种偏差只在长会话里才显形。
+   */
+  contextWindowFor(chain: string[]): number {
+    return this.router.contextWindowFor(chain, this.#assumedContextWindow)
+  }
+
   async execute(input: {
     attemptId: string
     fenceToken: string
@@ -171,6 +181,13 @@ export class Runner {
     agent: AgentSpec
     /** 会话历史，按时间顺序（最旧在前）。装配器按 token 预算从旧往新裁 */
     history: ChatMessage[]
+    /**
+     * 已压缩的历史摘要（已渲染成文本）。
+     *
+     * 它替代的是**已经退役的**那段历史 —— `history` 里不该再包含被摘要覆盖的
+     * 消息，否则同一段内容会占两份预算。由调用方（worker）保证。
+     */
+    summary?: string | null
     /** 本回合输入（任务信封 / 专家结果）。不参与裁剪 */
     input: ChatMessage[]
     workdir: string
@@ -240,6 +257,7 @@ export class Runner {
       runId: string
       agent: AgentSpec
       history: ChatMessage[]
+      summary?: string | null
       input: ChatMessage[]
       workdir: string
       signal: AbortSignal
@@ -275,6 +293,9 @@ export class Runner {
       identity: '',
       policy: '',
       history: input.history,
+      // 摘要接上线。这两档降级（shrink_summary / drop_summary）在装配器里
+      // 一直存在，但此前永远不会触发 —— 没有任何代码产生摘要
+      summary: input.summary ?? null,
       input: input.input,
       budget: { ...DEFAULT_BUDGET, contextWindow: window },
     })

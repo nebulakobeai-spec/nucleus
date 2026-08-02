@@ -13,7 +13,7 @@ import { ConversationStore } from './store/conversations.js'
 import { ToolRegistry } from './runtime/tools.js'
 import { registerBuiltins } from './runtime/builtin-tools.js'
 import { Runner } from './runtime/runner.js'
-import { Worker } from './runtime/worker.js'
+import { Worker, type WorkerOptions } from './runtime/worker.js'
 import { Reconciler } from './runtime/reconciler.js'
 import { DbEventSink, TeeEventSink, type RunEventSink } from './runtime/events.js'
 import { McpClient } from './mcp/client.js'
@@ -65,6 +65,8 @@ export interface BootOptions {
   mcpTransport?: (cfg: McpServerConfig, env: Record<string, string>) => McpTransport
   /** MCP 生命周期事件（不属于任何 run，不写 run_events） */
   onMcpEvent?: (e: { serverId: string; kind: string; detail?: unknown }) => void
+  /** 覆盖 worker 选项（测试用：把压缩阈值调低，否则要灌几十轮才触发） */
+  worker?: Partial<WorkerOptions>
 }
 
 export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
@@ -154,6 +156,7 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
     workerId: config.runtime.workerId,
     leaseMs: config.runtime.leaseMs,
     workdirRoot: config.runtime.workdirRoot,
+    ...(opts.worker ?? {}),
   })
 
   const reconciler = new Reconciler(db, deps)

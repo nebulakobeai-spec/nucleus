@@ -1,6 +1,7 @@
 import { ask, type Nucleus } from '../boot.js'
 import { recoveryOf } from '../errors.js'
 import { TeeEventSink, type RunEvent } from '../runtime/events.js'
+import { compressionRatio } from '../context/compact.js'
 import { compactTokens, Pet, petStill } from './pet.js'
 import { c, duration, heading, ICON, line, money, recoveryHint, statusColor, table } from './ui.js'
 
@@ -143,6 +144,47 @@ export function renderEvent(e: RunEvent, indent: string): string | null {
         c.gray(` （窗口 ${compactTokens(Number(q['window'] ?? 0))}）`)
       )
     }
+
+    /**
+     * 压缩必须可见。
+     *
+     * 它是**有损且不可逆**的：那几条原文之后再也不进 context 了。
+     * 悄悄发生的话，「模型怎么忘了我刚说的」就成了谜案 —— 而这正是
+     * 上下文管理里最容易被归因成「模型不行」的一类问题。
+     */
+    case 'compact.started':
+      return (
+        br +
+        c.gray(
+          `压缩历史：退役 ${q['messages']} 条（${compactTokens(Number(q['tokensBefore'] ?? 0))}）…`,
+        )
+      )
+
+    case 'compact.finished': {
+      const before = Number(q['tokensBefore'] ?? 0)
+      const after = Number(q['tokensAfter'] ?? 0)
+      const kept: string[] = []
+      // 把「留住了几条约束/决定」说出来 —— 压缩比再好，丢了约束也是失败
+      if (Number(q['constraints'] ?? 0) > 0) kept.push(`${q['constraints']} 条约束`)
+      if (Number(q['decisions'] ?? 0) > 0) kept.push(`${q['decisions']} 条决定`)
+      return (
+        br +
+        c.green(`历史已压缩`) +
+        c.gray(
+          ` ${compactTokens(before)} → ${compactTokens(after)}` +
+            `（省 ${compressionRatio(before, after)}）` +
+            (kept.length ? ` · 留住 ${kept.join(' / ')}` : ''),
+        )
+      )
+    }
+
+    case 'compact.failed':
+      // 说清「任务继续」—— 否则一条红字会让人以为要挂了
+      return (
+        br +
+        c.yellow('压缩失败') +
+        c.gray(`：${q['error']} —— 任务继续，历史改按预算裁剪`)
+      )
 
     case 'wake.armed':
       return br + c.gray(`挂起，等 ${q['waitOn']} 个专家 —— 本轮 attempt 到此结束`)

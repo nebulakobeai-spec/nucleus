@@ -8,6 +8,9 @@ import { Reconciler } from './reconciler.js'
 import { ScheduleStore, type FireResult, type Schedule } from '../store/schedules.js'
 import type { RunEventSink } from './events.js'
 import { renderEnvelope } from './envelope.js'
+import { Compactor } from './compactor.js'
+import { renderSummary, type CompactPolicy } from '../context/compact.js'
+import { DEFAULT_BUDGET } from '../context/assemble.js'
 import { decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicy } from './retry.js'
 import type { ChatMessage } from '../providers/types.js'
 
@@ -21,6 +24,8 @@ export interface WorkerOptions {
   /** 每隔多少次循环跑一次 reconciler */
   reconcileEvery?: number
   workdirRoot?: string
+  /** 压缩策略；不给则用 DEFAULT_COMPACT_POLICY */
+  compactPolicy?: CompactPolicy
 }
 
 export interface WorkerHooks {
@@ -79,6 +84,7 @@ export class Worker {
   #conversations: ConversationStore
   #reconciler: Reconciler
   #schedules: ScheduleStore
+  #compactor: Compactor | null
   #stopped = false
   #loops = 0
 
@@ -95,6 +101,13 @@ export class Worker {
     this.#conversations = new ConversationStore(db, deps)
     this.#reconciler = new Reconciler(db, deps)
     this.#schedules = new ScheduleStore(db, deps)
+    // compactor 需要 router；runner 持有它。没有就退回「不压缩」——
+    // 这条路径下行为与压缩上线前完全一致
+    this.#compactor = runner.router
+      ? new Compactor(this.#conversations, runner.router, events, {
+          ...(opts.compactPolicy ? { policy: opts.compactPolicy } : {}),
+        })
+      : null
   }
 
   stop(): void {
@@ -190,10 +203,15 @@ export class Worker {
     })
 
     try {
-      const { history, input: turnInput } = await this.#buildMessages(
+      const { history, input: turnInput, summary } = await this.#buildMessages(
         run.id,
         run.conversationId,
         run.input,
+        {
+          attemptId: attempt.id,
+          modelChain: agent.modelChain,
+          contextWindow: this.runner.contextWindowFor(agent.modelChain),
+        },
       )
       const out = await this.runner.execute({
         attemptId: attempt.id,
@@ -202,6 +220,7 @@ export class Worker {
         runId: run.id,
         agent,
         history,
+        summary,
         input: turnInput,
         workdir: `${this.opts.workdirRoot ?? '/tmp/nucleus'}/${run.id}`,
       })
@@ -382,15 +401,45 @@ export class Worker {
     runId: string,
     conversationId: string | null,
     input: unknown,
-  ): Promise<{ history: ChatMessage[]; input: ChatMessage[] }> {
+    ctx: { attemptId: string; modelChain: string[]; contextWindow: number } | null = null,
+  ): Promise<{ history: ChatMessage[]; input: ChatMessage[]; summary: string | null }> {
     // history 与本回合输入必须分开返回 —— 装配器只裁剪 history，
     // 本回合的任务与专家结果是不能被裁掉的（裁了这一轮就没意义了）
     const history: ChatMessage[] = []
     const turn: ChatMessage[] = []
+    let summary: string | null = null
 
     if (conversationId) {
       // 取 50 条只是上限，真正的约束是装配器的 token 预算
-      const recent = await this.#conversations.recent(conversationId, 50)
+      let recent = await this.#conversations.recent(conversationId, 50)
+
+      /**
+       * 压缩**在装配之前**。
+       *
+       * 等装配器报 trim_history 才动手是没用的 —— 那时消息这一轮已经被丢了，
+       * 摘要救不回这一轮。所以判定放在这里，在历史交给装配器之前。
+       *
+       * 失败不影响任务：compactor 内部 catch 到底，返回 compacted: false，
+       * 于是这里照旧把全量历史交出去，由装配器按老办法裁。
+       */
+      if (ctx && this.#compactor) {
+        await this.#compactor.maybeCompact({
+          conversationId,
+          messages: recent,
+          historyBudget: historyBudgetFor(ctx.contextWindow),
+          modelChain: ctx.modelChain,
+          attemptId: ctx.attemptId,
+          runId,
+        })
+      }
+
+      const conv = await this.#conversations.get(conversationId)
+      if (conv?.summary && conv.summaryThroughSeq > 0) {
+        summary = renderSummary(conv.summary, conv.summaryGeneration)
+        // **被摘要覆盖的消息不能再逐条进去** —— 否则同一段内容占两份预算，
+        // 压缩反而让 context 变大
+        recent = recent.filter((m) => m.seq > conv.summaryThroughSeq)
+      }
       history.push(...this.#conversations.toChatMessages(recent))
     } else {
       // 子 run：任务信封。渲染集中在 envelope.ts —— 以前这里是
@@ -420,6 +469,18 @@ export class Worker {
       turn.push({ role: 'user', content: `[专家结果 · ${c.agent_id}] ${body}` })
     }
 
-    return { history, input: turn }
+    return { history, input: turn, summary }
   }
+}
+
+/**
+ * 留给历史的 token 预算。
+ *
+ * 与装配器的 DEFAULT_BUDGET 保持一致的口径：窗口减去输出余量后，历史能占的上限。
+ * 压缩阈值按它算 —— 按整个窗口算会让压缩触发得太晚（前缀、约束、本轮输入
+ * 都还要占位置）。
+ */
+export function historyBudgetFor(contextWindow: number): number {
+  const usable = contextWindow - DEFAULT_BUDGET.reserveForOutput
+  return Math.max(0, Math.min(DEFAULT_BUDGET.maxHistoryTokens, usable))
 }

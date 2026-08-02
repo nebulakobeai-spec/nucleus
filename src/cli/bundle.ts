@@ -6,6 +6,7 @@ import { loadConfig } from '../config-file.js'
 import { redactText } from '../auth/credentials.js'
 import { errorSpec } from '../errors.js'
 import { describeCron } from '../runtime/cron.js'
+import { compressionRatio } from '../context/compact.js'
 import { c, heading, ICON, line, strFlag, resolveDb } from './ui.js'
 
 /**
@@ -71,6 +72,14 @@ export interface Bundle {
     transcripts: unknown[]
     /** 这次 run 是哪条定时任务触发的（手工发起时为 null） */
     schedule: unknown | null
+    /**
+     * 这个会话的压缩历史。
+     *
+     * **压缩是有损且不可逆的，而症状不会当场出现** —— 它以「模型三轮后忘了
+     * 我说过什么」的形式显形。那时唯一能定位的方式就是对比「哪一代退役了
+     * 哪些消息」与「摘出来的是什么」。
+     */
+    compactions: unknown[]
     /** 每个 error_code 的恢复性，避免对方还要查文档 */
     errorSpecs: Record<string, unknown>
   }
@@ -160,6 +169,71 @@ function printSchedules(bundle: Bundle): void {
       const why = bad.find((f) => f.reason)?.reason
       if (why) line(c.gray(`  例如 ${why}`))
     }
+  }
+}
+
+/**
+ * 压缩历史。
+ *
+ * 这是「模型为什么忘了我说过的话」的唯一线索。压缩有损且不可逆，症状要到
+ * 几轮之后才以「它怎么又提这个」的形式出现 —— 那时只有对比每一代退役了什么、
+ * 摘出了什么，才能定位是哪一代丢的。
+ */
+function printCompactions(bundle: Bundle): void {
+  const list = (bundle.run?.compactions ?? []) as Array<{
+    generation: number
+    from_seq: number
+    through_seq: number
+    message_count: number
+    tokens_before: number
+    tokens_after: number
+    summary: string
+    outcome: string
+    model: string | null
+  }>
+  if (list.length === 0) return
+
+  const ok = list.filter((x) => x.outcome === 'ok')
+  const failed = list.filter((x) => x.outcome === 'failed')
+  heading(`历史压缩（${ok.length} 代${failed.length ? ` · ${failed.length} 次失败` : ''}）`)
+
+  for (const x of [...ok].reverse()) {
+    line(
+      `${ICON.info} 第 ${x.generation} 代：退役 seq ${x.from_seq}-${x.through_seq}` +
+        c.gray(
+          ` （${x.message_count} 条 · ${x.tokens_before}→${x.tokens_after} tok` +
+            ` 省 ${compressionRatio(x.tokens_before, x.tokens_after)}${x.model ? ` · ${x.model}` : ''}）`,
+        ),
+    )
+    // 约束是「必须活过压缩」的那一项，单独列出来 —— 它丢了才是真问题
+    const parsed = safeJson(x.summary)
+    const constraints = (parsed?.['constraints'] as string[] | undefined) ?? []
+    if (constraints.length) {
+      for (const cst of constraints) line(c.gray(`    约束：${cst}`))
+    } else {
+      // 空的约束不一定是错，但值得看一眼 —— 如果用户确实提过要求，那就是丢了
+      line(`    ${ICON.warn} ${c.yellow('这一代没留下任何约束')}`)
+    }
+  }
+
+  for (const x of failed) {
+    line(
+      `${ICON.fail} 压缩失败（seq ${x.from_seq}-${x.through_seq}）` +
+        c.gray(` —— ${x.summary.slice(0, 160)}`),
+    )
+  }
+  if (failed.length) {
+    // 这两种情况症状一样，必须能分开
+    line(c.gray('  压缩失败时历史改按预算裁剪（丢最旧的）—— 与「摘丢了」症状相同，成因不同'))
+  }
+}
+
+function safeJson(raw: string): Record<string, unknown> | null {
+  try {
+    const v = JSON.parse(raw)
+    return v && typeof v === 'object' ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
   }
 }
 
@@ -356,6 +430,16 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
         [rootId],
       )
 
+      // 压缩历史：摘要正文全带上。它不大（每代一段），而它是「模型记住了
+      // 什么」唯一的证据 —— 只给 token 数的话，丢了什么完全看不出来
+      const compactions = await n.db.query(
+        `select cp.* from compactions cp
+           join runs r on r.conversation_id = cp.conversation_id
+          where r.id = $1
+          order by cp.id desc limit 20`,
+        [rootId],
+      )
+
       bundle.run = {
         root: tree.rows.find((r) => (r as { id: string }).id === rootId) ?? null,
         tree: tree.rows,
@@ -366,6 +450,7 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
         artifacts: artifacts.rows,
         transcripts: transcripts.rows,
         schedule: schedule.rows[0] ?? null,
+        compactions: compactions.rows,
         errorSpecs,
       }
     } else {
@@ -504,6 +589,8 @@ export async function replayCmd(argv: string[], _flags: Record<string, string | 
       line(c.gray('  定时运行时没有人在线：它不能提问、也没有会话历史可依赖'))
     }
   }
+
+  printCompactions(bundle)
 
   if (bundle.run) {
     const events = bundle.run.events as Array<{ kind: string; payload: unknown; created_at: string; run_id: string }>
