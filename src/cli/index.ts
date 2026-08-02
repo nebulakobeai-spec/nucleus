@@ -16,6 +16,7 @@ import { artifactCat, artifactList } from './artifact.js'
 import { providersCmd } from './providers.js'
 import { rulesCmd } from './rules.js'
 import { ScheduleStore } from '../store/schedules.js'
+import { convCompact, convList, convShow, convSummary } from './conv.js'
 import {
   scheduleAdd,
   scheduleHistory,
@@ -599,6 +600,9 @@ ${c.bold('agent 与规则')}
   agent new <id>              生成专家定义骨架（含写法说明）
   agent try <id> [任务]        只跑这一个专家：--n 重复、--compare 与旧版并排
   rules                       规则遵守率：谁不听哪条规则
+  conv list                   会话列表：消息数与压缩代数
+  conv show <id>              摘要内容 + 压缩历史（丢了什么只有人能判）
+  conv compact <id>           现在就压一次（--dry-run 只判定）
   schedule list               定时任务：下次什么时候跑
   schedule add <名称>          加一个：--cron "30 8 * * *" --agent <id> --goal "…"
   schedule history <名称>      每次触发的结果，含被跳过的那些与原因
@@ -761,6 +765,27 @@ export async function main(argv: string[]): Promise<number> {
         default:
           // nucleus artifact <路径片段> 等价于 cat
           return artifactCat(rest, flags)
+      }
+    }
+    case 'conv':
+    case 'convs':
+    case 'conversation': {
+      const sub = rest[0]
+      const args = rest.slice(1)
+      switch (sub) {
+        case 'list':
+        case 'ls':
+        case undefined:
+          return convList(args, flags)
+        case 'show':
+          return convShow(args, flags)
+        case 'compact':
+          return convCompact(args, flags)
+        case 'summary':
+          return convSummary(args, flags)
+        default:
+          // nucleus conv <id 前缀> 等价于 show
+          return convShow(rest, flags)
       }
     }
     case 'schedule':

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ask, boot, type Nucleus } from '../src/boot.js'
 import { defaultConfig, type NucleusConfig } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
+import { Compactor } from '../src/runtime/compactor.js'
+import { DbEventSink } from '../src/runtime/events.js'
 import {
   DEFAULT_COMPACT_POLICY,
   decideCompact,
@@ -318,6 +320,106 @@ describe('端到端', () => {
     const after = await n.conversations.get(conv.id)
     expect(after!.summaryGeneration).toBe(0)
     expect(await n.conversations.compactions(conv.id)).toEqual([])
+  })
+})
+
+describe('手动压缩（conv compact）', () => {
+  /**
+   * 自动压缩的阈值在大窗口模型上非常高：131k 窗口下要 28000 tokens 的历史
+   * 才触发，也就是四五十轮。后果是**这条路径在真实使用中很久都不会被执行到**
+   * —— 而没被执行过的路径不能算验证过。所以要有一个能立刻触发的入口。
+   */
+  it('triggerRatio: 0 时立刻压，但仍然保留最近 keepRecent 条', async () => {
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    await ask(n, conv.id, '不要用任何 default 模型。')
+    for (let i = 0; i < 4; i++) await ask(n, conv.id, `第 ${i + 1} 步`)
+
+    const msgs = await n.conversations.recent(conv.id, 500)
+    const compactor = new Compactor(n.conversations, n.runner.router, n.events, {
+      policy: { triggerRatio: 0, keepRecent: 2, minMessages: 2 },
+    })
+    const r = await compactor.maybeCompact({
+      conversationId: conv.id,
+      messages: msgs,
+      historyBudget: 40_000,
+      modelChain: ['mock:local'],
+      // 手动压缩不属于任何 attempt
+      attemptId: null,
+      runId: null,
+    })
+
+    expect(r.compacted).toBe(true)
+    const after = await n.conversations.get(conv.id)
+    // 保留最近 2 条：through_seq = 总数 - 2
+    expect(after!.summaryThroughSeq).toBe(msgs.length - 2)
+    expect(after!.summary!.constraints.join(' ')).toMatch(/不要用任何 default 模型/)
+  })
+
+  /**
+   * 原来 attemptId 是必填，于是手动压缩只能借最近一个 attempt 来挂事件 ——
+   * 直接撞 `unique(run_attempt_id, seq)`：DbEventSink 的 seq 计数器是**进程内**的，
+   * 新进程往已有 attempt 写事件必然从 seq 1 开始。
+   */
+  it('attemptId 为 null 时不发事件，也不报错', async () => {
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    await ask(n, conv.id, '一句话')
+    for (let i = 0; i < 4; i++) await ask(n, conv.id, `第 ${i + 1} 步`)
+
+    const before = await n.db.query<{ n: number }>(
+      `select count(*)::int n from run_events where kind like 'compact.%'`,
+    )
+    const compactor = new Compactor(n.conversations, n.runner.router, n.events, {
+      policy: { triggerRatio: 0, keepRecent: 2, minMessages: 2 },
+    })
+    const r = await compactor.maybeCompact({
+      conversationId: conv.id,
+      messages: await n.conversations.recent(conv.id, 500),
+      historyBudget: 40_000,
+      modelChain: ['mock:local'],
+      attemptId: null,
+      runId: null,
+    })
+
+    expect(r.compacted).toBe(true)
+    const after = await n.db.query<{ n: number }>(
+      `select count(*)::int n from run_events where kind like 'compact.%'`,
+    )
+    // 一条事件都没多 —— 持久记录在 compactions 表里，不依赖 run_events
+    expect(after.rows[0]!.n).toBe(before.rows[0]!.n)
+    expect((await n.conversations.compactions(conv.id)).length).toBeGreaterThan(0)
+  })
+})
+
+describe('事件 seq 的跨进程安全', () => {
+  /**
+   * `DbEventSink` 的 seq 计数器是进程内的 Map，从 0 开始。这依赖一个没被任何
+   * 东西强制的假设：一个 attempt 的事件只由一个进程写。不成立时就是
+   * `duplicate key ... run_events_run_attempt_id_seq_key` 硬报错 ——
+   * 而且报在与真正问题无关的地方（我第一次写手动压缩时就撞上了）。
+   */
+  it('新的 sink 往已有 attempt 写事件时从库里的最大值接着排', async () => {
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    const { runId } = await ask(n, conv.id, '一句话')
+    const attempts = await n.runs.listAttempts(runId)
+    const a = attempts[0]!
+
+    const existing = await n.db.query<{ n: number }>(
+      `select max(seq)::int n from run_events where run_attempt_id = $1`,
+      [a.id],
+    )
+    const maxSeq = existing.rows[0]!.n
+    expect(maxSeq).toBeGreaterThan(0)
+
+    // 全新的 sink，进程内计数器是空的
+    const fresh = new DbEventSink(n.db, new FakeClock(), null)
+    await fresh.emit(a.id, runId, 'test.marker', {})
+
+    const after = await n.db.query<{ seq: number }>(
+      `select seq from run_events where run_attempt_id = $1 and kind = 'test.marker'`,
+      [a.id],
+    )
+    // 从 1 开始就会撞唯一约束
+    expect(after.rows[0]!.seq).toBe(maxSeq + 1)
   })
 })
 

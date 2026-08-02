@@ -22,14 +22,44 @@ export class DbEventSink implements RunEventSink {
     private notifyChannel: string | null = 'nucleus_events',
   ) {}
 
-  async emit(attemptId: string, runId: string, kind: string, payload: unknown = {}): Promise<void> {
-    const seq = (this.#seq.get(attemptId) ?? 0) + 1
-    this.#seq.set(attemptId, seq)
-    await this.db.query(
-      `insert into run_events (run_attempt_id, run_id, seq, kind, payload, created_at)
-       values ($1,$2,$3,$4,$5::jsonb,$6)`,
-      [attemptId, runId, seq, kind, JSON.stringify(payload), this.clock.nowIso()],
+  /**
+   * seq 计数器是**进程内**的。
+   *
+   * 这依赖一个没被任何东西强制的假设：一个 attempt 的事件只由一个进程写。
+   * 正常运行时成立（attempt 终态不可改，崩溃后是新 attempt），但一旦不成立
+   * 就是 `duplicate key ... run_events_run_attempt_id_seq_key` 硬报错 ——
+   * 而且报在一个与真正问题无关的地方。
+   *
+   * 所以第一次见到某个 attempt 时**从库里取当前最大值**播种，
+   * 并且撞了之后重新播种再试一次。一个 attempt 一次额外查询，不是每个事件。
+   */
+  async #nextSeq(attemptId: string): Promise<number> {
+    const cached = this.#seq.get(attemptId)
+    if (cached !== undefined) {
+      const next = cached + 1
+      this.#seq.set(attemptId, next)
+      return next
+    }
+    const r = await this.db.query<{ n: number }>(
+      `select coalesce(max(seq), 0)::int n from run_events where run_attempt_id = $1`,
+      [attemptId],
     )
+    const next = (r.rows[0]?.n ?? 0) + 1
+    this.#seq.set(attemptId, next)
+    return next
+  }
+
+  async emit(attemptId: string, runId: string, kind: string, payload: unknown = {}): Promise<void> {
+    let seq = await this.#nextSeq(attemptId)
+    try {
+      await this.#insert(attemptId, runId, seq, kind, payload)
+    } catch (e) {
+      if (!/duplicate key|unique constraint/i.test(String((e as Error).message))) throw e
+      // 另一个写者插到中间了 —— 重新播种再试一次
+      this.#seq.delete(attemptId)
+      seq = await this.#nextSeq(attemptId)
+      await this.#insert(attemptId, runId, seq, kind, payload)
+    }
     if (this.notifyChannel) {
       // payload 不进 notify —— Postgres 的 NOTIFY 有 8000 字节上限，
       // 前端拿到 id 后回查即可
@@ -39,6 +69,20 @@ export class DbEventSink implements RunEventSink {
           /* 通知失败不影响事件已落库；前端轮询兜底 */
         })
     }
+  }
+
+  async #insert(
+    attemptId: string,
+    runId: string,
+    seq: number,
+    kind: string,
+    payload: unknown,
+  ): Promise<void> {
+    await this.db.query(
+      `insert into run_events (run_attempt_id, run_id, seq, kind, payload, created_at)
+       values ($1,$2,$3,$4,$5::jsonb,$6)`,
+      [attemptId, runId, seq, kind, JSON.stringify(payload), this.clock.nowIso()],
+    )
   }
 }
 

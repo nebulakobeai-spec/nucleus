@@ -14,6 +14,7 @@ import { ToolRegistry } from './runtime/tools.js'
 import { registerBuiltins } from './runtime/builtin-tools.js'
 import { Runner } from './runtime/runner.js'
 import { Worker, type WorkerOptions } from './runtime/worker.js'
+import { DEFAULT_COMPACT_POLICY } from './context/compact.js'
 import { Reconciler } from './runtime/reconciler.js'
 import { DbEventSink, TeeEventSink, type RunEventSink } from './runtime/events.js'
 import { McpClient } from './mcp/client.js'
@@ -156,6 +157,16 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
     workerId: config.runtime.workerId,
     leaseMs: config.runtime.leaseMs,
     workdirRoot: config.runtime.workdirRoot,
+    // 配置里的压缩阈值。默认在大窗口模型上要四五十轮才触发，
+    // 调低它是评估压缩质量的唯一办法
+    ...(config.runtime.compact
+      ? {
+          compactPolicy: {
+            ...DEFAULT_COMPACT_POLICY,
+            ...config.runtime.compact,
+          },
+        }
+      : {}),
     ...(opts.worker ?? {}),
   })
 

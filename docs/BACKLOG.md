@@ -450,6 +450,20 @@
     `npx vitest run test/oauth-auth-code.test.ts` 并确认 0 skipped。
     在那之前，这 8 个测试的状态是「写了但从没执行过」。
 
+19c. **需要在部署机上做的验证清单**（我这个沙箱执行不了的部分）
+
+    | 要验什么 | 命令 | 为什么我做不了 |
+    |---|---|---|
+    | OAuth 回调服务器 8 个测试 | `npx vitest run test/oauth-auth-code.test.ts` → 看 **0 skipped** | 本机 `listen` 是 EPERM |
+    | tier 3 真模型 | `npm run test:live` | Node 出网是 EPERM |
+    | **compact 对真实模型的效果** | `nucleus conv compact <id>` 然后自己读一遍 | 只有 mock 摘要器跑过，而那是我写的 |
+    | TUI 交互 | `nucleus chat` | 没有 TTY |
+    | cron 跨真实时间 / 夏令时 | 设一条 `*/5 * * * *` 放一小时 | 只用 FakeClock 与一次 62 秒实测验过 |
+
+    **compact 那条是最值钱的。** 这个功能的全部价值是「用户提过的约束能活过
+    压缩」，而 mock 摘要器是我写的，它当然会把约束抄下来。真实模型会不会把
+    约束放进 `constraints`、会不会在第二代压缩时丢掉，目前**一点数据都没有**。
+
 20. **6 张建了从没写过的表** —— 每张代表一个只有 schema 的功能：
     `tasks` + `activity_logs`（任务看板 / 计划式编排）、`prompt_versions`
     （prompt 版本化与归因）、`tool_snapshots`（工具集快照）、`mcp_servers`

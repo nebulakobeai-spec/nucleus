@@ -224,6 +224,7 @@ const VALUE_FLAGS = new Set([
   'timezone',
   'tz',
   'value',
+  'keep',
 ])
 
 /** 已知的布尔参数。只用于「这个名字打错了吗」的判断，不影响解析 */
@@ -237,6 +238,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   'catch-up',
   'mcp',
   'yes',
+  'dry-run',
   'help',
 ])
 

@@ -109,6 +109,22 @@ export interface NucleusConfig {
     captureTranscripts?: boolean
     /** 单条 transcript 的字符上限，超出截断并标记 */
     transcriptMaxChars?: number
+    /**
+     * 什么时候压缩会话历史。
+     *
+     * 放进配置而不是写死，是因为默认阈值在大窗口模型上非常高 ——
+     * 131k 窗口下要 28000 tokens 的历史才触发，也就是四五十轮。
+     * 那意味着**这个功能在真实使用中很久都不会被执行到**，
+     * 而没被执行过的代码路径不能算验证过。调低它是评估压缩质量的唯一办法。
+     */
+    compact?: {
+      /** 历史占预算的比例超过它就压缩。默认 0.7 */
+      triggerRatio?: number
+      /** 压缩后保留最近多少条原文。默认 10 */
+      keepRecent?: number
+      /** 少于这个条数不值得调一次模型。默认 8 */
+      minMessages?: number
+    }
     workerId: string
     leaseMs: number
     heartbeatMs: number

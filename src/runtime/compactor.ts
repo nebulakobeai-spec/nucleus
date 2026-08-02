@@ -75,8 +75,15 @@ export class Compactor {
     messages: Message[]
     historyBudget: number
     modelChain: string[]
-    attemptId: string
-    runId: string
+    /**
+     * 挂事件的 attempt。**手动压缩时给 null。**
+     *
+     * 原来这里是必填，于是 `conv compact` 只能借最近一个 attempt 来挂 ——
+     * 直接撞了 `unique(run_attempt_id, seq)`。而借用本身就是错的：手动压缩
+     * 不属于任何一次尝试。持久记录在 `compactions` 表里，不依赖 run_events。
+     */
+    attemptId: string | null
+    runId: string | null
   }): Promise<CompactResult> {
     const conv = await this.conversations.get(input.conversationId)
     if (!conv) {
@@ -103,7 +110,7 @@ export class Compactor {
     const fromSeq = retiring[0]?.seq ?? conv.summaryThroughSeq + 1
     const tokensBefore = retiring.reduce((n, m) => n + countMessage(this.#tokenizer, m.message), 0)
 
-    await this.events.emit(input.attemptId, input.runId, 'compact.started', {
+    await this.#emit(input, 'compact.started', {
       conversationId: input.conversationId,
       fromSeq,
       throughSeq: decision.throughSeq,
@@ -140,13 +147,13 @@ export class Compactor {
 
       if (!written) {
         // 别人先压到更远的位置了。不是错误 —— 下一次读会拿到那个更好的摘要
-        await this.events.emit(input.attemptId, input.runId, 'compact.skipped', {
+        await this.#emit(input, 'compact.skipped', {
           reason: '已有更新的摘要（并发压缩，保留更远的那个）',
         })
         return { compacted: false, decision, tokensBefore }
       }
 
-      await this.events.emit(input.attemptId, input.runId, 'compact.finished', {
+      await this.#emit(input, 'compact.finished', {
         generation: written.generation,
         tokensBefore,
         tokensAfter,
@@ -179,7 +186,7 @@ export class Compactor {
         .catch(() => {
           /* 记账失败也不能打断任务 */
         })
-      await this.events.emit(input.attemptId, input.runId, 'compact.failed', {
+      await this.#emit(input, 'compact.failed', {
         error,
         fromSeq,
         throughSeq: decision.throughSeq,
@@ -190,11 +197,21 @@ export class Compactor {
     }
   }
 
+  /** attemptId 为 null（手动压缩）时不发事件 —— 持久记录在 compactions 表 */
+  async #emit(
+    input: { attemptId: string | null; runId: string | null },
+    kind: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    if (!input.attemptId || !input.runId) return
+    await this.events.emit(input.attemptId, input.runId, kind, payload)
+  }
+
   async #summarize(
     previous: ConversationSummary | null,
     retiring: ChatMessage[],
     chain: string[],
-    attemptId: string,
+    attemptId: string | null,
     tokensBefore: number,
   ): Promise<{ summary: ConversationSummary; modelKey: string }> {
     const res = await this.router.chat(chain, {
