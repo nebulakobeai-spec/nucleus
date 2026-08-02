@@ -4,7 +4,7 @@ import { defaultConfig, type NucleusConfig } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import { Compactor } from '../src/runtime/compactor.js'
 import { DbEventSink } from '../src/runtime/events.js'
-import { checkConstraints, seedConversation } from '../src/cli/seed.js'
+import { checkSummary, plantedFromMessages, SCENARIOS, seedConversation } from '../src/cli/seed.js'
 import {
   DEFAULT_COMPACT_POLICY,
   decideCompact,
@@ -483,68 +483,144 @@ describe('reconcileArtifacts（核对声称的产出）', () => {
 })
 
 describe('conv seed（合成历史）', () => {
-  it('写入 N 轮，每轮一条 user + 一条 assistant', async () => {
+  it('写入一个场景，每轮一条 user + 一条 assistant', async () => {
     const conv = await n.conversations.create({ agentId: 'orchestrator' })
-    const r = await seedConversation(n.conversations, conv.id, 15)
-    expect(r.turns).toBe(15)
-    expect(r.messages).toBe(30)
-    expect((await n.conversations.recent(conv.id, 500)).length).toBe(30)
+    const r = await seedConversation(n.conversations, conv.id, { scenario: 'basic' })
+    expect(r.messages).toBe(r.turns * 2)
+    expect((await n.conversations.recent(conv.id, 500)).length).toBe(r.messages)
   })
 
   /**
    * 合成历史被当成真对话是很糟的事 —— 事后翻会话会以为自己真说过这些话。
    */
-  it('每条都带 meta.synthetic —— 必须能和真对话区分开', async () => {
+  it('每条都带 meta.synthetic —— 必须和真对话区分开', async () => {
     const conv = await n.conversations.create({ agentId: 'orchestrator' })
-    await seedConversation(n.conversations, conv.id, 4)
+    await seedConversation(n.conversations, conv.id, { scenario: 'basic', turns: 6 })
     const msgs = await n.conversations.recent(conv.id, 500)
     expect(msgs.every((m) => m.meta['synthetic'] === true)).toBe(true)
   })
 
-  it('报出**实际埋进去的**约束 —— 轮数不够时不能列不存在的', async () => {
+  /**
+   * **埋点不能被 --turns 砍掉。** 砍掉了检查就会去找根本不存在的约束，
+   * 而那种「找不到」看起来和「摘要丢了」一模一样。
+   */
+  it('--turns 变小只砍 filler，埋点一条不少', async () => {
     const conv = await n.conversations.create({ agentId: 'orchestrator' })
-    // 约束在第 2 / 5 / 9 轮；只跑 6 轮 → 只有前两条
-    const r = await seedConversation(n.conversations, conv.id, 6)
-    expect(r.planted.map((p) => p.turn)).toEqual([2, 5])
+    const full = await seedConversation(n.conversations, conv.id, { scenario: 'decoys' })
+    const conv2 = await n.conversations.create({ agentId: 'orchestrator' })
+    const small = await seedConversation(n.conversations, conv2.id, { scenario: 'decoys', turns: 6 })
+    expect(small.turns).toBeLessThan(full.turns)
+    expect(small.planted.length).toBe(full.planted.length)
   })
 
-  it('约束消息带 constraint 标记，事后能还原对照清单', async () => {
+  it('埋点信息进 meta，事后能完整还原', async () => {
     const conv = await n.conversations.create({ agentId: 'orchestrator' })
-    await seedConversation(n.conversations, conv.id, 15)
-    const msgs = await n.conversations.recent(conv.id, 500)
-    const marked = msgs.filter((m) => m.meta['constraint'] === true)
-    expect(marked.map((m) => m.meta['seedTurn'])).toEqual([2, 5, 9])
+    const r = await seedConversation(n.conversations, conv.id, { scenario: 'revision' })
+    const restored = plantedFromMessages(await n.conversations.recent(conv.id, 500))
+    expect(restored.map((x) => x.kind)).toEqual(r.planted.map((x) => x.kind))
+    // revision 指向它撤销的那条 —— 这是判 stale 的依据
+    expect(restored.find((x) => x.kind === 'revision')!.revises).toBe('no-pg')
+  })
+
+  it('未知场景名报错并列出可用的', async () => {
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    await expect(
+      seedConversation(n.conversations, conv.id, { scenario: 'nope' }),
+    ).rejects.toThrow(/basic|decoys|revision/)
+  })
+
+  it('每个场景都至少有一个埋点，否则那个场景什么也测不出', () => {
+    for (const s of SCENARIOS) {
+      const marked = s.turns.filter((t) => t.kind !== 'filler')
+      expect(marked.length, `场景 ${s.name} 没有埋点`).toBeGreaterThan(0)
+    }
+  })
+
+  it('revision 引用的 id 必须真的存在于同一场景里', () => {
+    for (const s of SCENARIOS) {
+      const ids = new Set(s.turns.map((t) => t.id).filter(Boolean))
+      for (const t of s.turns.filter((x) => x.revises)) {
+        expect(ids.has(t.revises!), `场景 ${s.name}：revises 指向不存在的 ${t.revises}`).toBe(true)
+      }
+    }
   })
 })
 
-describe('checkConstraints（筛查，不是判定）', () => {
+describe('checkSummary（四种判定，不是一个「活下来了吗」）', () => {
   const planted = [
-    { turn: 2, text: '不要有任何 default 模型', keywords: ['default', '模型'] },
-    { turn: 5, text: '规则要能被运行时强制', keywords: ['运行时', '强制'] },
+    { kind: 'constraint' as const, turn: 1, id: 'a', text: '不要用 default 模型', keywords: ['default'] },
+    { kind: 'decoy' as const, turn: 2, id: 'd', text: '心跳不能经过模型对吧？', keywords: ['心跳'] },
   ]
-
-  it('关键词都在算活下来', () => {
-    const r = checkConstraints(planted, '用户要求：不要 default 模型；规则由运行时强制执行')
-    expect(r.map((x) => x.survived)).toEqual([true, true])
+  const summary = (over: Partial<{ constraints: string[]; context: string }>) => ({
+    constraints: [],
+    decisions: [],
+    open: [],
+    context: '',
+    ...over,
   })
 
-  it('缺哪个词要报出来 —— 「丢了」得说清丢的是什么', () => {
-    const r = checkConstraints(planted, '用户要求：不要 default 模型')
-    expect(r[1]!.survived).toBe(false)
-    expect(r[1]!.missing).toEqual(['运行时', '强制'])
+  it('该留的留了 + 诱饵被拦住 → 全对', () => {
+    const r = checkSummary(planted, summary({ constraints: ['不要用 default 模型'] }))
+    expect(r.map((x) => x.verdict)).toEqual(['ok', 'ok'])
+  })
+
+  it('约束丢了 → lost', () => {
+    const r = checkSummary(planted, summary({ constraints: [] }))
+    expect(r[0]!.verdict).toBe('lost')
   })
 
   /**
-   * 这条钉住的是**这个检查的局限**：它查词不查意思。
-   * 输出里必须说清这一点，否则「3 条都在」会被当成「压缩没问题」。
+   * 第一版完全测不到这一项：诱饵混进 constraints 会让约束段逐代变脏，
+   * 而「3/3 约束都在」照样报绿。
    */
-  it('改写措辞会骗过它 —— 所以只能算筛查', () => {
-    const r = checkConstraints(
-      [{ turn: 1, text: '不要有任何 default 模型', keywords: ['default', '模型'] }],
-      // 意思反了，但关键词都在
-      '用户希望我们提供 default 模型清单',
+  it('诱饵混进 constraints → leaked', () => {
+    const r = checkSummary(
+      planted,
+      summary({ constraints: ['不要用 default 模型', '心跳不能经过模型'] }),
     )
-    expect(r[0]!.survived).toBe(true)
+    expect(r[1]!.verdict).toBe('leaked')
+    expect(r[1]!.note).toMatch(/逐代变脏/)
+  })
+
+  /**
+   * **stale 是最严重的一类**：摘要留着一条你已经撤销的要求，
+   * 模型会照它拒绝你现在想要的东西，而你不知道它为什么在拒绝。
+   */
+  it('被撤销的约束还留着 → stale', () => {
+    const withRevision = [
+      { kind: 'constraint' as const, turn: 1, id: 'pg', text: '不��用真 Postgres', keywords: ['postgres'] },
+      { kind: 'revision' as const, turn: 5, revises: 'pg', text: '那条取消了', keywords: ['postgres'] },
+    ]
+    const r = checkSummary(withRevision, summary({ constraints: ['不要用真 Postgres'] }))
+    expect(r[0]!.verdict).toBe('stale')
+    expect(r[0]!.note).toMatch(/撤销/)
+  })
+
+  it('撤销被正确体现 → ok', () => {
+    const withRevision = [
+      { kind: 'constraint' as const, turn: 1, id: 'pg', text: '不要用真 Postgres', keywords: ['postgres'] },
+      { kind: 'revision' as const, turn: 5, revises: 'pg', text: '那条取消了', keywords: ['postgres'] },
+    ]
+    const r = checkSummary(
+      withRevision,
+      summary({ constraints: ['本地用 PGlite，部署机用真 Postgres（原「不要用真 Postgres」已取消）'] }),
+    )
+    expect(r.every((x) => x.verdict === 'ok')).toBe(true)
+  })
+
+  /** 委婉表达筛不出来，note 必须明说「这条要人读」 */
+  it('implicit 丢了时说清机器判不了', () => {
+    const r = checkSummary(
+      [{ kind: 'implicit' as const, turn: 1, id: 'i', text: '我觉得 default 挺碍事', keywords: ['default'] }],
+      summary({}),
+    )
+    expect(r[0]!.verdict).toBe('lost')
+    expect(r[0]!.note).toMatch(/必须人读/)
+  })
+
+  it('约束出现在 decisions/context 里也算留住了 —— 位置不完美但没丢', () => {
+    const r = checkSummary([planted[0]!], summary({ context: '用户要求不要用 default 模型' }))
+    expect(r[0]!.verdict).toBe('ok')
   })
 })
 

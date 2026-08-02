@@ -13,7 +13,13 @@ import {
 import { heuristicTokenizer } from '../context/tokenizer.js'
 import { c, heading, ICON, line, resolveConversationId, resolveDb, strFlag, table } from './ui.js'
 import { compactTokens } from './pet.js'
-import { checkConstraints, seedConversation, type PlantedConstraint } from './seed.js'
+import {
+  checkSummary,
+  plantedFromMessages,
+  scenarioByName,
+  SCENARIOS,
+  seedConversation,
+} from './seed.js'
 
 /**
  * `nucleus conv` —— 会话的摘要状态与手动压缩。
@@ -240,15 +246,23 @@ export async function convSeed(
   argv: string[],
   flags: Record<string, string | true>,
 ): Promise<number> {
-  const turns = Number(strFlag(flags, 'turns') ?? 15)
-  if (!Number.isInteger(turns) || turns < 1 || turns > 200) {
+  const name = strFlag(flags, 'scenario') ?? argv.find((a) => scenarioByName(a)) ?? 'basic'
+  if (!scenarioByName(name)) {
+    line(c.red(`没有场景「${name}」`))
+    printScenarios()
+    return 1
+  }
+  const turnsFlag = strFlag(flags, 'turns')
+  const turns = turnsFlag === undefined ? undefined : Number(turnsFlag)
+  if (turns !== undefined && (!Number.isInteger(turns) || turns < 1 || turns > 200)) {
     line(c.red('--turns 要是 1-200 的整数'))
     return 1
   }
 
   return withNucleus(flags, async (n) => {
+    // 位置参数是场景名时不当会话 id
+    const prefix = argv.find((a) => !scenarioByName(a))
     let convId: string
-    const prefix = argv[0]
     if (prefix) {
       const r = await resolveConversationId(n.db, prefix)
       if ('error' in r) {
@@ -260,29 +274,58 @@ export async function convSeed(
       convId = (
         await n.conversations.create({
           agentId: n.config.defaults.entryAgent,
-          title: `[合成] compact 测试 ${turns} 轮`,
+          title: `[合成] compact 测试 · ${name}`,
         })
       ).id
     }
 
-    const r = await seedConversation(n.conversations, convId, turns)
+    const r = await seedConversation(n.conversations, convId, {
+      scenario: name,
+      ...(turns !== undefined ? { turns } : {}),
+    })
 
-    heading('已写入合成历史')
+    heading(`已写入合成历史 · 场景 ${c.bold(r.scenario)}`)
+    line(c.gray(`  ${r.description}`))
     line(`  会话 ${c.bold(convId.slice(0, 8))} · ${r.turns} 轮 · ${r.messages} 条消息`)
-    // 不调模型这件事要说清楚：这段历史里助手的话不是真的
     line(c.gray('  没有调用模型 —— compact 只读消息日志，所以助手那侧写死就够了。'))
     line(c.gray('  每条都带 meta.synthetic=true，事后翻会话不会误认成真对话。'))
     line()
 
-    line(`${c.bold('埋进去的约束')}${c.gray('（压缩之后就是要看这几条还在不在）')}`)
+    line(`${c.bold('埋点')}${c.gray('（压缩之后要看这几条被怎么处理）')}`)
     for (const p of r.planted) {
-      line(`  第 ${p.turn} 轮  ${p.text}`)
+      line(`  ${c.gray(`第 ${String(p.turn).padStart(2)} 轮`)} ${kindLabel(p.kind)} ${p.text}`)
     }
     line()
     line(c.gray('接着跑：'))
     line(c.gray(`  nucleus conv compact ${convId.slice(0, 8)} --keep 4`))
+    line()
+    printScenarios(name)
     return 0
   })
+}
+
+/** 埋点类型的标签 —— 四类各自对应一种会真出问题的形状 */
+function kindLabel(kind: string): string {
+  switch (kind) {
+    case 'constraint':
+      return c.cyan('[要求]  ')
+    case 'implicit':
+      return c.cyan('[委婉]  ')
+    case 'decoy':
+      return c.yellow('[诱饵]  ')
+    case 'revision':
+      return c.yellow('[撤销]  ')
+    default:
+      return '        '
+  }
+}
+
+function printScenarios(current?: string): void {
+  line(c.gray('可用场景（--scenario <名字>）：'))
+  for (const s of SCENARIOS) {
+    const mark = s.name === current ? c.green('→') : ' '
+    line(c.gray(`  ${mark} ${s.name.padEnd(10)} ${s.description}`))
+  }
 }
 
 export async function convCompact(
@@ -383,60 +426,51 @@ async function printConstraintCheck(
   summary: ConversationSummary,
 ): Promise<void> {
   const msgs = await n.conversations.recent(convId, 500)
-  const planted = plantedFrom(msgs)
+  const planted = plantedFromMessages(msgs)
   if (planted.length === 0) return
 
-  const checks = checkConstraints(planted, renderSummary(summary))
+  const checks = checkSummary(planted, summary)
   line()
-  line(`${c.bold('埋进去的约束')}${c.gray('（合成历史，关键词筛查）')}`)
+  line(`${c.bold('埋点检查')}${c.gray('（合成历史，关键词筛查）')}`)
+
+  const MARK: Record<string, string> = {
+    ok: ICON.ok,
+    lost: ICON.fail,
+    leaked: ICON.fail,
+    stale: ICON.fail,
+  }
+  const VERDICT: Record<string, string> = {
+    ok: '',
+    lost: c.red('丢了'),
+    leaked: c.red('诱饵混进了 constraints'),
+    stale: c.red('已撤销的约束还留着'),
+  }
+
   for (const x of checks) {
-    if (x.survived) {
-      line(`  ${ICON.ok} 第 ${x.constraint.turn} 轮：${x.constraint.text.slice(0, 40)}…`)
-    } else {
-      line(`  ${ICON.fail} ${c.red(`第 ${x.constraint.turn} 轮丢了`)}：${x.constraint.text.slice(0, 40)}…`)
-      line(c.gray(`      摘要里找不到：${x.missing.join('、')}`))
-    }
+    line(
+      `  ${MARK[x.verdict]} ${kindLabel(x.kind)}${c.gray(`第 ${x.turn} 轮`)} ` +
+        `${x.text.slice(0, 34)}…  ${VERDICT[x.verdict]}`,
+    )
+    if (x.verdict !== 'ok') line(c.gray(`      ${x.note}`))
   }
-  const lost = checks.filter((x) => !x.survived).length
-  line(
-    c.gray(
-      lost
-        ? `  ${lost}/${checks.length} 条没通过筛查 —— 这是压缩质量问题，不是代码 bug`
-        : `  ${checks.length} 条关键词都在。但**改写措辞会骗过这个筛查**，仍需读一遍`,
-    ),
-  )
-}
 
-/** 从消息的 meta 里还原埋过哪些约束 —— 只有 seed 出来的会话有 */
-function plantedFrom(
-  msgs: Array<{ content: string; meta: Record<string, unknown> }>,
-): PlantedConstraint[] {
-  const out: PlantedConstraint[] = []
-  for (const m of msgs) {
-    if (m.meta['constraint'] !== true) continue
-    const turn = Number(m.meta['seedTurn'] ?? 0)
-    // 关键词从原话里取：与 seed.ts 里的声明保持一致靠 seed 时写下的 meta，
-    // 这里只需要能找回原话
-    out.push({ turn, text: m.content, keywords: keywordsOf(m.content) })
+  const bad = checks.filter((x) => x.verdict !== 'ok')
+  line()
+  if (bad.length === 0) {
+    line(c.gray(`  ${checks.length} 项都对。但**这是关键词筛查** —— 改写措辞会骗过它，`))
+    line(c.gray('  委婉表达（[委婉]）本来就筛不出来。仍需自己读一遍上面的摘要。'))
+  } else {
+    // 三类问题的严重性不同，说清哪个更要紧
+    const stale = bad.filter((x) => x.verdict === 'stale').length
+    const leaked = bad.filter((x) => x.verdict === 'leaked').length
+    const lost = bad.filter((x) => x.verdict === 'lost').length
+    const bits: string[] = []
+    if (stale) bits.push(c.red(`${stale} 条已撤销的约束还在（最严重：会让模型拒绝你现在想要的）`))
+    if (leaked) bits.push(c.red(`${leaked} 条诱饵混进 constraints（约束段会逐代变脏）`))
+    if (lost) bits.push(c.red(`${lost} 条要求丢了`))
+    for (const b of bits) line(`  ${b}`)
+    line(c.gray('  这些是压缩质量问题，不是代码 bug —— 改 summarySchema() 里对应字段的描述'))
   }
-  return out
-}
-
-/** 从原话里挑几个不容易被改写掉的词 */
-function keywordsOf(text: string): string[] {
-  const known: Array<[RegExp, string[]]> = [
-    [/default 模型/, ['default', '模型']],
-    [/运行时强制|运行时/, ['运行时', 'prompt']],
-    [/agents\/\*\.md|agents/, ['agents', '来源']],
-  ]
-  for (const [re, kw] of known) if (re.test(text)) return kw
-  // 兜底：取最长的两个中文词片段
-  return text
-    .replace(/[，。、；：（）()【】\s]+/g, ' ')
-    .split(' ')
-    .filter((x) => x.length >= 3)
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 2)
 }
 
 /** 摘要**注入 context 时的实际文本** —— 存下来但没注入等于没有 */

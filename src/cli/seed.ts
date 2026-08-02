@@ -8,51 +8,47 @@ import type { ConversationStore } from '../store/conversations.js'
  * compact 只读消息日志。所以「助手那边答得像不像真的」对它毫无影响，
  * 而调 15 次 gemma4:31b 要十分钟。秒级、零 token 才能反复试。
  *
- * ── 为什么要有「埋了哪几条约束」这份清单 ─────────────────
+ * ── 第一版只埋三句固定的话，那测不出什么 ────────────────────
  *
- * 评估 compact 要回答的是「第 2 轮说过的要求，到第 15 轮还在不在」。
- * 如果那 15 轮是模型现场编的，你就**没有对照物** —— 只能读一遍摘要凭感觉
- * 判断，而摘要读起来总是通顺的。所以约束必须是我们自己埋进去的、已知的。
+ * 三句都以明确标记开头（「有一条你要一直记着」），都用「不要 / 必须」，
+ * 都是自足单句 —— 最好认的形状。**对着 n=3 的固定集调 prompt 就是过拟合。**
+ *
+ * 所以现在每个场景同时埋四类，分别对应一种会真出问题的形状：
+ *
+ *  | 类型       | 摘要该怎么处理             | 处理错了会怎样 |
+ *  |-----------|--------------------------|---------------|
+ *  | constraint | 保留                     | 重犯已被否掉的建议 |
+ *  | implicit   | 保留（没有「不要/必须」） | 靠关键词筛不出来，会静默丢 |
+ *  | decoy      | **不要**放进 constraints  | 摘要逐代变脏，约束段塞满技术陈述 |
+ *  | revision   | 覆盖掉它修的那条         | **留着已撤销的约束比丢掉更糟** —— 会拒绝你现在想要的 |
+ *
+ * `revision` 是最要紧的一类，也是我第一版完全没想到的：摘要里留着一条你已经
+ * 撤销的要求，模型会照它办事，而你根本不知道它为什么在拒绝。
  *
  * 每条消息都带 `meta.synthetic = true`。合成历史被当成真对话是很糟的事
  * （比如你事后翻会话，会以为自己真说过这些话），必须能区分。
  */
 
-export interface PlantedConstraint {
-  /** 第几轮说的（1-based，指用户消息的序号） */
-  turn: number
-  /** 原话 */
+export type SeedKind = 'constraint' | 'implicit' | 'decoy' | 'revision' | 'filler'
+
+export interface SeedTurn {
+  kind: SeedKind
   text: string
-  /** 判断它有没有活下来的关键词 —— 摘要可能改写措辞，所以查词不查整句 */
-  keywords: string[]
+  /** 判断它有没有活下来的关键词 —— 摘要会改写措辞，所以查词不查整句 */
+  keywords?: string[]
+  /** revision 专用：它撤销/修改的是哪一条（按 id 引用） */
+  revises?: string
+  /** constraint / implicit / decoy 的标识，供 revision 引用与结果对照 */
+  id?: string
 }
 
-/**
- * 埋进去的约束。
- *
- * 内容刻意用这个项目自己的真实决定 —— 一来读摘要时你能判断对不对，
- * 二来它们本来就是「不该被忘掉」的那类话。
- */
-const CONSTRAINTS: PlantedConstraint[] = [
-  {
-    turn: 2,
-    text: '有一条你要一直记着：不要有任何 default 模型，所有模型都必须我自己在配置里声明。',
-    keywords: ['default', '模型'],
-  },
-  {
-    turn: 5,
-    text: '再补一条：规则必须能被运行时强制，不能只写在 prompt 里 —— 写在 prompt 里的规则模型会忽略。',
-    keywords: ['运行时', '强制', 'prompt'],
-  },
-  {
-    turn: 9,
-    text: '还有，专家 agent 只能来源于 agents/*.md 一个地方，不要再允许第二种来源。',
-    keywords: ['agents', 'md', '来源'],
-  },
-]
+export interface Scenario {
+  name: string
+  description: string
+  turns: SeedTurn[]
+}
 
-/** 填充轮次的话题。内容不重要，但要够长才能推高 token 数 */
-const FILLER = [
+const FILLER_POOL = [
   '先说说 provider 层现在是怎么选路的。',
   '熔断的窗口和阈值分别是多少，为什么这么定？',
   'MCP 那块的工具名是怎么避免和内置工具撞车的？',
@@ -60,95 +56,433 @@ const FILLER = [
   'wake/join 为什么要放在同一个事务里？',
   '心跳是怎么做到不经过模型的？',
   '幂等键在工具调用和定时任务里是同一套语义吗？',
-  '上下文装配的降级顺序是怎么排的，为什么是这个顺序？',
-  'artifact 的 trust_level 有几档，各自意味着什么？',
+  '上下文装配的降级顺序是怎么排的？',
+  'artifact 的 trust_level 有几档？',
   'run 级重试和就地重试的区别在哪？',
   '诊断包里为什么要带 transcript？',
   '会话锁是在哪一层实现的？',
-  '委派深度的上限是多少，为什么需要这个上限？',
-  '结果契约里的 requiredFields 是怎么校验嵌套字段的？',
+  '委派深度的上限是多少？',
+  'requiredFields 是怎么校验嵌套字段的？',
   'provider_events 记了哪几种 kind？',
 ]
 
+const filler = (i: number): SeedTurn => ({
+  kind: 'filler',
+  text: FILLER_POOL[i % FILLER_POOL.length]!,
+})
+
+/**
+ * 场景。
+ *
+ * 内容用这个项目自己的真实决定 —— 读摘要时你能判断对不对，
+ * 而且它们本来就是「不该被忘掉」的那类话。
+ */
+export const SCENARIOS: Scenario[] = [
+  {
+    name: 'basic',
+    description: '三条明确约束 + 填充。最容易的形状，用来看基本功能。',
+    turns: [
+      filler(0),
+      {
+        kind: 'constraint',
+        id: 'no-default',
+        text: '有一条你要一直记着：不要有任何 default 模型，所有模型都必须我自己在配置里声明。',
+        keywords: ['default', '模型'],
+      },
+      filler(1),
+      filler(2),
+      {
+        kind: 'constraint',
+        id: 'runtime-rules',
+        text: '再补一条：规则必须能被运行时强制，不能只写在 prompt 里。',
+        keywords: ['运行时', 'prompt'],
+      },
+      filler(3),
+      filler(4),
+      filler(5),
+      {
+        kind: 'constraint',
+        id: 'agents-md',
+        text: '还有，专家 agent 只能来源于 agents/*.md 一个地方，不要再允许第二种来源。',
+        keywords: ['agents', '来源'],
+      },
+      filler(6),
+      filler(7),
+      filler(8),
+      filler(9),
+      filler(10),
+      filler(11),
+    ],
+  },
+  {
+    name: 'decoys',
+    description:
+      '**关键场景**：填充里混入「长得像约束的技术陈述」。它们用了「必须/不能」' +
+      '但不是用户的要求 —— 被塞进 constraints 就是真缺陷。',
+    turns: [
+      {
+        kind: 'constraint',
+        id: 'no-cloud',
+        text: '先说清楚：不要接任何云端模型，这台机器只用本地 ollama。',
+        keywords: ['云端', '本地'],
+      },
+      // ↓ 以下三条都用了「必须 / 不能」，但都是在陈述系统事实，不是用户的要求
+      {
+        kind: 'decoy',
+        id: 'decoy-tx',
+        text: 'wake 和子 run 的终态必须在同一个事务里，这一点我理解得对吗？',
+        keywords: ['事务'],
+      },
+      filler(0),
+      {
+        kind: 'decoy',
+        id: 'decoy-heartbeat',
+        text: '心跳不能经过模型 —— 因为经过 LLM 的心跳等于没有监控，对吧？',
+        keywords: ['心跳'],
+      },
+      filler(1),
+      {
+        kind: 'constraint',
+        id: 'no-guess',
+        text: '另外要求一条：不确定的数字不要编，宁可留空并说明不知道。',
+        keywords: ['不要编', '留空'],
+      },
+      {
+        kind: 'decoy',
+        id: 'decoy-nonidem',
+        text: 'non_idempotent 的工具绝不能自动重跑，这条是写死在 domain 里的吧？',
+        keywords: ['non_idempotent'],
+      },
+      filler(2),
+      filler(3),
+      filler(4),
+      filler(5),
+      filler(6),
+      filler(7),
+      filler(8),
+    ],
+  },
+  {
+    name: 'revision',
+    description:
+      '**最要紧的场景**：一条约束后来被撤销。摘要留着已撤销的约束' +
+      '比丢掉一条更糟 —— 模型会照它拒绝你现在想要的东西。',
+    turns: [
+      {
+        kind: 'constraint',
+        id: 'no-pg',
+        text: '暂时不要用真 Postgres，本地一律走 PGlite。',
+        keywords: ['postgres', 'pglite'],
+      },
+      filler(0),
+      filler(1),
+      {
+        kind: 'constraint',
+        id: 'zh-comments',
+        text: '还有一条：注释一律写中文。',
+        keywords: ['注释', '中文'],
+      },
+      filler(2),
+      filler(3),
+      {
+        kind: 'revision',
+        revises: 'no-pg',
+        text: '刚才说的「不要用真 Postgres」那条取消了 —— 部署机上就用真 Postgres，本地才用 PGlite。',
+        keywords: ['postgres'],
+      },
+      filler(4),
+      filler(5),
+      filler(6),
+      filler(7),
+      filler(8),
+      filler(9),
+      filler(10),
+    ],
+  },
+  {
+    name: 'implicit',
+    description:
+      '约束说得很委婉，没有「不要 / 必须」。关键词筛查会漏，' +
+      '所以这个场景要人读一遍才能判。',
+    turns: [
+      {
+        kind: 'implicit',
+        id: 'dislike-default',
+        text: '我觉得那些 default 模型挺碍事的，还是我自己声明比较放心。',
+        keywords: ['default'],
+      },
+      filler(0),
+      filler(1),
+      {
+        kind: 'implicit',
+        id: 'prefer-short',
+        text: '回答别铺开太长，我更愿意看结论加一句理由。',
+        keywords: ['结论'],
+      },
+      filler(2),
+      filler(3),
+      filler(4),
+      filler(5),
+      filler(6),
+      filler(7),
+      filler(8),
+      filler(9),
+    ],
+  },
+]
+
 /** 助手回复。刻意写得有信息量 —— 全是「好的」的话摘要就没东西可摘 */
-function reply(topic: string, i: number): string {
+function reply(turn: SeedTurn, i: number): string {
+  if (turn.kind === 'constraint' || turn.kind === 'implicit') {
+    return `明白，这条我记下了，后面都按它来。（第 ${i + 1} 轮）`
+  }
+  if (turn.kind === 'revision') {
+    return `好，那条我撤掉了，按你新说的执行。（第 ${i + 1} 轮）`
+  }
   return (
-    `关于「${topic}」：这一块的做法是把判定和执行分开，判定写成纯函数以便单测，` +
-    `执行侧只负责接线与落库。相关的不变量有三条，都由测试钉住，` +
-    `其中最要紧的是终态不可回改。具体数字与代码位置见 DESIGN.md 第 ${i + 1} 节。` +
-    `另外这里有一个容易踩的点：同一毫秒内的多条记录用时间戳排序是不稳定的，` +
+    `关于「${turn.text.slice(0, 16)}…」：这一块的做法是把判定和执行分开，` +
+    `判定写成纯函数以便单测，执行侧只负责接线与落库。相关的不变量由测试钉住，` +
+    `其中最要紧的是终态不可回改。细节见 DESIGN.md 第 ${i + 1} 节。` +
+    `另外有个容易踩的点：同一毫秒内的多条记录用时间戳排序不稳定，` +
     `所以序号一律用数据库侧生成的单调值。`
   )
 }
 
 export interface SeedResult {
+  scenario: string
+  description: string
   turns: number
   messages: number
-  planted: PlantedConstraint[]
+  /** 实际埋进去的（不含 filler） */
+  planted: Array<SeedTurn & { turn: number }>
+}
+
+export function scenarioByName(name: string): Scenario | null {
+  return SCENARIOS.find((s) => s.name === name) ?? null
 }
 
 /**
- * 往会话里写 `turns` 轮（每轮一条 user + 一条 assistant）。
+ * 往会话里写一个场景（每轮一条 user + 一条 assistant）。
  *
- * 约束按 CONSTRAINTS 里声明的轮次插入 —— 轮数不够时只插得下的那几条，
- * 返回值里只列**实际埋进去的**，否则检查会去找根本不存在的约束。
+ * `turns` 截断或循环填充到指定长度 —— 但**埋点永远全部写入**，
+ * 否则检查会去找根本不存在的约束。
  */
 export async function seedConversation(
   conversations: ConversationStore,
   conversationId: string,
-  turns: number,
+  opts: { scenario?: string; turns?: number } = {},
 ): Promise<SeedResult> {
-  const planted: PlantedConstraint[] = []
+  const sc = scenarioByName(opts.scenario ?? 'basic')
+  if (!sc) throw new Error(`没有场景「${opts.scenario}」（可用：${SCENARIOS.map((s) => s.name).join(', ')}）`)
+
+  const want = opts.turns ?? sc.turns.length
+  const seq: SeedTurn[] = [...sc.turns]
+  // 要求的轮数更多 → 补 filler；更少 → 只砍 filler，埋点一个不少
+  if (want > seq.length) {
+    for (let i = seq.length; i < want; i++) seq.push(filler(i))
+  } else if (want < seq.length) {
+    const marked = seq.filter((t) => t.kind !== 'filler')
+    const fillers = seq.filter((t) => t.kind === 'filler')
+    const keepFiller = Math.max(0, want - marked.length)
+    // 保持原有顺序：按原数组走，filler 超额就跳过
+    let used = 0
+    const trimmed: SeedTurn[] = []
+    for (const t of seq) {
+      if (t.kind === 'filler') {
+        if (used >= keepFiller) continue
+        used++
+      }
+      trimmed.push(t)
+    }
+    seq.length = 0
+    seq.push(...trimmed)
+    void fillers
+  }
+
+  const planted: Array<SeedTurn & { turn: number }> = []
   let messages = 0
 
-  for (let i = 0; i < turns; i++) {
+  for (let i = 0; i < seq.length; i++) {
+    const t = seq[i]!
     const turnNo = i + 1
-    const constraint = CONSTRAINTS.find((x) => x.turn === turnNo)
-    const topic = FILLER[i % FILLER.length]!
-    const content = constraint ? constraint.text : topic
-
     await conversations.append({
       conversationId,
       role: 'user',
-      content,
+      content: t.text,
       // 合成历史必须可区分 —— 事后翻会话时不该以为自己真说过这些
-      meta: { synthetic: true, seedTurn: turnNo, ...(constraint ? { constraint: true } : {}) },
+      meta: {
+        synthetic: true,
+        seedTurn: turnNo,
+        seedKind: t.kind,
+        ...(t.id ? { seedId: t.id } : {}),
+        ...(t.revises ? { seedRevises: t.revises } : {}),
+        ...(t.keywords ? { seedKeywords: t.keywords } : {}),
+      },
     })
     await conversations.append({
       conversationId,
       role: 'assistant',
-      content: reply(constraint ? '你提的这条要求' : topic, i),
+      content: reply(t, i),
       meta: { synthetic: true, seedTurn: turnNo },
     })
     messages += 2
-    if (constraint) planted.push(constraint)
+    if (t.kind !== 'filler') planted.push({ ...t, turn: turnNo })
   }
 
-  return { turns, messages, planted }
+  return {
+    scenario: sc.name,
+    description: sc.description,
+    turns: seq.length,
+    messages,
+    planted,
+  }
 }
 
-export interface ConstraintCheck {
-  constraint: PlantedConstraint
-  /** 关键词全都出现在摘要里 */
-  survived: boolean
-  /** 没出现的那些词 */
-  missing: string[]
+// ── 检查 ──────────────────────────────────────────────
+
+export type CheckVerdict = 'ok' | 'lost' | 'leaked' | 'stale'
+
+export interface SeedCheck {
+  kind: SeedKind
+  turn: number
+  text: string
+  verdict: CheckVerdict
+  /** 说清「为什么判成这样」，以及机器判不了的部分 */
+  note: string
 }
 
 /**
- * 摘要里还剩哪几条约束。
+ * 摘要处理得对不对。
  *
- * **这是筛查，不是判定。** 查关键词而不是整句，因为摘要会改写措辞；
- * 但反过来关键词都在也不代表意思没变。所以输出要说清「机器只能查到这一步」，
- * 剩下的要人读一遍 —— 而人读一遍时手里有这份清单，比空手读有用得多。
+ * 四种判定，而不是一个「活下来了吗」：
+ *
+ *  - `ok`     —— 该留的留了 / 该拦的拦住了
+ *  - `lost`   —— 约束丢了
+ *  - `leaked` —— **诱饵混进了 constraints**。第一版完全测不到这一项
+ *  - `stale`  —— **已撤销的约束还在**。比丢掉一条更糟：模型会照它拒绝你
+ *                现在想要的东西，而你不知道它为什么在拒绝
+ *
+ * **这仍然是筛查，不是判定。** 查关键词不查意思：改写措辞会骗过它，
+ * 而 `implicit` 那类本来就筛不出来。输出必须说清这一点。
  */
-export function checkConstraints(
-  planted: PlantedConstraint[],
-  summaryText: string,
-): ConstraintCheck[] {
-  const hay = summaryText.toLowerCase()
-  return planted.map((c) => {
-    const missing = c.keywords.filter((k) => !hay.includes(k.toLowerCase()))
-    return { constraint: c, survived: missing.length === 0, missing }
-  })
+export function checkSummary(
+  planted: Array<SeedTurn & { turn: number }>,
+  summary: { constraints: string[]; decisions: string[]; open: string[]; context: string },
+): SeedCheck[] {
+  const constraintsText = summary.constraints.join('\n').toLowerCase()
+  const wholeText = [
+    ...summary.constraints,
+    ...summary.decisions,
+    ...summary.open,
+    summary.context,
+  ]
+    .join('\n')
+    .toLowerCase()
+
+  const revisedIds = new Set(planted.filter((p) => p.revises).map((p) => p.revises!))
+  const hit = (hay: string, kw?: string[]) =>
+    (kw ?? []).length > 0 && kw!.every((k) => hay.includes(k.toLowerCase()))
+  // 摘要有没有表达「某条变了」。两个分支共用 —— 撤销可以写在 constraints 里，
+  // 也可以写在 context 里，都算体现了
+  const mentionsChange = /取消|撤销|改为|不再|已变更|后来/.test(
+    summary.constraints.join('') + summary.context,
+  )
+
+  const out: SeedCheck[] = []
+  for (const p of planted) {
+    if (p.kind === 'decoy') {
+      const leaked = hit(constraintsText, p.keywords)
+      out.push({
+        kind: p.kind,
+        turn: p.turn,
+        text: p.text,
+        verdict: leaked ? 'leaked' : 'ok',
+        note: leaked
+          ? '这是技术陈述，不是你的要求 —— 混进 constraints 会让约束段逐代变脏'
+          : '正确地没有当成约束',
+      })
+      continue
+    }
+
+    if (p.kind === 'revision') {
+      // 撤销本身该被体现：要么摘要里根本不再提那条，要么明确写了「已取消」
+      const stillActive = hit(constraintsText, p.keywords)
+      out.push({
+        kind: p.kind,
+        turn: p.turn,
+        text: p.text,
+        verdict: stillActive && !mentionsChange ? 'stale' : 'ok',
+        note:
+          stillActive && !mentionsChange
+            ? '被撤销的约束仍然作为有效约束存在 —— 模型会照它拒绝你现在想要的'
+            : '撤销被正确体现',
+      })
+      continue
+    }
+
+    // constraint / implicit：该留下来
+    if (p.id && revisedIds.has(p.id)) {
+      /**
+       * 它被后面的 revision 撤了。两种正确写法都该放过：
+       *  - 摘要里根本不再提它
+       *  - 摘要提了，但明确写着「原…已取消」
+       *
+       * 第二种更好（下一轮就知道这条讨论过并且结论变了），所以不能因为
+       * 关键词还在就判 stale —— 那会逼着摘要把变更历史整段丢掉。
+       */
+      const stillActive = hit(constraintsText, p.keywords)
+      const stale = stillActive && !mentionsChange
+      out.push({
+        kind: p.kind,
+        turn: p.turn,
+        text: p.text,
+        verdict: stale ? 'stale' : 'ok',
+        note: stale
+          ? '这条后来被撤销了，却还作为有效约束留在 constraints 里'
+          : stillActive
+            ? '提到了但标明了已变更 —— 机器只能看到「有取消字样」，是否真的表达对要人读'
+            : '已被撤销，正确地不在了',
+      })
+      continue
+    }
+
+    const kept = hit(constraintsText, p.keywords) || hit(wholeText, p.keywords)
+    out.push({
+      kind: p.kind,
+      turn: p.turn,
+      text: p.text,
+      verdict: kept ? 'ok' : 'lost',
+      note:
+        p.kind === 'implicit'
+          ? kept
+            ? '委婉表达也被识别成了要求'
+            : '委婉表达丢了 —— 也可能只是关键词没命中，**这条必须人读一遍**'
+          : kept
+            ? '保留'
+            : '丢了',
+    })
+  }
+  return out
+}
+
+/** 从消息 meta 还原埋点 —— 只有 seed 出来的会话有 */
+export function plantedFromMessages(
+  msgs: Array<{ content: string; meta: Record<string, unknown> }>,
+): Array<SeedTurn & { turn: number }> {
+  const out: Array<SeedTurn & { turn: number }> = []
+  for (const m of msgs) {
+    const kind = m.meta['seedKind'] as SeedKind | undefined
+    if (!kind || kind === 'filler') continue
+    out.push({
+      kind,
+      turn: Number(m.meta['seedTurn'] ?? 0),
+      text: m.content,
+      ...(m.meta['seedId'] ? { id: String(m.meta['seedId']) } : {}),
+      ...(m.meta['seedRevises'] ? { revises: String(m.meta['seedRevises']) } : {}),
+      ...(Array.isArray(m.meta['seedKeywords'])
+        ? { keywords: m.meta['seedKeywords'] as string[] }
+        : {}),
+    })
+  }
+  return out
 }
