@@ -16,7 +16,7 @@ import { artifactCat, artifactList } from './artifact.js'
 import { providersCmd } from './providers.js'
 import { rulesCmd } from './rules.js'
 import { ScheduleStore } from '../store/schedules.js'
-import { convCompact, convList, convShow, convSummary } from './conv.js'
+import { convCompact, convList, convSeed, convShow, convSummary } from './conv.js'
 import {
   scheduleAdd,
   scheduleHistory,
@@ -603,6 +603,7 @@ ${c.bold('agent 与规则')}
   conv list                   会话列表：消息数与压缩代数
   conv show <id>              摘要内容 + 压缩历史（丢了什么只有人能判）
   conv compact <id>           现在就压一次（--dry-run 只判定）
+  conv seed --turns 15        造一段合成历史用来测 compact（埋好已知约束）
   schedule list               定时任务：下次什么时候跑
   schedule add <名称>          加一个：--cron "30 8 * * *" --agent <id> --goal "…"
   schedule history <名称>      每次触发的结果，含被跳过的那些与原因
@@ -781,6 +782,8 @@ export async function main(argv: string[]): Promise<number> {
           return convShow(args, flags)
         case 'compact':
           return convCompact(args, flags)
+        case 'seed':
+          return convSeed(args, flags)
         case 'summary':
           return convSummary(args, flags)
         default:

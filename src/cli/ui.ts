@@ -225,6 +225,7 @@ const VALUE_FLAGS = new Set([
   'tz',
   'value',
   'keep',
+  'turns',
 ])
 
 /** 已知的布尔参数。只用于「这个名字打错了吗」的判断，不影响解析 */

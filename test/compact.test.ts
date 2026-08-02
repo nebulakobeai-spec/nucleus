@@ -4,6 +4,7 @@ import { defaultConfig, type NucleusConfig } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import { Compactor } from '../src/runtime/compactor.js'
 import { DbEventSink } from '../src/runtime/events.js'
+import { checkConstraints, seedConversation } from '../src/cli/seed.js'
 import {
   DEFAULT_COMPACT_POLICY,
   decideCompact,
@@ -437,6 +438,72 @@ describe('手动压缩（conv compact）', () => {
     // 一条事件都没多 —— 持久记录在 compactions 表里，不依赖 run_events
     expect(after.rows[0]!.n).toBe(before.rows[0]!.n)
     expect((await n.conversations.compactions(conv.id)).length).toBeGreaterThan(0)
+  })
+})
+
+describe('conv seed（合成历史）', () => {
+  it('写入 N 轮，每轮一条 user + 一条 assistant', async () => {
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    const r = await seedConversation(n.conversations, conv.id, 15)
+    expect(r.turns).toBe(15)
+    expect(r.messages).toBe(30)
+    expect((await n.conversations.recent(conv.id, 500)).length).toBe(30)
+  })
+
+  /**
+   * 合成历史被当成真对话是很糟的事 —— 事后翻会话会以为自己真说过这些话。
+   */
+  it('每条都带 meta.synthetic —— 必须能和真对话区分开', async () => {
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    await seedConversation(n.conversations, conv.id, 4)
+    const msgs = await n.conversations.recent(conv.id, 500)
+    expect(msgs.every((m) => m.meta['synthetic'] === true)).toBe(true)
+  })
+
+  it('报出**实际埋进去的**约束 —— 轮数不够时不能列不存在的', async () => {
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    // 约束在第 2 / 5 / 9 轮；只跑 6 轮 → 只有前两条
+    const r = await seedConversation(n.conversations, conv.id, 6)
+    expect(r.planted.map((p) => p.turn)).toEqual([2, 5])
+  })
+
+  it('约束消息带 constraint 标记，事后能还原对照清单', async () => {
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    await seedConversation(n.conversations, conv.id, 15)
+    const msgs = await n.conversations.recent(conv.id, 500)
+    const marked = msgs.filter((m) => m.meta['constraint'] === true)
+    expect(marked.map((m) => m.meta['seedTurn'])).toEqual([2, 5, 9])
+  })
+})
+
+describe('checkConstraints（筛查，不是判定）', () => {
+  const planted = [
+    { turn: 2, text: '不要有任何 default 模型', keywords: ['default', '模型'] },
+    { turn: 5, text: '规则要能被运行时强制', keywords: ['运行时', '强制'] },
+  ]
+
+  it('关键词都在算活下来', () => {
+    const r = checkConstraints(planted, '用户要求：不要 default 模型；规则由运行时强制执行')
+    expect(r.map((x) => x.survived)).toEqual([true, true])
+  })
+
+  it('缺哪个词要报出来 —— 「丢了」得说清丢的是什么', () => {
+    const r = checkConstraints(planted, '用户要求：不要 default 模型')
+    expect(r[1]!.survived).toBe(false)
+    expect(r[1]!.missing).toEqual(['运行时', '强制'])
+  })
+
+  /**
+   * 这条钉住的是**这个检查的局限**：它查词不查意思。
+   * 输出里必须说清这一点，否则「3 条都在」会被当成「压缩没问题」。
+   */
+  it('改写措辞会骗过它 —— 所以只能算筛查', () => {
+    const r = checkConstraints(
+      [{ turn: 1, text: '不要有任何 default 模型', keywords: ['default', '模型'] }],
+      // 意思反了，但关键词都在
+      '用户希望我们提供 default 模型清单',
+    )
+    expect(r[0]!.survived).toBe(true)
   })
 })
 

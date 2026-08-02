@@ -112,7 +112,9 @@ export function synthesizeSummary(
     const v = x.trim().slice(0, 200)
     if (v && !constraints.includes(v)) constraints.push(v)
   }
-  const LOOKS_LIKE_CONSTRAINT = /不要|必须|不能|别|禁止/
+  // 裸的「别」太贪：区**别**、特**别**、**别**的都会命中。
+  // 实测里「run 级重试和就地重试的区别在哪？」被当成了用户约束
+  const LOOKS_LIKE_CONSTRAINT = /不要|必须|不能|不该|禁止|务必|一定要/
 
   /**
    * **只扫两个位置，不扫整段提示词。**

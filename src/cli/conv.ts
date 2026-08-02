@@ -13,6 +13,7 @@ import {
 import { heuristicTokenizer } from '../context/tokenizer.js'
 import { c, heading, ICON, line, resolveConversationId, resolveDb, strFlag, table } from './ui.js'
 import { compactTokens } from './pet.js'
+import { checkConstraints, seedConversation, type PlantedConstraint } from './seed.js'
 
 /**
  * `nucleus conv` —— 会话的摘要状态与手动压缩。
@@ -227,6 +228,63 @@ async function printWhyNot(
   }
 }
 
+/**
+ * `nucleus conv seed` —— 造一段用来测 compact 的历史。
+ *
+ * 自动压缩要 28000 tokens 历史才触发（131k 窗口 × 0.7），手打不现实。
+ * 而评估 compact 的关键不是「有没有跑」，是「**第 2 轮说过的要求，
+ * 到第 15 轮还在不在**」—— 所以这个命令会明确报出埋了哪几条约束，
+ * 否则你手里没有对照物，只能读一遍摘要凭感觉判断。
+ */
+export async function convSeed(
+  argv: string[],
+  flags: Record<string, string | true>,
+): Promise<number> {
+  const turns = Number(strFlag(flags, 'turns') ?? 15)
+  if (!Number.isInteger(turns) || turns < 1 || turns > 200) {
+    line(c.red('--turns 要是 1-200 的整数'))
+    return 1
+  }
+
+  return withNucleus(flags, async (n) => {
+    let convId: string
+    const prefix = argv[0]
+    if (prefix) {
+      const r = await resolveConversationId(n.db, prefix)
+      if ('error' in r) {
+        line(c.red(r.error))
+        return 1
+      }
+      convId = r.id
+    } else {
+      convId = (
+        await n.conversations.create({
+          agentId: n.config.defaults.entryAgent,
+          title: `[合成] compact 测试 ${turns} 轮`,
+        })
+      ).id
+    }
+
+    const r = await seedConversation(n.conversations, convId, turns)
+
+    heading('已写入合成历史')
+    line(`  会话 ${c.bold(convId.slice(0, 8))} · ${r.turns} 轮 · ${r.messages} 条消息`)
+    // 不调模型这件事要说清楚：这段历史里助手的话不是真的
+    line(c.gray('  没有调用模型 —— compact 只读消息日志，所以助手那侧写死就够了。'))
+    line(c.gray('  每条都带 meta.synthetic=true，事后翻会话不会误认成真对话。'))
+    line()
+
+    line(`${c.bold('埋进去的约束')}${c.gray('（压缩之后就是要看这几条还在不在）')}`)
+    for (const p of r.planted) {
+      line(`  第 ${p.turn} 轮  ${p.text}`)
+    }
+    line()
+    line(c.gray('接着跑：'))
+    line(c.gray(`  nucleus conv compact ${convId.slice(0, 8)} --keep 4`))
+    return 0
+  })
+}
+
 export async function convCompact(
   argv: string[],
   flags: Record<string, string | true>,
@@ -300,6 +358,9 @@ export async function convCompact(
     line()
     fmtSummary(after.summary!)
 
+    // 合成历史里埋过约束 → 机器先筛一遍，人再确认
+    await printConstraintCheck(n, r.id, after.summary!)
+
     line()
     // 这句是重点：压缩比好不好机器能判，丢了什么只有人能判
     line(c.yellow('压缩是有损且不可逆的 —— 上面这份就是之后每一轮会看到的全部。'))
@@ -307,6 +368,75 @@ export async function convCompact(
     line(c.gray(`注入形式（模型实际看到的）：nucleus conv summary ${r.id.slice(0, 8)}`))
     return 0
   })
+}
+
+/**
+ * 合成历史埋过约束时，机器先筛一遍。
+ *
+ * **这是筛查不是判定。** 查关键词而不是整句（摘要会改写措辞），所以
+ * 「都在」也不代表意思没变。输出要说清机器只能查到这一步 ——
+ * 但人读一遍时手里有这份清单，比空手读有用得多。
+ */
+async function printConstraintCheck(
+  n: Nucleus,
+  convId: string,
+  summary: ConversationSummary,
+): Promise<void> {
+  const msgs = await n.conversations.recent(convId, 500)
+  const planted = plantedFrom(msgs)
+  if (planted.length === 0) return
+
+  const checks = checkConstraints(planted, renderSummary(summary))
+  line()
+  line(`${c.bold('埋进去的约束')}${c.gray('（合成历史，关键词筛查）')}`)
+  for (const x of checks) {
+    if (x.survived) {
+      line(`  ${ICON.ok} 第 ${x.constraint.turn} 轮：${x.constraint.text.slice(0, 40)}…`)
+    } else {
+      line(`  ${ICON.fail} ${c.red(`第 ${x.constraint.turn} 轮丢了`)}：${x.constraint.text.slice(0, 40)}…`)
+      line(c.gray(`      摘要里找不到：${x.missing.join('、')}`))
+    }
+  }
+  const lost = checks.filter((x) => !x.survived).length
+  line(
+    c.gray(
+      lost
+        ? `  ${lost}/${checks.length} 条没通过筛查 —— 这是压缩质量问题，不是代码 bug`
+        : `  ${checks.length} 条关键词都在。但**改写措辞会骗过这个筛查**，仍需读一遍`,
+    ),
+  )
+}
+
+/** 从消息的 meta 里还原埋过哪些约束 —— 只有 seed 出来的会话有 */
+function plantedFrom(
+  msgs: Array<{ content: string; meta: Record<string, unknown> }>,
+): PlantedConstraint[] {
+  const out: PlantedConstraint[] = []
+  for (const m of msgs) {
+    if (m.meta['constraint'] !== true) continue
+    const turn = Number(m.meta['seedTurn'] ?? 0)
+    // 关键词从原话里取：与 seed.ts 里的声明保持一致靠 seed 时写下的 meta，
+    // 这里只需要能找回原话
+    out.push({ turn, text: m.content, keywords: keywordsOf(m.content) })
+  }
+  return out
+}
+
+/** 从原话里挑几个不容易被改写掉的词 */
+function keywordsOf(text: string): string[] {
+  const known: Array<[RegExp, string[]]> = [
+    [/default 模型/, ['default', '模型']],
+    [/运行时强制|运行时/, ['运行时', 'prompt']],
+    [/agents\/\*\.md|agents/, ['agents', '来源']],
+  ]
+  for (const [re, kw] of known) if (re.test(text)) return kw
+  // 兜底：取最长的两个中文词片段
+  return text
+    .replace(/[，。、；：（）()【】\s]+/g, ' ')
+    .split(' ')
+    .filter((x) => x.length >= 3)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 2)
 }
 
 /** 摘要**注入 context 时的实际文本** —— 存下来但没注入等于没有 */
