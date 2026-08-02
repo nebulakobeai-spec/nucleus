@@ -133,7 +133,9 @@ export function renderEvent(e: RunEvent, indent: string): string | null {
       const names: Record<string, string> = {
         trim_history: dropped ? `裁掉 ${dropped} 条历史` : '裁剪历史',
         shrink_summary: '压缩摘要',
-        drop_summary: '丢弃摘要',
+        // 这两档差别很大：前者保住了用户约束，后者把约束一起丢了
+        summary_to_constraints: '摘要降到只剩要求',
+        drop_summary: '丢弃摘要（连用户约束一起）',
         shrink_constraints: '收缩约束',
         needs_checkpoint: '仍然超出窗口',
       }

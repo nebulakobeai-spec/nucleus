@@ -135,6 +135,31 @@ export function renderSummary(s: ConversationSummary, generation = 1): string {
   return parts.join('\n\n')
 }
 
+/**
+ * 只保留约束的最小形态。
+ *
+ * 装配器在极端缺预算时原本是**把摘要整个丢掉**（`drop_summary`），包括里面
+ * 全部用户约束 —— 而 compact 存在的唯一理由就是保住那些约束。
+ * 到了最缺预算的时候第一个丢它，是自相矛盾的。
+ *
+ * 而摘要是结构化的，**本来就能按段降级** —— 这正是结构化的好处。
+ * 丢掉 `context` 那段散文、只留 constraints（外加 open，因为「还悬着的事」
+ * 丢了会让下一轮假装一切都清楚），能省下大部分体积而保住要紧内容。
+ */
+export function renderSummaryMinimal(s: ConversationSummary, generation = 1): string {
+  const parts: string[] = [`${HEADER}（第 ${generation} 代，**已进一步压缩，只剩要求与未决**）`]
+  if (s.constraints.length) {
+    parts.push(
+      '### 用户明确提过的要求（**仍然有效**）\n' + s.constraints.map((x) => `- ${x}`).join('\n'),
+    )
+  }
+  if (s.open.length) {
+    parts.push('### 悬而未决\n' + s.open.map((x) => `- ${x}`).join('\n'))
+  }
+  // 连约束都没有时返回空串 —— 让上层知道「没什么可保的」，直接走 drop
+  return parts.length > 1 ? parts.join('\n\n') : ''
+}
+
 /** 组装摘要请求的提示词。**旧摘要一并传入 —— 摘要是增量的。** */
 export function buildCompactPrompt(
   previous: ConversationSummary | null,

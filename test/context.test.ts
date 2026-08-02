@@ -9,6 +9,11 @@ import {
 } from '../src/context/assemble.js'
 import { heuristicTokenizer as T, countMessage } from '../src/context/tokenizer.js'
 import type { ChatMessage } from '../src/providers/types.js'
+import {
+  renderSummary,
+  renderSummaryMinimal,
+  type ConversationSummary,
+} from '../src/context/compact.js'
 
 const BASE: AssembleInput = {
   contract: '# 运行时契约\n你必须调用 submit_result 结束任务。',
@@ -254,5 +259,130 @@ describe('tokenizer', () => {
     const out = clampToTokens(long, 50, T)
     expect(T.count(out)).toBeLessThanOrEqual(50)
     expect(long.startsWith(out)).toBe(true)
+  })
+})
+
+
+// ═══════════════════════════════════════════════════════
+// 降级顺序：摘要按段降级，而不是整个丢
+// ═══════════════════════════════════════════════════════
+
+describe('摘要的降级顺序', () => {
+  const SUM: ConversationSummary = {
+    constraints: ['不要有任何 default 模型', '规则要能被运行时强制'],
+    decisions: ['判定与执行分离，因为判定要能单测'],
+    open: ['GLM 的窗口大小还没确认'],
+    artifacts: ['reports/x.md'],
+    context: '在做一个多 agent 编排运行时，'.repeat(40),
+  }
+
+  /** 造一个「连历史全丢也放不下」的局面 */
+  function tight(extra: Partial<AssembleInput> = {}) {
+    return assemble({
+      contract: '系统提示',
+      identity: '',
+      policy: '',
+      history: [{ role: 'user', content: '历史'.repeat(200) }],
+      input: [{ role: 'user', content: '本回合'.repeat(300) }],
+      summary: renderSummary(SUM),
+      budget: {
+        contextWindow: 2_400,
+        reserveForOutput: 1_000,
+        maxConstraintTokens: 300,
+        maxHistoryTokens: 40_000,
+        maxSummaryTokens: 1_500,
+      },
+      ...extra,
+    })
+  }
+
+  /**
+   * **这条是这一组存在的理由。**
+   *
+   * 原来降级只有「整个丢掉摘要」一档，于是最缺预算时第一个被丢的就是
+   * 用户约束 —— 而 compact 存在的唯一理由就是保住它们。自相矛盾。
+   *
+   * 摘要是结构化的，本来就能按段降级 —— 不用这一点就等于白结构化了。
+   */
+  it('给了最小形态时先降到只剩要求，不整个丢', () => {
+    const r = tight({ summaryMinimal: renderSummaryMinimal(SUM) })
+    expect(r.degradations).toContain('summary_to_constraints')
+    expect(r.degradations).not.toContain('drop_summary')
+
+    // 约束还在 context 里
+    const text = r.messages.map((m) => m.content).join('\n')
+    expect(text).toContain('不要有任何 default 模型')
+    // 散文背景被丢了
+    expect(text).not.toContain('多 agent 编排运行时')
+  })
+
+  it('没给最小形态时退回老行为（整个丢）—— 不能因此报错', () => {
+    const r = tight()
+    expect(r.degradations).toContain('drop_summary')
+    expect(r.messages.map((m) => m.content).join('')).not.toContain('不要有任何 default 模型')
+  })
+
+  it('最小形态还是放不下时才整个丢', () => {
+    const r = assemble({
+      contract: '系统提示',
+      identity: '',
+      policy: '',
+      history: [],
+      input: [{ role: 'user', content: '本回合'.repeat(400) }],
+      summary: renderSummary(SUM),
+      summaryMinimal: renderSummaryMinimal(SUM),
+      budget: {
+        contextWindow: 1_300,
+        reserveForOutput: 1_000,
+        maxConstraintTokens: 300,
+        maxHistoryTokens: 40_000,
+        maxSummaryTokens: 1_500,
+      },
+    })
+    expect(r.degradations).toContain('drop_summary')
+  })
+
+  it('预算够时两档都不触发', () => {
+    const r = assemble({
+      contract: '系统提示',
+      identity: '',
+      policy: '',
+      history: [{ role: 'user', content: '一句话' }],
+      input: [{ role: 'user', content: '问题' }],
+      summary: renderSummary(SUM),
+      summaryMinimal: renderSummaryMinimal(SUM),
+      budget: { ...DEFAULT_BUDGET },
+    })
+    expect(r.degradations).not.toContain('summary_to_constraints')
+    expect(r.degradations).not.toContain('drop_summary')
+  })
+})
+
+describe('renderSummaryMinimal', () => {
+  it('只留要求与未决，丢掉背景、决定、产出', () => {
+    const text = renderSummaryMinimal({
+      constraints: ['不要 X'],
+      decisions: ['决定了 Y'],
+      open: ['Z 没定'],
+      artifacts: ['a.md'],
+      context: '一大段背景',
+    })
+    expect(text).toContain('不要 X')
+    expect(text).toContain('Z 没定')
+    expect(text).not.toContain('决定了 Y')
+    expect(text).not.toContain('一大段背景')
+    expect(text).not.toContain('a.md')
+  })
+
+  it('标明「已进一步压缩」—— 模型该知道自己看到的是残缺版', () => {
+    expect(renderSummaryMinimal({ constraints: ['不要 X'], decisions: [], open: [], artifacts: [], context: '' }))
+      .toMatch(/已进一步压缩/)
+  })
+
+  /** 连约束都没有时返回空串，让上层直接走 drop —— 一个只有标题的摘要是��浪费 */
+  it('没有要求也没有未决时返回空串', () => {
+    expect(
+      renderSummaryMinimal({ constraints: [], decisions: ['x'], open: [], artifacts: [], context: 'y' }),
+    ).toBe('')
   })
 })

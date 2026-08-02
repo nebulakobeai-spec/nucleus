@@ -188,6 +188,8 @@ export class Runner {
      * 消息，否则同一段内容会占两份预算。由调用方（worker）保证。
      */
     summary?: string | null
+    /** 摘要的最小形态（只剩要求与未决）。极端缺预算时用它替换完整摘要 */
+    summaryMinimal?: string | null
     /** 本回合输入（任务信封 / 专家结果）。不参与裁剪 */
     input: ChatMessage[]
     workdir: string
@@ -258,6 +260,7 @@ export class Runner {
       agent: AgentSpec
       history: ChatMessage[]
       summary?: string | null
+      summaryMinimal?: string | null
       input: ChatMessage[]
       workdir: string
       signal: AbortSignal
@@ -296,6 +299,8 @@ export class Runner {
       // 摘要接上线。这两档降级（shrink_summary / drop_summary）在装配器里
       // 一直存在，但此前永远不会触发 —— 没有任何代码产生摘要
       summary: input.summary ?? null,
+      // 只剩要求的那一版：整个丢掉摘要会连用户约束一起丢
+      summaryMinimal: input.summaryMinimal ?? null,
       input: input.input,
       budget: { ...DEFAULT_BUDGET, contextWindow: window },
     })

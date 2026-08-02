@@ -27,6 +27,14 @@ export interface AssembleInput {
   /** ③ 动态 */
   summary?: string | null
   /**
+   * 摘要的**最小形态**（只剩要求与未决）。
+   *
+   * 极端缺预算时用它替换完整摘要，而不是把摘要整个丢掉 ——
+   * 后者会连用户约束一起丢。由调用方渲染（`renderSummaryMinimal`），
+   * 装配器只按预算取舍，不懂摘要的内部结构。
+   */
+  summaryMinimal?: string | null
+  /**
    * 会话历史，**按时间顺序传入（最旧的在前）**。
    *
    * 装配器从末尾往前填（即优先保留最新的），填不下就丢弃更旧的。
@@ -68,6 +76,14 @@ export const DEFAULT_BUDGET: ContextBudget = {
 export type Degradation =
   | 'trim_history'
   | 'shrink_summary'
+  /**
+   * 摘要降到只剩「要求 + 未决」，丢掉散文背景与决定。
+   *
+   * 排在 `drop_summary` **之前**：整个丢掉摘要会连用户约束一起丢，
+   * 而那正是 compact 想保住的东西。摘要是结构化的，所以能按段降级 ——
+   * 不用它就等于白结构化了。
+   */
+  | 'summary_to_constraints'
   | 'drop_summary'
   | 'shrink_constraints'
   | 'needs_checkpoint'
@@ -168,7 +184,21 @@ export function assemble(input: AssembleInput): AssembledContext {
   const { kept, dropped, tokens: historyTokens } = fillHistory(input.history, historyCap, t)
   if (dropped > 0) degradations.push('trim_history')
 
-  // 历史全丢了还不够 → 依次牺牲摘要、约束
+  /**
+   * 历史全丢了还不够 → 依次牺牲摘要、约束。
+   *
+   * **先降到最小形态，再整个丢。** 原来只有「整个丢」一档，于是最缺预算时
+   * 第一个被丢的就是用户约束 —— 而 compact 存在的理由就是保住它们。
+   */
+  if (available() - historyTokens < 0 && summaryTokens > 0 && input.summaryMinimal) {
+    const minimal = input.summaryMinimal
+    const minimalTokens = t.count(minimal)
+    if (minimalTokens < summaryTokens) {
+      summary = minimal
+      summaryTokens = minimalTokens
+      degradations.push('summary_to_constraints')
+    }
+  }
   if (available() - historyTokens < 0 && summaryTokens > 0) {
     summary = ''
     summaryTokens = 0

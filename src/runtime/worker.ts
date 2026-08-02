@@ -9,7 +9,7 @@ import { ScheduleStore, type FireResult, type Schedule } from '../store/schedule
 import type { RunEventSink } from './events.js'
 import { renderEnvelope } from './envelope.js'
 import { Compactor } from './compactor.js'
-import { renderSummary, type CompactPolicy } from '../context/compact.js'
+import { renderSummary, renderSummaryMinimal, type CompactPolicy } from '../context/compact.js'
 import { DEFAULT_BUDGET } from '../context/assemble.js'
 import { decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicy } from './retry.js'
 import type { ChatMessage } from '../providers/types.js'
@@ -203,7 +203,7 @@ export class Worker {
     })
 
     try {
-      const { history, input: turnInput, summary } = await this.#buildMessages(
+      const { history, input: turnInput, summary, summaryMinimal } = await this.#buildMessages(
         run.id,
         run.conversationId,
         run.input,
@@ -221,6 +221,7 @@ export class Worker {
         agent,
         history,
         summary,
+        summaryMinimal,
         input: turnInput,
         workdir: `${this.opts.workdirRoot ?? '/tmp/nucleus'}/${run.id}`,
       })
@@ -402,12 +403,18 @@ export class Worker {
     conversationId: string | null,
     input: unknown,
     ctx: { attemptId: string; modelChain: string[]; contextWindow: number } | null = null,
-  ): Promise<{ history: ChatMessage[]; input: ChatMessage[]; summary: string | null }> {
+  ): Promise<{
+    history: ChatMessage[]
+    input: ChatMessage[]
+    summary: string | null
+    summaryMinimal: string | null
+  }> {
     // history 与本回合输入必须分开返回 —— 装配器只裁剪 history，
     // 本回合的任务与专家结果是不能被裁掉的（裁了这一轮就没意义了）
     const history: ChatMessage[] = []
     const turn: ChatMessage[] = []
     let summary: string | null = null
+    let summaryMinimal: string | null = null
 
     if (conversationId) {
       // 取 50 条只是上限，真正的约束是装配器的 token 预算
@@ -436,6 +443,8 @@ export class Worker {
       const conv = await this.#conversations.get(conversationId)
       if (conv?.summary && conv.summaryThroughSeq > 0) {
         summary = renderSummary(conv.summary, conv.summaryGeneration)
+        // 极端缺预算时的退路：只剩要求与未决，而不是整个丢掉
+        summaryMinimal = renderSummaryMinimal(conv.summary, conv.summaryGeneration) || null
         // **被摘要覆盖的消息不能再逐条进去** —— 否则同一段内容占两份预算，
         // 压缩反而让 context 变大
         recent = recent.filter((m) => m.seq > conv.summaryThroughSeq)
@@ -469,7 +478,7 @@ export class Worker {
       turn.push({ role: 'user', content: `[专家结果 · ${c.agent_id}] ${body}` })
     }
 
-    return { history, input: turn, summary }
+    return { history, input: turn, summary, summaryMinimal }
   }
 }
 
