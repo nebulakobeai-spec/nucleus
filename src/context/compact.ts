@@ -212,33 +212,44 @@ export interface CompactDecision {
 
 export interface CompactPolicy {
   /**
-   * 历史占「可用于历史的预算」的比例超过这个数就压缩。
+   * 历史占「留给历史的预算」的比例超过这个数就压缩。
    *
    * 不等到装配器报 trim_history 才动手 —— 那时消息**已经被丢了**，
    * 这一轮的摘要救不回这一轮。压缩必须发生在装配之前。
    */
   triggerRatio: number
-  /** 压缩后保留最近多少条原文。摘要替代不了「上一句刚说了什么」 */
-  keepRecent: number
   /**
-   * **要退役的条数**少于这个值就不压 —— 不值得为此调一次模型。
+   * 保留最近多少**token**的原文（占历史预算的比例）。
    *
-   * 原来这个参数叫 `minMessages`，作用在「未摘要的总条数」上。那是错的对象，
-   * 而且**它从来不改变结果**：`fresh < minMessages(8)` 被拒的情况，
-   * 一定也会被「`fresh <= keepRecent(10)` 没有可退役的」拒掉 ——
-   * 后者严格更强。所以它唯一的作用是换一句措辞，而且那句还不如后者准确。
-   *
-   * 真正没被挡住的是另一头：`fresh = 11, keepRecent = 10` → 退役 **1 条**。
-   * 调一次模型给一条消息做摘要，纯浪费。盯 retireCount 才挡得住。
+   * 原来这里是 `keepRecent: 10`（条数）。条数是错的量级：
+   * 1M 窗口下只留 10 条原文荒谬地激进，而 10 条粘贴的日志可能就 50k token。
+   * 「最近多少内容」本来就是 token 的量纲。
    */
-  minRetire: number
+  keepRecentRatio: number
+  /**
+   * 无论如何至少保留几条原文。
+   *
+   * token 预算可能被一条巨大的消息吃光，但「上一句刚说了什么」不能靠摘要 ——
+   * 所以留一个条数下限。它是**下限**，不是主判据。
+   */
+  keepRecentMin: number
+  /**
+   * 要退役的**token**少于这个值就不压。
+   *
+   * 原来是 `minRetire: 3`（条数）—— 但退役 3 条小消息省不下什么，
+   * 退役 1 条巨大的日志能省很多。值不值得调一次模型，取决于省多少 token，
+   * 与条数无关。
+   */
+  minRetireTokens: number
 }
 
 export const DEFAULT_COMPACT_POLICY: CompactPolicy = {
   triggerRatio: 0.7,
-  keepRecent: 10,
-  // 退役少于 3 条不值得一次调用 —— 省下的 token 抵不上那次调用的成本与延迟
-  minRetire: 3,
+  // 预算的 30% 留给原文 —— 摘要替代不了「上一句刚说了什么」
+  keepRecentRatio: 0.3,
+  keepRecentMin: 2,
+  // 省不到这么多 token 就不值得一次调用与一次不可逆的信息损失
+  minRetireTokens: 2_000,
 }
 
 /**
@@ -250,7 +261,7 @@ export function decideCompact(input: {
   messages: Array<{ seq: number; message: ChatMessage }>
   /** 已经被摘要覆盖到的 seq */
   summaryThroughSeq: number
-  /** 留给历史的 token 预算 */
+  /** 留给历史的 token 预算（由 contextBudgetFor 按模型算出） */
   historyBudget: number
   policy?: CompactPolicy
   tokenizer?: Tokenizer
@@ -258,66 +269,94 @@ export function decideCompact(input: {
   const policy = input.policy ?? DEFAULT_COMPACT_POLICY
   const t = input.tokenizer ?? heuristicTokenizer
 
-  // 只考虑还没被摘要覆盖的部分
+  // 只考虑还没被摘要覆盖的部分 —— 否则每轮都会把同一段重压一遍
   const fresh = input.messages.filter((m) => m.seq > input.summaryThroughSeq)
+  const sized = fresh.map((m) => ({ ...m, tokens: t.count(textOf(m.message)) }))
+  const tokens = sized.reduce((n, m) => n + m.tokens, 0)
 
   /**
-   * 保留最近 keepRecent 条原文 —— 摘要替代不了「上一句刚说了什么」。
+   * **第一判据是 token 压力，不是条数。**
    *
-   * 所以真正的问题从一开始就是「**能退役几条**」，而不是「总共有几条」。
-   * 原来先判 `fresh.length < minMessages` 再判 `retireCount <= 0`，
-   * 而前者被后者严格包含（keepRecent ≥ minMessages 时永远如此）——
-   * 那一档从来不改变结果，只换一句措辞。合成一处。
+   * 原来先判 `fresh.length < minMessages(8)` 再判条数够不够退役，
+   * 而条数与「context 快满了吗」几乎无关：现代模型动辄 500k–1M 窗口，
+   * 成百上千条消息是常态，按条数判等于没判。
    */
-  const retireCount = fresh.length - policy.keepRecent
-  if (retireCount <= 0) {
-    return {
-      compact: false,
-      throughSeq: 0,
-      reason:
-        `只有 ${fresh.length} 条未摘要的消息，而要保留最近 ${policy.keepRecent} 条 ——` +
-        ` 没有可退役的（--keep 可以调小，但这么短的对话压缩没有意义）`,
-    }
-  }
-  if (retireCount < policy.minRetire) {
-    // 这一档是原来漏掉的：11 条、保留 10 条 → 退役 1 条，
-    // 调一次模型给一条消息做摘要，省下的 token 抵不上成本
-    return {
-      compact: false,
-      throughSeq: 0,
-      reason:
-        `只能退役 ${retireCount} 条（共 ${fresh.length} 条，保留最近 ${policy.keepRecent} 条）` +
-        `，少于 ${policy.minRetire} 条不值得调一次模型`,
-    }
-  }
-
-  const tokens = fresh.reduce((n, m) => n + t.count(textOf(m.message)), 0)
   const threshold = Math.floor(input.historyBudget * policy.triggerRatio)
   if (tokens <= threshold) {
     return {
       compact: false,
       throughSeq: 0,
       // 数字要给出来 —— 「为什么没压缩」和「为什么压缩了」一样需要能回答
-      reason: `历史 ${tokens} tok 未到阈值 ${threshold}（预算 ${input.historyBudget} × ${policy.triggerRatio}）`,
+      reason:
+        `历史 ${tokens} tok 未到阈值 ${threshold}` +
+        `（预算 ${input.historyBudget} × ${policy.triggerRatio}）`,
     }
   }
 
   /**
-   * 真正的「压缩也救不了」是另一种形状：退役完之后，**留下的那几条本身**
-   * 就超预算（比如贴了一大段日志）。这时压缩会成功，但装配器仍然要裁剪 ——
-   * 所以要在理由里说出来，不能让人以为压缩过就够了。
+   * 从**最新往旧**累加，凑满「保留预算」为止；剩下的退役。
+   *
+   * 保留的是 token 而不是条数：一条粘贴的日志可能顶几十条对话，
+   * 按条数留会让「最近 10 条」占满整个窗口。
+   *
+   * `keepRecentMin` 是下限而非主判据 —— 预算可能被一条巨大的消息吃光，
+   * 但「上一句刚说了什么」不能只剩摘要。
    */
-  const keptTokens = fresh.slice(retireCount).reduce((n, m) => n + t.count(textOf(m.message)), 0)
+  const keepBudget = Math.floor(input.historyBudget * policy.keepRecentRatio)
+  let keptTokens = 0
+  let keptCount = 0
+  for (let i = sized.length - 1; i >= 0; i--) {
+    const m = sized[i]!
+    const within = keptTokens + m.tokens <= keepBudget
+    if (!within && keptCount >= policy.keepRecentMin) break
+    keptTokens += m.tokens
+    keptCount++
+  }
+
+  const retire = sized.slice(0, sized.length - keptCount)
+  if (retire.length === 0) {
+    return {
+      compact: false,
+      throughSeq: 0,
+      reason:
+        `${sized.length} 条全在保留窗口内（保留 ${keptTokens} tok，` +
+        `上限 ${keepBudget}，至少 ${policy.keepRecentMin} 条）—— 没有可退役的`,
+    }
+  }
+
+  const retireTokens = retire.reduce((n, m) => n + m.tokens, 0)
+  if (retireTokens < policy.minRetireTokens) {
+    /**
+     * 省不到这么多 token 就不值得一次调用 —— 而且每次压缩都是一次
+     * **不可逆的信息损失**，不只是成本问题。
+     *
+     * 这一档原来是按条数（`minRetire: 3`），但退役 3 条小消息省不下什么，
+     * 退役 1 条巨大的日志能省很多。值不值得取决于 token。
+     */
+    return {
+      compact: false,
+      throughSeq: 0,
+      reason:
+        `只能退役 ${retire.length} 条 / ${retireTokens} tok，` +
+        `少于 ${policy.minRetireTokens} tok 不值得调一次模型`,
+    }
+  }
+
+  /**
+   * 留下的部分本身就超预算（比如贴了一大段日志）——
+   * 压缩会成功，但装配器仍然要裁剪。要说出来，不能让人以为压缩过就够了。
+   */
   const stillOver = keptTokens > input.historyBudget
 
   return {
     compact: true,
-    throughSeq: fresh[retireCount - 1]!.seq,
+    throughSeq: retire[retire.length - 1]!.seq,
     reason:
-      `历史 ${tokens} tok 超过阈值 ${threshold}，退役最旧的 ${retireCount} 条` +
+      `历史 ${tokens} tok 超过阈值 ${threshold}，退役最旧的 ${retire.length} 条` +
+      `（${retireTokens} tok），保留最近 ${keptCount} 条（${keptTokens} tok）` +
       (stillOver
-        ? `（注意：保留的 ${policy.keepRecent} 条本身就占 ${keptTokens} tok，` +
-          `超过预算 ${input.historyBudget} —— 压缩之后装配器仍会裁剪）`
+        ? `。注意：保留的部分本身就占 ${keptTokens} tok，超过预算 ` +
+          `${input.historyBudget} —— 压缩之后装配器仍会裁剪`
         : ''),
   }
 }

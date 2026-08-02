@@ -10,7 +10,7 @@ import type { RunEventSink } from './events.js'
 import { renderEnvelope } from './envelope.js'
 import { Compactor } from './compactor.js'
 import { renderSummary, renderSummaryMinimal, type CompactPolicy } from '../context/compact.js'
-import { DEFAULT_BUDGET } from '../context/assemble.js'
+import type { ContextBudget } from '../context/budget.js'
 import { decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicy } from './retry.js'
 import type { ChatMessage } from '../providers/types.js'
 
@@ -210,7 +210,8 @@ export class Worker {
         {
           attemptId: attempt.id,
           modelChain: agent.modelChain,
-          contextWindow: this.runner.contextWindowFor(agent.modelChain),
+          // 与装配器同一份预算 —— runner 按模型算，这里不再自己算
+          budget: this.runner.budgetFor(agent.modelChain),
         },
       )
       const out = await this.runner.execute({
@@ -402,7 +403,7 @@ export class Worker {
     runId: string,
     conversationId: string | null,
     input: unknown,
-    ctx: { attemptId: string; modelChain: string[]; contextWindow: number } | null = null,
+    ctx: { attemptId: string; modelChain: string[]; budget: ContextBudget } | null = null,
   ): Promise<{
     history: ChatMessage[]
     input: ChatMessage[]
@@ -433,7 +434,7 @@ export class Worker {
         await this.#compactor.maybeCompact({
           conversationId,
           messages: recent,
-          historyBudget: historyBudgetFor(ctx.contextWindow),
+          historyBudget: historyBudgetOf(ctx.budget),
           modelChain: ctx.modelChain,
           attemptId: ctx.attemptId,
           runId,
@@ -485,11 +486,14 @@ export class Worker {
 /**
  * 留给历史的 token 预算。
  *
- * 与装配器的 DEFAULT_BUDGET 保持一致的口径：窗口减去输出余量后，历史能占的上限。
- * 压缩阈值按它算 —— 按整个窗口算会让压缩触发得太晚（前缀、约束、本轮输入
- * 都还要占位置）。
+ * **必须与装配器用同一份预算** —— 两处各算一份的话，压缩阈值和实际裁剪会
+ * 对不上，而那种偏差只在长会话里才显形。所以这里只是从按模型算好的预算里
+ * 取一个字段，不再自己算。
+ *
+ * 原来它是 `min(DEFAULT_BUDGET.maxHistoryTokens=40000, window - 16000)`，
+ * 那个 40000 与窗口无关 —— 1M 窗口的模型也只给 40k 历史，于是在用掉 3%
+ * 的时候就开始压缩。
  */
-export function historyBudgetFor(contextWindow: number): number {
-  const usable = contextWindow - DEFAULT_BUDGET.reserveForOutput
-  return Math.max(0, Math.min(DEFAULT_BUDGET.maxHistoryTokens, usable))
+export function historyBudgetOf(budget: ContextBudget): number {
+  return budget.maxHistoryTokens
 }

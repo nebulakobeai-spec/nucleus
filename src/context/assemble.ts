@@ -1,5 +1,6 @@
 import type { ChatMessage } from '../providers/types.js'
 import { countMessage, heuristicTokenizer, type Tokenizer } from './tokenizer.js'
+import type { ContextBudget } from './budget.js'
 
 /**
  * Context 装配（DESIGN.md §5）。
@@ -51,26 +52,16 @@ export interface AssembleInput {
   tokenizer?: Tokenizer
 }
 
-export interface ContextBudget {
-  /** 模型窗口 */
-  contextWindow: number
-  /** 给输出留的余量 */
-  reserveForOutput: number
-  /** 末尾约束块上限 */
-  maxConstraintTokens: number
-  /** 历史消息上限 */
-  maxHistoryTokens: number
-  /** 摘要上限 */
-  maxSummaryTokens: number
-}
-
-export const DEFAULT_BUDGET: ContextBudget = {
-  contextWindow: 128_000,
-  reserveForOutput: 16_000,
-  maxConstraintTokens: 300,
-  maxHistoryTokens: 40_000,
-  maxSummaryTokens: 1_500,
-}
+/**
+ * 预算的定义与推导搬到了 `budget.ts` —— 因为它**必须按模型算**。
+ *
+ * 原来这里是一组常量，其中 `maxHistoryTokens: 40_000` 是与窗口无关的硬上限：
+ * 1M 窗口的模型也只给 40k 历史，于是在用掉 3% 的时候就开始压缩。
+ * 而每次压缩是一次模型调用加一次**不可逆的信息损失**。
+ */
+export { contextBudgetFor, type ContextBudget } from './budget.js'
+/** 只在真的不知道模型是谁时用（纯函数测试）。运行路径必须走 contextBudgetFor */
+export { FALLBACK_BUDGET as DEFAULT_BUDGET } from './budget.js'
 
 /** 降级动作，按施加顺序记录 —— 顺序本身是被断言的行为 */
 export type Degradation =

@@ -46,149 +46,151 @@ function longMessages(n: number, chars = 400) {
 
 describe('decideCompact（纯判定）', () => {
   /**
-   * 这条测试原来叫「消息太少就不压缩 —— 不值得一次模型调用」，断言
-   * `reason` 含「不值得」。但 3 条消息的**真实原因**是「不够 10 条，
-   * 没有可退役的」—— 那句「不值得调一次模型」从来没描述过它自己的条件。
+   * ── 判据是 token 压力，不是消息条数 ────────────────────────
    *
-   * 测试名与断言一起指向了错误的原因，而它照样是绿的。改名并改断言。
+   * 原来第一判据是 `fresh.length < minMessages(8)`，而条数与「context 快满了吗」
+   * 几乎无关：现代模型动辄 500k–1M 窗口，成百上千条消息是常态。
+   *
+   * 保留窗口同理 —— 原来是 `keepRecent: 10` 条。一条粘贴的日志可能顶几十条
+   * 对话，「最近 10 条」在那种情况下能占满整个窗口。
    */
-  it('消息不够 keepRecent 时不压 —— 原因是「没有可退役的」', () => {
-    const d = decideCompact({
-      messages: longMessages(3),
-      summaryThroughSeq: 0,
-      historyBudget: 100,
-    })
-    expect(d.compact).toBe(false)
-    expect(d.reason).toMatch(/只有 3 条/)
-    expect(d.reason).toMatch(/没有可退役的/)
-  })
+  const POLICY = {
+    triggerRatio: 0.7,
+    keepRecentRatio: 0.3,
+    keepRecentMin: 2,
+    minRetireTokens: 100,
+  }
 
-  it('没到阈值就不压缩，而且**把数字说出来**', () => {
+  it('没到 token 阈值就不压，而且**把数字说出来**', () => {
     const d = decideCompact({
-      messages: longMessages(20, 10),
+      messages: longMessages(200, 10),
       summaryThroughSeq: 0,
       historyBudget: 1_000_000,
+      policy: POLICY,
     })
+    // 200 条也不压 —— 条数多不等于 context 紧
     expect(d.compact).toBe(false)
-    // 「为什么没压缩」和「为什么压缩了」一样需要能回答
     expect(d.reason).toMatch(/未到阈值 \d+/)
   })
 
-  it('超阈值就压缩，且保留最近 keepRecent 条原文', () => {
-    const messages = longMessages(30)
-    const d = decideCompact({ messages, summaryThroughSeq: 0, historyBudget: 2_000 })
+  it('超阈值就压，保留最近**一段 token**的原文', () => {
+    const d = decideCompact({
+      messages: longMessages(30, 400),
+      summaryThroughSeq: 0,
+      historyBudget: 4_000,
+      policy: POLICY,
+    })
     expect(d.compact).toBe(true)
-    // 30 条留最近 10 条 → 退役前 20 条 → through_seq = 20
-    expect(d.throughSeq).toBe(30 - DEFAULT_COMPACT_POLICY.keepRecent)
+    expect(d.reason).toMatch(/退役最旧的 \d+ 条（\d+ tok）/)
+    expect(d.reason).toMatch(/保留最近 \d+ 条（\d+ tok）/)
+  })
+
+  /**
+   * **同样条数、不同大小 → 不同结果。** 这是「按 token 判」的核心表现：
+   * 按条数判的话这两种情况完全一样。
+   */
+  it('条数相同但消息很小时不压，很大时压', () => {
+    const small = decideCompact({
+      messages: longMessages(30, 20),
+      summaryThroughSeq: 0,
+      historyBudget: 20_000,
+      policy: POLICY,
+    })
+    const big = decideCompact({
+      messages: longMessages(30, 2_000),
+      summaryThroughSeq: 0,
+      historyBudget: 20_000,
+      policy: POLICY,
+    })
+    expect(small.compact).toBe(false)
+    expect(big.compact).toBe(true)
+  })
+
+  /** 一条巨大的消息就能触发 —— 条数判据永远抓不到这种 */
+  it('单条巨大的粘贴也能触发压缩', () => {
+    const d = decideCompact({
+      messages: [
+        msg(1, 'user', '日志'.repeat(20_000)),
+        msg(2, 'assistant', '收到'),
+        msg(3, 'user', '继续'),
+      ],
+      summaryThroughSeq: 0,
+      historyBudget: 4_000,
+      policy: POLICY,
+    })
+    expect(d.compact).toBe(true)
+    expect(d.throughSeq).toBe(1)
   })
 
   it('只看没被摘要覆盖的部分 —— 否则每轮都会重压一遍', () => {
-    const messages = longMessages(30)
-    const d = decideCompact({ messages, summaryThroughSeq: 25, historyBudget: 2_000 })
-    // 只剩 5 条未摘要，而要保留最近 10 条 —— 没有可退役的
+    const d = decideCompact({
+      messages: longMessages(30, 400),
+      summaryThroughSeq: 28,
+      historyBudget: 4_000,
+      policy: POLICY,
+    })
     expect(d.compact).toBe(false)
-    expect(d.reason).toMatch(/只有 5 条/)
   })
 
   /**
-   * **只能退役 1 条时不该调模型。**
-   *
-   * 这一档原来漏掉了：`fresh = 11, keepRecent = 10` → 退役 1 条，
-   * 调一次模型给一条消息做摘要，省下的 token 抵不上那次调用的成本与延迟。
-   *
-   * 原来的 `minMessages` 盯的是**总条数**，而那个判断被
-   * 「retireCount <= 0」严格包含（keepRecent ≥ minMessages 时永远如此）——
-   * 所以它从来不改变结果，只换一句措辞。真正没被挡住的是这一头。
+   * `keepRecentMin` 是**下限**而不是主判据：保留预算可能被一条巨大的消息
+   * 吃光，但「上一句刚说了什么」不能只剩摘要。
    */
-  it('只能退役 1-2 条时不压 —— 一次调用换一条摘要是浪费', () => {
-    for (const n of [11, 12]) {
-      const d = decideCompact({
-        messages: longMessages(n),
-        summaryThroughSeq: 0,
-        historyBudget: 2_000,
-      })
-      expect(d.compact, `${n} 条时不该压`).toBe(false)
-      expect(d.reason).toMatch(/只能退役 \d+ 条/)
-      expect(d.reason).toMatch(/不值得调一次模型/)
-    }
-  })
-
-  it('够 minRetire 就压 —— 边界在 retireCount 上，不在总条数上', () => {
+  it('保留预算被一条大消息吃光时，仍然保住 keepRecentMin 条', () => {
     const d = decideCompact({
-      messages: longMessages(13),
+      messages: [
+        msg(1, 'user', '旧'.repeat(3_000)),
+        msg(2, 'assistant', '旧回复'.repeat(1_000)),
+        msg(3, 'user', '巨大的粘贴'.repeat(4_000)),
+        msg(4, 'assistant', '短回复'),
+      ],
       summaryThroughSeq: 0,
-      historyBudget: 2_000,
+      historyBudget: 4_000,
+      policy: POLICY,
     })
     expect(d.compact).toBe(true)
-    expect(d.throughSeq).toBe(3)
+    // 第 3、4 条被保住（至少 2 条），退役 1-2
+    expect(d.throughSeq).toBe(2)
   })
 
-  it('手动压缩把 minRetire 降到 1 —— 语义是「我现在就要压」', () => {
+  it('省不到 minRetireTokens 就不压 —— 值不值得取决于 token 不是条数', () => {
     const d = decideCompact({
-      messages: longMessages(11),
+      messages: [
+        msg(1, 'user', '小'),
+        msg(2, 'assistant', '小'),
+        msg(3, 'user', '巨大'.repeat(10_000)),
+        msg(4, 'assistant', '短'),
+      ],
       summaryThroughSeq: 0,
-      historyBudget: 2_000,
-      policy: { triggerRatio: 0, keepRecent: 10, minRetire: 1 },
+      historyBudget: 4_000,
+      policy: { ...POLICY, minRetireTokens: 5_000 },
     })
-    expect(d.compact).toBe(true)
+    // 能退役的只有前两条小消息 —— 省不下 5000 tok
+    expect(d.compact).toBe(false)
+    expect(d.reason).toMatch(/只能退役 \d+ 条 \/ \d+ tok/)
+    expect(d.reason).toMatch(/不值得调一次模型/)
   })
 
-  /**
-   * 「压缩也救不了」的真实形状：退役完之后，**留下的那几条本身**就超预算
-   * （贴了一大段日志）。这时压缩会成功，但装配器仍然要裁剪 —— 必须说出来，
-   * 否则人会以为压缩过就够了。
-   *
-   * 原来这里有个分支叫「单条消息过大，压缩无从下手」，但它的条件
-   * `retireCount <= 0` 等价于 `fresh.length <= keepRecent` —— 纯粹是条数，
-   * 与大小毫无关系。**那句话从来没描述过它自己的条件**，而且确实在一个
-   * 4 条消息、40 tok 的会话上被打出来过。已删掉。
-   */
-  it('保留的消息本身就超预算时，压缩成功但明说仍会裁剪', () => {
-    const messages = longMessages(20, 4000)
+  it('全都在保留窗口内时明说「没有可退役的」', () => {
     const d = decideCompact({
-      messages,
+      messages: [msg(1, 'user', '巨大'.repeat(10_000)), msg(2, 'assistant', '短')],
+      summaryThroughSeq: 0,
+      historyBudget: 4_000,
+      policy: POLICY,
+    })
+    expect(d.compact).toBe(false)
+    expect(d.reason).toMatch(/没有可退役的/)
+  })
+
+  it('留下的部分本身就超预算时，压缩成功但明说仍会裁剪', () => {
+    const d = decideCompact({
+      messages: longMessages(30, 4_000),
       summaryThroughSeq: 0,
       historyBudget: 500,
-      policy: { triggerRatio: 0.7, keepRecent: 10, minRetire: 3 },
+      policy: POLICY,
     })
     expect(d.compact).toBe(true)
-    expect(d.reason).toMatch(/保留的 10 条本身就占 \d+ tok/)
     expect(d.reason).toMatch(/仍会裁剪/)
-  })
-
-  it('留下的部分放得进预算时不加那句提醒', () => {
-    const messages = longMessages(20, 20)
-    const d = decideCompact({
-      messages,
-      summaryThroughSeq: 0,
-      historyBudget: 4_000,
-      policy: { triggerRatio: 0.01, keepRecent: 10, minRetire: 3 },
-    })
-    expect(d.compact).toBe(true)
-    expect(d.reason).not.toMatch(/仍会裁剪/)
-  })
-
-  /**
-   * 这两种情况原来共用一句「单条消息过大，压缩无从下手」。
-   * 实测在一个 4 条消息、总共 40 tok 的会话上也打出了那句话
-   * （手动压缩把 triggerRatio 设成 0，token 阈值形同虚设）——
-   * 40 tok 显然不是「单条过大」。**说错原因的诊断会把人带去改错的东西。**
-   */
-  it('消息数少于 keepRecent 时说的是「没有可退役的」，不是「单条过大」', () => {
-    const messages = longMessages(4, 10)
-    const d = decideCompact({
-      messages,
-      summaryThroughSeq: 0,
-      historyBudget: 4_000,
-      // 手动压缩用的那份策略
-      policy: { triggerRatio: 0, keepRecent: 10, minRetire: 1 },
-    })
-    expect(d.compact).toBe(false)
-    expect(d.reason).toMatch(/只有 4 条/)
-    expect(d.reason).toMatch(/没有可退役的/)
-    expect(d.reason).not.toMatch(/单条消息过大/)
-    // 而且给出下一步
-    expect(d.reason).toMatch(/--keep/)
   })
 })
 
@@ -285,7 +287,7 @@ function config(): NucleusConfig {
 let n: Nucleus
 
 /** 压缩阈值调得很低，否则一个测试要灌几十轮才触发 */
-const TEST_POLICY = { triggerRatio: 0.2, keepRecent: 4, minRetire: 1 }
+const TEST_POLICY = { triggerRatio: 0.2, keepRecentRatio: 0.15, keepRecentMin: 2, minRetireTokens: 1 }
 
 beforeEach(async () => {
   n = await boot({
@@ -439,7 +441,7 @@ describe('手动压缩（conv compact）', () => {
 
     const msgs = await n.conversations.recent(conv.id, 500)
     const compactor = new Compactor(n.conversations, n.runner.router, n.events, n.db, {
-      policy: { triggerRatio: 0, keepRecent: 2, minRetire: 1 },
+      policy: { triggerRatio: 0, keepRecentRatio: 0, keepRecentMin: 2, minRetireTokens: 1 },
     })
     const r = await compactor.maybeCompact({
       conversationId: conv.id,
@@ -472,7 +474,7 @@ describe('手动压缩（conv compact）', () => {
       `select count(*)::int n from run_events where kind like 'compact.%'`,
     )
     const compactor = new Compactor(n.conversations, n.runner.router, n.events, n.db, {
-      policy: { triggerRatio: 0, keepRecent: 2, minRetire: 1 },
+      policy: { triggerRatio: 0, keepRecentRatio: 0, keepRecentMin: 2, minRetireTokens: 1 },
     })
     const r = await compactor.maybeCompact({
       conversationId: conv.id,

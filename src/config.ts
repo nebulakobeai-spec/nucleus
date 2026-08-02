@@ -120,15 +120,22 @@ export interface NucleusConfig {
     compact?: {
       /** 历史占预算的比例超过它就压缩。默认 0.7 */
       triggerRatio?: number
-      /** 压缩后保留最近多少条原文。默认 10 */
-      keepRecent?: number
       /**
-       * **要退役的条数**少于这个值就不压。默认 3。
+       * 保留最近多少 **token** 的原文（占历史预算的比例）。默认 0.3。
        *
-       * 盯的是 retireCount 而不是总条数 —— 「11 条、保留 10 条 → 退役 1 条」
-       * 那种一次调用换一条摘要的浪费，只有这样才挡得住。
+       * 按 token 而不是条数：一条粘贴的日志可能顶几十条对话，
+       * 「最近 10 条」在那种情况下能占满整个窗口。
        */
-      minRetire?: number
+      keepRecentRatio?: number
+      /** 无论如何至少保留几条原文。默认 2 —— 「上一句刚说了什么」不能只剩摘要 */
+      keepRecentMin?: number
+      /**
+       * 要退役的 **token** 少于这个值就不压。默认 2000。
+       *
+       * 值不值得调一次模型（以及付出一次不可逆的信息损失）取决于省多少 token，
+       * 与条数无关：退役 3 条小消息省不下什么，退役 1 条巨大的日志能省很多。
+       */
+      minRetireTokens?: number
     }
     /**
      * 单次模型请求的超时（毫秒），可被 model 上的 `timeoutMs` 覆盖。

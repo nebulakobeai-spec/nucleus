@@ -109,6 +109,19 @@ export class ModelRouter {
     return Number.isFinite(min) ? min : assumed
   }
 
+  /**
+   * 这条链上**最大**的输出上限。
+   *
+   * 窗口取链上最小值（降级到小窗口模型时上下文还得放得进去），
+   * 输出上限取**最大**值 —— 两个方向都保守。降级到一个配了更大 maxTokens 的
+   * 模型时，如果按小的那个留余量，它一吐长就撞窗口。
+   */
+  maxOutputTokensFor(chain: string[], assumed: number): number {
+    let max = 0
+    for (const k of chain) max = Math.max(max, this.models.get(k)?.maxTokens ?? assumed)
+    return max > 0 ? max : assumed
+  }
+
   /** 逐次调用的用量明细 —— usage_log 建了从来没人写 */
   async #recordUsage(
     cfg: ModelConfig,

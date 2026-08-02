@@ -1,7 +1,8 @@
 import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { Compactor } from '../runtime/compactor.js'
-import { historyBudgetFor } from '../runtime/worker.js'
+import { historyBudgetOf } from '../runtime/worker.js'
+import { describeBudget } from '../context/budget.js'
 import {
   compressionRatio,
   decideCompact,
@@ -182,14 +183,16 @@ export async function convShow(
  * triggerRatio: 0）。同一个情况两个互相矛盾的原因，两个都没说对。
  */
 function manualPolicy(flags: Record<string, string | true>): CompactPolicy {
+  const keep = strFlag(flags, 'keep')
   return {
     // 命令的语义是「现在压」，不是「够了就压」
     triggerRatio: 0,
-    // 仍然保留最近几条原文：摘要替代不了「上一句刚说了什么」
-    keepRecent: Number(strFlag(flags, 'keep') ?? 10),
-    // 手动触发时 1 条也压 —— 命令的语义是「我现在就要压」，
-    // 「不值得为此调一次模型」的判断该由你来做，不是替你做
-    minRetire: 1,
+    // 手动触发时不按 token 比例留 —— 你给了 --keep N 就是要留 N 条
+    keepRecentRatio: keep === undefined ? DEFAULT_COMPACT_POLICY.keepRecentRatio : 0,
+    keepRecentMin: keep === undefined ? DEFAULT_COMPACT_POLICY.keepRecentMin : Number(keep),
+    // 手动触发时省 1 tok 也压 —— 命令的语义是「我现在就要压」，
+    // 「值不值得」的判断该由你来做，不是替你做
+    minRetireTokens: 1,
   }
 }
 
@@ -202,10 +205,9 @@ async function printWhyNot(
   const conv = (await n.conversations.get(convId))!
   const msgs = await n.conversations.recent(convId, 500)
   const chain = n.config.defaults.modelChain
-  const window = n.worker.agentSpecs.get(conv.agentId)
-    ? n.runner.contextWindowFor(chain)
-    : n.config.defaults.assumedContextWindow
-  const budget = historyBudgetFor(window)
+  // 与运行时同一份预算 —— 按模型算，不用常量
+  const budget = n.runner.budgetFor(chain)
+  const window = budget.contextWindow
 
   const d = decideCompact({
     messages: msgs.map((m) => ({
@@ -213,25 +215,29 @@ async function printWhyNot(
       message: n.conversations.toChatMessages([m])[0]!,
     })),
     summaryThroughSeq: conv.summaryThroughSeq,
-    historyBudget: budget,
+    historyBudget: historyBudgetOf(budget),
     policy:
       policy ??
       // 没指定就用「自动压缩会怎么判」的那份
       {
         triggerRatio: n.config.runtime.compact?.triggerRatio ?? DEFAULT_COMPACT_POLICY.triggerRatio,
-        keepRecent: n.config.runtime.compact?.keepRecent ?? DEFAULT_COMPACT_POLICY.keepRecent,
-        minRetire: n.config.runtime.compact?.minRetire ?? DEFAULT_COMPACT_POLICY.minRetire,
+        keepRecentRatio:
+          n.config.runtime.compact?.keepRecentRatio ?? DEFAULT_COMPACT_POLICY.keepRecentRatio,
+        keepRecentMin:
+          n.config.runtime.compact?.keepRecentMin ?? DEFAULT_COMPACT_POLICY.keepRecentMin,
+        minRetireTokens:
+          n.config.runtime.compact?.minRetireTokens ?? DEFAULT_COMPACT_POLICY.minRetireTokens,
       },
     tokenizer: heuristicTokenizer,
   })
 
   line()
   line(`${d.compact ? ICON.ok : ICON.info} ${d.reason}`)
-  line(c.gray(`  窗口 ${compactTokens(window)} · 留给历史 ${compactTokens(budget)}`))
+  // 预算整行打出来 —— 「为什么阈值是这个数」要能一眼看到来源
+  line(c.gray(`  ${describeBudget(budget)}`))
   if (!d.compact) {
-    // 阈值高到实际用不到，是真实存在的情况 —— 说清怎么调
     line(c.gray('  想现在压：nucleus conv compact <id>'))
-    line(c.gray('  想让自动压缩更早触发：在配置里设 runtime.compact.triggerRatio（默认 0.7）'))
+    line(c.gray('  想让自动压缩更早触发：配置里设 runtime.compact.triggerRatio（默认 0.7）'))
   }
 }
 
@@ -358,7 +364,7 @@ export async function convCompact(
 
     const msgs = await n.conversations.recent(r.id, 500)
     const chain = n.config.defaults.modelChain
-    const window = n.runner.contextWindowFor(chain)
+    const budget = n.runner.budgetFor(chain)
 
     heading('压缩会话历史')
     line(c.gray(`${before.lastSeq} 条消息 · 已覆盖到 seq ${before.summaryThroughSeq}`))
@@ -375,7 +381,7 @@ export async function convCompact(
     const result = await compactor.maybeCompact({
       conversationId: r.id,
       messages: msgs,
-      historyBudget: historyBudgetFor(window),
+      historyBudget: historyBudgetOf(budget),
       modelChain: chain,
       // 手动压缩不属于任何 attempt —— 不借别人的（借了就撞
       // unique(run_attempt_id, seq)）。持久记录在 compactions 表里

@@ -24,7 +24,8 @@ import {
   type ResultSchemaSpec,
   type ValidationFailure,
 } from './result-schema.js'
-import { assemble, DEFAULT_BUDGET } from '../context/assemble.js'
+import { assemble } from '../context/assemble.js'
+import { contextBudgetFor, type ContextBudget } from '../context/budget.js'
 import { envelopeSizes } from './envelope.js'
 import { decideRetry, DEFAULT_RETRY_POLICY, type RetryDecision, type RetryPolicy } from './retry.js'
 import type { Permission } from './permissions.js'
@@ -124,6 +125,14 @@ export interface RunOutcome {
  *  - 心跳由**本进程写库**证明，不是模型自述（§3.6）
  *  - 终态写入带 fence token，被判死的 worker 写不进去（§3.4）
  */
+/**
+ * 模型没声明 maxTokens 时的兜底输出上限（**token**）。
+ *
+ * 名字带 TOKENS 是因为 tools.js 里已经有个 `DEFAULT_MAX_OUTPUT`，
+ * 那个是「工具输出的**字符**上限」—— 同名不同义最容易在几个月后被搞混。
+ */
+const FALLBACK_MAX_OUTPUT_TOKENS = 4_096
+
 export class Runner {
   #store: RunStore
   #loopThreshold: number
@@ -170,6 +179,21 @@ export class Runner {
    */
   contextWindowFor(chain: string[]): number {
     return this.router.contextWindowFor(chain, this.#assumedContextWindow)
+  }
+
+  /**
+   * 这条链的上下文预算 —— **按模型算，不用常量**。
+   *
+   * 暴露出来是为了让压缩判定与装配用**同一份**预算。两处各算一份的话，
+   * 阈值和实际裁剪会对不上，而那种偏差只在长会话里才显形。
+   */
+  budgetFor(chain: string[]): ContextBudget {
+    return contextBudgetFor(
+      this.router.contextWindowFor(chain, this.#assumedContextWindow),
+      // 输出上限取链上最大值 —— 降级到配了更大 maxTokens 的模型时，
+      // 按小的那个留余量会让它一吐长就撞窗口
+      this.router.maxOutputTokensFor(chain, FALLBACK_MAX_OUTPUT_TOKENS),
+    )
   }
 
   async execute(input: {
@@ -290,7 +314,11 @@ export class Runner {
     // systemPrompt 整体当作不可变前缀传入：它由 buildSystemPrompt 拼成
     // （契约 + identity + policy），本身已经逐字节稳定，这是 prompt cache
     // 命中的前提，不能在这里掺入任何随回合变化的东西。
-    const window = this.router.contextWindowFor(agent.modelChain, this.#assumedContextWindow)
+    // 预算按模型算：窗口取链上最小、输出上限取链上最大，其余各段按比例。
+    // 原来这里是 `{ ...DEFAULT_BUDGET, contextWindow: window }` —— 那会让
+    // 1M 窗口的模型仍然只用 40k 历史（DEFAULT_BUDGET 里的硬上限）
+    const budget = this.budgetFor(agent.modelChain)
+    const window = budget.contextWindow
     const assembled = assemble({
       contract: agent.systemPrompt,
       identity: '',
@@ -302,11 +330,14 @@ export class Runner {
       // 只剩要求的那一版：整个丢掉摘要会连用户约束一起丢
       summaryMinimal: input.summaryMinimal ?? null,
       input: input.input,
-      budget: { ...DEFAULT_BUDGET, contextWindow: window },
+      budget,
     })
 
     await this.events.emit(attemptId, runId, 'context.assembled', {
       window,
+      // 预算本身要落进事件流 —— 「为什么这一轮裁得这么狠」要能回答，
+      // 而那取决于当时算出来的预算，不是某个常量
+      budget,
       breakdown: assembled.breakdown,
       degradations: assembled.degradations,
       droppedMessages: assembled.droppedMessages,
