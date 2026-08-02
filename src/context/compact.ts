@@ -220,14 +220,25 @@ export interface CompactPolicy {
   triggerRatio: number
   /** 压缩后保留最近多少条原文。摘要替代不了「上一句刚说了什么」 */
   keepRecent: number
-  /** 少于这个条数不值得调一次模型 */
-  minMessages: number
+  /**
+   * **要退役的条数**少于这个值就不压 —— 不值得为此调一次模型。
+   *
+   * 原来这个参数叫 `minMessages`，作用在「未摘要的总条数」上。那是错的对象，
+   * 而且**它从来不改变结果**：`fresh < minMessages(8)` 被拒的情况，
+   * 一定也会被「`fresh <= keepRecent(10)` 没有可退役的」拒掉 ——
+   * 后者严格更强。所以它唯一的作用是换一句措辞，而且那句还不如后者准确。
+   *
+   * 真正没被挡住的是另一头：`fresh = 11, keepRecent = 10` → 退役 **1 条**。
+   * 调一次模型给一条消息做摘要，纯浪费。盯 retireCount 才挡得住。
+   */
+  minRetire: number
 }
 
 export const DEFAULT_COMPACT_POLICY: CompactPolicy = {
   triggerRatio: 0.7,
   keepRecent: 10,
-  minMessages: 8,
+  // 退役少于 3 条不值得一次调用 —— 省下的 token 抵不上那次调用的成本与延迟
+  minRetire: 3,
 }
 
 /**
@@ -249,11 +260,34 @@ export function decideCompact(input: {
 
   // 只考虑还没被摘要覆盖的部分
   const fresh = input.messages.filter((m) => m.seq > input.summaryThroughSeq)
-  if (fresh.length < policy.minMessages) {
+
+  /**
+   * 保留最近 keepRecent 条原文 —— 摘要替代不了「上一句刚说了什么」。
+   *
+   * 所以真正的问题从一开始就是「**能退役几条**」，而不是「总共有几条」。
+   * 原来先判 `fresh.length < minMessages` 再判 `retireCount <= 0`，
+   * 而前者被后者严格包含（keepRecent ≥ minMessages 时永远如此）——
+   * 那一档从来不改变结果，只换一句措辞。合成一处。
+   */
+  const retireCount = fresh.length - policy.keepRecent
+  if (retireCount <= 0) {
     return {
       compact: false,
       throughSeq: 0,
-      reason: `未摘要的历史只有 ${fresh.length} 条，不值得调一次模型`,
+      reason:
+        `只有 ${fresh.length} 条未摘要的消息，而要保留最近 ${policy.keepRecent} 条 ——` +
+        ` 没有可退役的（--keep 可以调小，但这么短的对话压缩没有意义）`,
+    }
+  }
+  if (retireCount < policy.minRetire) {
+    // 这一档是原来漏掉的：11 条、保留 10 条 → 退役 1 条，
+    // 调一次模型给一条消息做摘要，省下的 token 抵不上成本
+    return {
+      compact: false,
+      throughSeq: 0,
+      reason:
+        `只能退役 ${retireCount} 条（共 ${fresh.length} 条，保留最近 ${policy.keepRecent} 条）` +
+        `，少于 ${policy.minRetire} 条不值得调一次模型`,
     }
   }
 
@@ -265,29 +299,6 @@ export function decideCompact(input: {
       throughSeq: 0,
       // 数字要给出来 —— 「为什么没压缩」和「为什么压缩了」一样需要能回答
       reason: `历史 ${tokens} tok 未到阈值 ${threshold}（预算 ${input.historyBudget} × ${policy.triggerRatio}）`,
-    }
-  }
-
-  // 保留最近 keepRecent 条原文：摘要替代不了「上一句刚说了什么」
-  const retireCount = fresh.length - policy.keepRecent
-  if (retireCount <= 0) {
-    /**
-     * 这里只有一种情况：**未摘要的消息还不够多**。
-     *
-     * 原来这个分支的文案是「单条消息过大，压缩无从下手」，理由写的是
-     * 「少量消息就吃掉了整个预算」。但条件 `retireCount <= 0` 等价于
-     * `fresh.length <= keepRecent` —— 纯粹是条数，与消息大小毫无关系。
-     * 也就是说那句话**从来没描述过它自己的条件**，而且它确实在一个
-     * 4 条消息、总共 40 tok 的会话上被打了出来。
-     *
-     * 说错原因的诊断会把人带去改错的东西，比不给原因更糟。
-     */
-    return {
-      compact: false,
-      throughSeq: 0,
-      reason:
-        `只有 ${fresh.length} 条未摘要的消息，而要保留最近 ${policy.keepRecent} 条 ——` +
-        ` 没有可退役的（--keep 可以调小，但这么短的对话压缩没有意义）`,
     }
   }
 

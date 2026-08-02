@@ -187,8 +187,9 @@ function manualPolicy(flags: Record<string, string | true>): CompactPolicy {
     triggerRatio: 0,
     // 仍然保留最近几条原文：摘要替代不了「上一句刚说了什么」
     keepRecent: Number(strFlag(flags, 'keep') ?? 10),
-    // 但不为两条消息调一次模型
-    minMessages: 2,
+    // 手动触发时 1 条也压 —— 命令的语义是「我现在就要压」，
+    // 「不值得为此调一次模型」的判断该由你来做，不是替你做
+    minRetire: 1,
   }
 }
 
@@ -219,7 +220,7 @@ async function printWhyNot(
       {
         triggerRatio: n.config.runtime.compact?.triggerRatio ?? DEFAULT_COMPACT_POLICY.triggerRatio,
         keepRecent: n.config.runtime.compact?.keepRecent ?? DEFAULT_COMPACT_POLICY.keepRecent,
-        minMessages: n.config.runtime.compact?.minMessages ?? DEFAULT_COMPACT_POLICY.minMessages,
+        minRetire: n.config.runtime.compact?.minRetire ?? DEFAULT_COMPACT_POLICY.minRetire,
       },
     tokenizer: heuristicTokenizer,
   })
@@ -365,7 +366,7 @@ export async function convCompact(
     line()
 
     // 手动触发时把阈值降到 0：命令的语义是「现在压」，不是「够了就压」。
-    // keepRecent / minMessages 仍然生效 —— 前者保证「上一句刚说了什么」还在，
+    // keepRecent 仍然生效 —— 保证「上一句刚说了什么」还在原文里，
     // 后者避免为两条消息调一次模型
     const compactor = new Compactor(n.conversations, n.runner.router, n.events, n.db, {
       policy: manualPolicy(flags),

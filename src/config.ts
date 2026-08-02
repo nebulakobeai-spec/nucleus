@@ -122,8 +122,13 @@ export interface NucleusConfig {
       triggerRatio?: number
       /** 压缩后保留最近多少条原文。默认 10 */
       keepRecent?: number
-      /** 少于这个条数不值得调一次模型。默认 8 */
-      minMessages?: number
+      /**
+       * **要退役的条数**少于这个值就不压。默认 3。
+       *
+       * 盯的是 retireCount 而不是总条数 —— 「11 条、保留 10 条 → 退役 1 条」
+       * 那种一次调用换一条摘要的浪费，只有这样才挡得住。
+       */
+      minRetire?: number
     }
     /**
      * 单次模型请求的超时（毫秒），可被 model 上的 `timeoutMs` 覆盖。

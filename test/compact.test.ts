@@ -45,14 +45,22 @@ function longMessages(n: number, chars = 400) {
 }
 
 describe('decideCompact（纯判定）', () => {
-  it('消息太少就不压缩 —— 不值得一次模型调用', () => {
+  /**
+   * 这条测试原来叫「消息太少就不压缩 —— 不值得一次模型调用」，断言
+   * `reason` 含「不值得」。但 3 条消息的**真实原因**是「不够 10 条，
+   * 没有可退役的」—— 那句「不值得调一次模型」从来没描述过它自己的条件。
+   *
+   * 测试名与断言一起指向了错误的原因，而它照样是绿的。改名并改断言。
+   */
+  it('消息不够 keepRecent 时不压 —— 原因是「没有可退役的」', () => {
     const d = decideCompact({
       messages: longMessages(3),
       summaryThroughSeq: 0,
       historyBudget: 100,
     })
     expect(d.compact).toBe(false)
-    expect(d.reason).toMatch(/不值得/)
+    expect(d.reason).toMatch(/只有 3 条/)
+    expect(d.reason).toMatch(/没有可退役的/)
   })
 
   it('没到阈值就不压缩，而且**把数字说出来**', () => {
@@ -77,9 +85,52 @@ describe('decideCompact（纯判定）', () => {
   it('只看没被摘要覆盖的部分 —— 否则每轮都会重压一遍', () => {
     const messages = longMessages(30)
     const d = decideCompact({ messages, summaryThroughSeq: 25, historyBudget: 2_000 })
-    // 只剩 5 条未摘要，低于 minMessages
+    // 只剩 5 条未摘要，而要保留最近 10 条 —— 没有可退役的
     expect(d.compact).toBe(false)
     expect(d.reason).toMatch(/只有 5 条/)
+  })
+
+  /**
+   * **只能退役 1 条时不该调模型。**
+   *
+   * 这一档原来漏掉了：`fresh = 11, keepRecent = 10` → 退役 1 条，
+   * 调一次模型给一条消息做摘要，省下的 token 抵不上那次调用的成本与延迟。
+   *
+   * 原来的 `minMessages` 盯的是**总条数**，而那个判断被
+   * 「retireCount <= 0」严格包含（keepRecent ≥ minMessages 时永远如此）——
+   * 所以它从来不改变结果，只换一句措辞。真正没被挡住的是这一头。
+   */
+  it('只能退役 1-2 条时不压 —— 一次调用换一条摘要是浪费', () => {
+    for (const n of [11, 12]) {
+      const d = decideCompact({
+        messages: longMessages(n),
+        summaryThroughSeq: 0,
+        historyBudget: 2_000,
+      })
+      expect(d.compact, `${n} 条时不该压`).toBe(false)
+      expect(d.reason).toMatch(/只能退役 \d+ 条/)
+      expect(d.reason).toMatch(/不值得调一次模型/)
+    }
+  })
+
+  it('够 minRetire 就压 —— 边界在 retireCount 上，不在总条数上', () => {
+    const d = decideCompact({
+      messages: longMessages(13),
+      summaryThroughSeq: 0,
+      historyBudget: 2_000,
+    })
+    expect(d.compact).toBe(true)
+    expect(d.throughSeq).toBe(3)
+  })
+
+  it('手动压缩把 minRetire 降到 1 —— 语义是「我现在就要压」', () => {
+    const d = decideCompact({
+      messages: longMessages(11),
+      summaryThroughSeq: 0,
+      historyBudget: 2_000,
+      policy: { triggerRatio: 0, keepRecent: 10, minRetire: 1 },
+    })
+    expect(d.compact).toBe(true)
   })
 
   /**
@@ -98,7 +149,7 @@ describe('decideCompact（纯判定）', () => {
       messages,
       summaryThroughSeq: 0,
       historyBudget: 500,
-      policy: { triggerRatio: 0.7, keepRecent: 10, minMessages: 8 },
+      policy: { triggerRatio: 0.7, keepRecent: 10, minRetire: 3 },
     })
     expect(d.compact).toBe(true)
     expect(d.reason).toMatch(/保留的 10 条本身就占 \d+ tok/)
@@ -111,7 +162,7 @@ describe('decideCompact（纯判定）', () => {
       messages,
       summaryThroughSeq: 0,
       historyBudget: 4_000,
-      policy: { triggerRatio: 0.01, keepRecent: 10, minMessages: 8 },
+      policy: { triggerRatio: 0.01, keepRecent: 10, minRetire: 3 },
     })
     expect(d.compact).toBe(true)
     expect(d.reason).not.toMatch(/仍会裁剪/)
@@ -130,7 +181,7 @@ describe('decideCompact（纯判定）', () => {
       summaryThroughSeq: 0,
       historyBudget: 4_000,
       // 手动压缩用的那份策略
-      policy: { triggerRatio: 0, keepRecent: 10, minMessages: 2 },
+      policy: { triggerRatio: 0, keepRecent: 10, minRetire: 1 },
     })
     expect(d.compact).toBe(false)
     expect(d.reason).toMatch(/只有 4 条/)
@@ -234,7 +285,7 @@ function config(): NucleusConfig {
 let n: Nucleus
 
 /** 压缩阈值调得很低，否则一个测试要灌几十轮才触发 */
-const TEST_POLICY = { triggerRatio: 0.2, keepRecent: 4, minMessages: 6 }
+const TEST_POLICY = { triggerRatio: 0.2, keepRecent: 4, minRetire: 1 }
 
 beforeEach(async () => {
   n = await boot({
@@ -388,7 +439,7 @@ describe('手动压缩（conv compact）', () => {
 
     const msgs = await n.conversations.recent(conv.id, 500)
     const compactor = new Compactor(n.conversations, n.runner.router, n.events, n.db, {
-      policy: { triggerRatio: 0, keepRecent: 2, minMessages: 2 },
+      policy: { triggerRatio: 0, keepRecent: 2, minRetire: 1 },
     })
     const r = await compactor.maybeCompact({
       conversationId: conv.id,
@@ -421,7 +472,7 @@ describe('手动压缩（conv compact）', () => {
       `select count(*)::int n from run_events where kind like 'compact.%'`,
     )
     const compactor = new Compactor(n.conversations, n.runner.router, n.events, n.db, {
-      policy: { triggerRatio: 0, keepRecent: 2, minMessages: 2 },
+      policy: { triggerRatio: 0, keepRecent: 2, minRetire: 1 },
     })
     const r = await compactor.maybeCompact({
       conversationId: conv.id,
