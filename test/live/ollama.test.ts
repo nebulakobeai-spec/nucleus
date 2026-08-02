@@ -9,6 +9,7 @@ import { migrate } from '../../src/db/migrate.js'
 import { FakeClock, FakeIds, type Deps } from '../../src/seams.js'
 import { validateResult } from '../../src/runtime/result-schema.js'
 import { errorSpec } from '../../src/errors.js'
+import { findStuckRuns, findUnknownToolOutcomes } from '../../src/runtime/stuck.js'
 import { resultJsonSchema } from '../../src/runtime/result-schema.js'
 
 /**
@@ -128,42 +129,23 @@ const CAPABILITY_FAILURES = [
 /**
  * 非终态本身不是问题 —— **没有东西会推动它**才是。
  *
- * 「任务挂住却看不出来」是这个项目要修的核心问题，所以这条检查要区分：
- *  - 子 run 在 `waiting_retry`、队列里有一条未来才可执行的记录 → 正常
- *  - 父 run 在 `waiting_children`、而它等的子 run 还活着 → 正常
- *  - 非终态但既没有队列记录也没有活着的子 run → **真的挂住了**
+ * 判据放在 `src/runtime/stuck.ts`，不写在这里。
  *
- * 原来这里写的是「不能有 waiting 状态的 wake」，那会把「正在等一次已排好的
- * 重试」误判成故障 —— 实测就撞上了（`orchestrator(waiting_children) →
- * researcher(waiting_retry)`）。
+ * 教训：这段 SQL 原来就住在这个文件里，而这个文件在开发机上跑不了
+ * （Node 出网是 EPERM）—— 于是它引用了两个**根本不存在的列**
+ * （`tool_invocations.args`、`run_queue.run_attempt_id`），一路带到部署机
+ * 才炸。**跑不到的代码不该放判据。** 挪进 src 之后由普通测试覆盖。
+ *
+ * 而且「有 run 挂住了吗」本来就该是产品能回答的一句话，不是测试的私有知识 ——
+ * 它现在也接进了 `nucleus doctor`。
  */
 async function expectNoStuckRuns(n: Nucleus, rootRunId: string): Promise<void> {
-  const stuck = await n.db.query<{ id: string; agent_id: string; status: string }>(
-    `select r.id, r.agent_id, r.status from runs r
-      where r.root_run_id = $1
-        and r.status not in ('succeeded','failed','cancelled')
-        -- 队列里有它（available_at 可以在未来）
-        and not exists (select 1 from run_queue q
-                          join run_attempts a on a.id = q.run_attempt_id
-                         where a.run_id = r.id)
-        -- 或者它在等还活着的子 run
-        and not exists (select 1 from runs c
-                         where c.parent_run_id = r.id
-                           and c.status not in ('succeeded','failed','cancelled'))`,
-    [rootRunId],
-  )
-  if (stuck.rows.length) {
-    // 挂住时把每个 attempt 的错误码打出来 —— 否则下次还是只能看到状态
-    const detail = await n.db.query<{ agent_id: string; attempt_no: number; status: string; error_code: string | null }>(
-      `select r.agent_id, a.attempt_no, a.status, a.error_code
-         from run_attempts a join runs r on r.id = a.run_id
-        where r.root_run_id = $1 order by a.created_at`,
-      [rootRunId],
-    )
-    console.log('[live] attempt 明细：', JSON.stringify(detail.rows))
+  const stuck = await findStuckRuns(n.db, rootRunId)
+  if (stuck.length) {
+    console.log('[live] 挂住的 run：', JSON.stringify(stuck))
   }
   expect(
-    stuck.rows.map((r) => `${r.agent_id}(${r.status})`),
+    stuck.map((r) => `${r.agentId}(${r.status})${r.lastErrorCode ? ` ${r.lastErrorCode}` : ''}`),
     '有 run 非终态、且既没有排队也没有在等子 run —— 真的挂住了',
   ).toEqual([])
 }
@@ -395,17 +377,24 @@ describe.skipIf(!reachable)('真模型驱动完整编排', () => {
         ).toContain(root.errorCode)
       }
 
-      // 最要紧的一条：跑完之后**不能有悬挂状态**。
-      // 「任务挂住却看不出来」是这个项目要修的核心问题。
-      for (const [what, sql] of [
-        ['未终态 attempt', `select count(*)::int n from run_attempts where status in ('queued','running')`],
-        ['残留队列', `select count(*)::int n from run_queue`],
-        ['未触发的 wake', `select count(*)::int n from wake_records where status = 'waiting'`],
-        ['结果未知的工具调用', `select count(*)::int n from tool_invocations where outcome is null`],
-      ] as const) {
-        const r = await n!.db.query<{ n: number }>(sql)
-        expect(r.rows[0]!.n, what).toBe(0)
-      }
+      /**
+       * 跑完之后**不能有悬挂状态** —— 「任务挂住却看不出来」是这个项目要修的
+       * 核心问题。但判据不能是「队列必须空」：
+       *
+       * 一个 run 在 `waiting_retry` 时，队列里**本来就该有**一条
+       * `available_at` 在未来的记录，而且会有一个 `queued` 的新 attempt。
+       * 按「队列必须空 / 没有 queued attempt」去判，会把**正确的重试行为**
+       * 报成故障。这次没炸只是因为 budget.no_progress 不是 runRetryable，
+       * 恰好没排重试。
+       */
+      await expectNoStuckRuns(n!, runId)
+
+      // 这一条与重试无关，无条件成立：工具调用的结果不该是未知的
+      const unknown = await findUnknownToolOutcomes(n!.db, runId)
+      expect(
+        unknown.map((x) => `${x.toolName}(${x.sideEffectClass})`),
+        '有结果未知的工具调用',
+      ).toEqual([])
 
       // 用量确实被记下来了（真调用不可能是 0）
       const attempts = await n!.runs.listAttempts(runId)
@@ -452,27 +441,26 @@ describe.skipIf(!reachable)('真模型驱动完整编排', () => {
           `先看 nucleus events ${runId} 里 llm.call 的回复内容再判断。`,
       ).toBeGreaterThan(0)
 
-      // 委派了就必须把信封三段填上 —— 缺了 goal 的委派等于没说要干什么
-      const invocations = await n!.db.query<{ args: Record<string, unknown> }>(
-        `select i.args from tool_invocations i
-           join run_attempts a on a.id = i.run_attempt_id
-           join runs r on r.id = a.run_id
-          where r.root_run_id = $1 and i.tool_name = 'delegate'`,
-        [runId],
-      )
-      expect(invocations.rows.length).toBeGreaterThan(0)
-      for (const row of invocations.rows) {
-        const args = row.args
-        console.log(`[live] delegate → ${args['agent']}：${String(args['goal']).slice(0, 60)}`)
-        expect(String(args['agent'] ?? ''), 'delegate 缺 agent').not.toBe('')
-        expect(String(args['goal'] ?? ''), 'delegate 缺 goal').not.toBe('')
+      /**
+       * 信封从**子 run 的 input** 读。
+       *
+       * 实参其实也落库了（`tool_invocations.args_json`，migration 0003 加的）——
+       * 我第一版查的 `i.args` 只是列名写错。但子 run 的 `input` 更值得断言：
+       * 它是**真正到达专家手里的那份信封**，中间过了校验与补默认值，
+       * 而 args_json 是模型交出来的原始参数。要验「专家收到了什么」就该看前者。
+       */
+      for (const child of children) {
+        const env = child.input as { goal?: string; context?: string; acceptance?: string }
+        console.log(
+          `[live] delegate → ${child.agentId}：goal=${String(env.goal ?? '').slice(0, 50)}` +
+            ` · acceptance=${String(env.acceptance ?? '').slice(0, 40)}`,
+        )
+        expect(String(env.goal ?? ''), `${child.agentId} 收到的信封缺 goal`).not.toBe('')
       }
 
-      // 委派之后不能悬挂 —— wake 必须已触发
-      const waiting = await n!.db.query<{ n: number }>(
-        `select count(*)::int n from wake_records where status = 'waiting'`,
-      )
-      expect(waiting.rows[0]!.n, '有未触发的 wake —— 编排者被永久挂起').toBe(0)
+      // 非终态本身是允许的（比如子 run 正在等一次已排好的重试），
+      // 但**必须有东西会推动它** —— 这条才是这个项目的核心不变量
+      await expectNoStuckRuns(n!, runId)
     },
     900_000,
   )

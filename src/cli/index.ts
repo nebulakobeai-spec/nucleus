@@ -16,6 +16,7 @@ import { artifactCat, artifactList } from './artifact.js'
 import { providersCmd } from './providers.js'
 import { rulesCmd } from './rules.js'
 import { ScheduleStore } from '../store/schedules.js'
+import { findStuckRuns, findUnknownToolOutcomes } from '../runtime/stuck.js'
 import { convCompact, convList, convSeed, convShow, convSummary } from './conv.js'
 import {
   scheduleAdd,
@@ -335,6 +336,43 @@ async function doctor(flags: Record<string, string | true>): Promise<number> {
       }
     } catch {
       // schedules 表还没 migrate —— migrate 那条检查会说
+    }
+
+    /**
+     * **有 run 挂住了吗。** 这条是这个项目存在的理由本身。
+     *
+     * 判据不是「队列必须空」—— `waiting_retry` 的 run 队列里本来就该有一条
+     * 未来才可执行的记录。真正的故障形状是：非终态，但既没有排队、
+     * 也没有在等还活着的子 run。
+     */
+    const stuck = await findStuckRuns(n.db)
+    checks.push({
+      name: '悬挂的 run',
+      ok: stuck.length === 0,
+      detail:
+        stuck.length === 0
+          ? '没有'
+          : stuck
+              .map(
+                (s) =>
+                  `${s.id.slice(0, 8)} ${s.agentId}(${s.status})` +
+                  `${s.lastErrorCode ? ` ${s.lastErrorCode}` : ''}`,
+              )
+              .join('；') + ' —— 既没排队也没在等子 run，不会自己恢复',
+    })
+
+    // non_idempotent 的未知结果是「绝不能自动重跑」的那一类，必须人来定
+    const unknownTools = await findUnknownToolOutcomes(n.db)
+    if (unknownTools.length) {
+      const risky = unknownTools.filter((x) => x.sideEffectClass === 'non_idempotent')
+      checks.push({
+        name: '结果未知的工具调用',
+        ok: false,
+        detail:
+          `${unknownTools.length} 条（${risky.length} 条 non_idempotent）：` +
+          unknownTools.slice(0, 3).map((x) => `${x.toolName} in ${x.runId.slice(0, 8)}`).join('、') +
+          (risky.length ? ' —— non_idempotent 的绝不会自动重跑，需要你确认是否已生效' : ''),
+      })
     }
 
     const health = await n.router.health.all()
