@@ -26,6 +26,7 @@ const toRun = (r: any): Run => ({
   errorCode: r.error_code,
   errorDetail: r.error_detail,
   idempotencyKey: r.idempotency_key,
+  scheduleId: r.schedule_id ?? null,
   input: r.input,
   result: r.result,
   resultRef: r.result_ref,
@@ -90,6 +91,8 @@ export interface CreateRunInput {
   taskId?: string | null
   depth?: number
   idempotencyKey?: string | null
+  /** 来自哪条定时任务。用于重入检测与「这个 run 是谁跑的」 */
+  scheduleId?: string | null
   input?: unknown
   deadlineAt?: Date | null
 }
@@ -171,14 +174,14 @@ export class RunStore {
 
   // ── 创建 ──────────────────────────────────────────────
 
-  async createRun(input: CreateRunInput): Promise<Run> {
+  async createRun(input: CreateRunInput, q: Queryable = this.db): Promise<Run> {
     const id = this.deps.ids.uuid()
     const rootRunId = input.rootRunId ?? input.parentRunId ?? id
-    const r = await this.db.query(
+    const r = await q.query(
       `insert into runs
          (id, parent_run_id, root_run_id, conversation_id, task_id, agent_id, depth,
-          idempotency_key, input, deadline_at, created_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11)
+          idempotency_key, input, deadline_at, created_at, schedule_id)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12)
        returning *`,
       [
         id,
@@ -192,6 +195,7 @@ export class RunStore {
         JSON.stringify(input.input ?? {}),
         input.deadlineAt ?? null,
         this.deps.clock.nowIso(),
+        input.scheduleId ?? null,
       ],
     )
     return toRun(r.rows[0])

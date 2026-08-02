@@ -172,6 +172,9 @@ describe('worker 的能力边界', () => {
     const detail = after!.errorDetail as { known?: string[]; hint?: string }
     // 列出现有 agent，省得再去翻配置
     expect(detail.known).toContain('orchestrator')
-    expect(detail.hint).toMatch(/整体替换/)
+    // 提示要指向**真实成因**。曾经写的是「JSON 里的 agents 是整体替换」，
+    // 而现在 JSON 里的 agents 直接被拒 —— 那条提示会把人带去改一个不存在的东西。
+    // 现在的成因只有两个：md 文件被删/改名，或定时任务指向了已删掉的 agent
+    expect(detail.hint).toMatch(/agents\/nonexistent\.md/)
   })
 })

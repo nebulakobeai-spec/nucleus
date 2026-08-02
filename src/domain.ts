@@ -103,6 +103,8 @@ export interface Run {
   errorCode: string | null
   errorDetail: unknown
   idempotencyKey: string | null
+  /** 来自哪条定时任务；手工发起的 run 是 null */
+  scheduleId: string | null
   input: unknown
   result: unknown
   resultRef: string | null

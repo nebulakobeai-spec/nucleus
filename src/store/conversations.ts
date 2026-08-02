@@ -82,10 +82,13 @@ export class ConversationStore {
     private deps: Deps,
   ) {}
 
-  async create(input: { agentId: string; title?: string | null; id?: string }): Promise<Conversation> {
+  async create(
+    input: { agentId: string; title?: string | null; id?: string },
+    q: Queryable = this.db,
+  ): Promise<Conversation> {
     const id = input.id ?? this.deps.ids.uuid()
     const now = this.deps.clock.nowIso()
-    const r = await this.db.query(
+    const r = await q.query(
       `insert into conversations (id, title, agent_id, created_at, updated_at)
        values ($1,$2,$3,$4,$4) returning *`,
       [id, input.title ?? null, input.agentId, now],

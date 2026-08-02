@@ -148,16 +148,32 @@ runner 每 15 秒一条 `UPDATE run_attempts SET heartbeat_at = now()`。零 tok
 
 ## 能力边界即规则
 
-规则不靠 prompt 文本约束，靠**不给工具**：
+规则不靠 prompt 文本约束，靠**不给能力**：
 
-```json
-{
-  "id": "orchestrator",
-  "toolsAllow": ["delegate"]
-}
+```yaml
+---
+name: analyst
+whenToUse: 需要读现有材料做判断、且结论要能被复核时
+permissions: [read, artifact]
+---
 ```
 
-编排者的工具集里只有 `delegate` —— 没有 `write_file`、没有 `exec`。这些工具**根本不会出现在给模型的定义里**，模型看不到就无从调用。这比任何"禁止自己动手"的 prompt 都可靠，且成本为零。
+**permission 是主闸门，工具名单只能再收窄。** 两者是不同的东西：
+
+- **permission** = 「我可以做什么」——`read` / `write` / `artifact` /
+  `execute` / `network` / `delegate` / `user`。这是稳定的、少量的词表。
+- **工具** = 「用什么做」——`write_file`、MCP 的 `github__create_issue`……
+  数量会一直涨，而且大多来自你没写的代码。
+
+所以授权按 permission 授，不按工具名单授 —— 否则每接一个 MCP server 都要回去
+改每个 agent 的白名单，而漏掉一条就是静默放行。工具声明自己需要哪些 permission
+（`requires: Permission[]`），没被覆盖到的工具**根本不会出现在给模型的定义里**，
+模型看不到就无从调用。比任何「禁止自己动手」的 prompt 都可靠，且成本为零。
+
+MCP 工具没在 `mcpPolicies.permissions` 里映射时，它需要 `unclassified` 这个
+哨兵权限 —— 而配置校验**拒绝把它授给任何 agent**。默认拒绝，不是默认放行。
+
+`nucleus agent map` 打出这张矩阵：谁能用哪些工具、少了哪个权限。
 
 需要机械检查的约束走工具前置条件，被拒时**规则原文原样回给模型**（同一份文本，不是搬运）：
 
@@ -165,6 +181,59 @@ runner 每 15 秒一条 `UPDATE run_attempts SET heartbeat_at = now()`。零 tok
 { "ok": false, "rule": "fs.workdir-boundary",
   "message": "路径必须是工作目录内的相对路径，不允许绝对路径或 .. 穿越。" }
 ```
+
+---
+
+## 定时任务
+
+```bash
+nucleus schedule add 每日简报 --cron "30 8 * * *" --tz Asia/Shanghai \
+  --agent analyst --goal "汇总昨天的进展"
+```
+
+```
+✓ 已加计划 每日简报
+  每天 8:30（Asia/Shanghai）
+  下次触发 2026-08-03 08:30 Asia/Shanghai 21h 后
+  交给 analyst
+  停机期间错过的不补（--catch-up 可开）
+
+要有 worker 在跑才会执行 —— 开一个 nucleus chat 放着即可。
+接下来：2026-08-03 08:30 · 2026-08-04 08:30 · 2026-08-05 08:30
+```
+
+不需要额外进程：`worker.tick()` 里就地触发，和 reconciler 同一个位置 ——
+「定时」的本质就是到点往队列塞一个 run。
+
+几个语义是刻意选的：
+
+- **每次新建会话，不注入上次结果。** 每次运行是一件独立的工作，只知道目标。
+  灌上次摘要会让第二次之后的运行都在继承上次的偏差，十次之后 context 里全是
+  自己的历史。跨次积累是产物（artifacts）的事，不是会话历史的事。
+- **信封里写明「没有人在线」** —— 否则它会留一句「需要你确认」然后没人看见。
+- **停机不补**（默认）。笔记本合盖一晚上，醒来不该突然跑 8 次。
+  `--catch-up` 可开，且只补**最近** N 次 —— 补日报你要昨天那份。
+- **上次没跑完就跳过这次**，不排队。每小时一次的任务如果单次要跑两小时，
+  排队会越积越多。
+- **幂等键用「计划」时刻**，靠唯一索引挡重复 —— 两个 worker 同时到点是
+  TOCTOU，先查后写挡不住。
+
+**「该跑的没跑」是最难发现的故障**（没有人在旁边等结果，症状只是产出不再出现），
+所以每个计划点都记一行账：
+
+```
+❯ nucleus schedule history 每日简报
+
+   计划时刻          实际   结果                          run
+─  ────────────────  ─────  ────────────────────────────  ────────
+✓  2026-08-03 08:30  准时   完成                          a1b2c3d4
+!  2026-08-02 08:30  —      跳过（上次还在跑）             —
+✗  2026-08-01 08:30  迟 1m  失败：config.agent_not_found  7047433d
+```
+
+注意第三行：**触发成功 ≠ 跑成功**。所以 `history`、`doctor` 与诊断包三处都按
+run 的最终状态判定 —— 对着一个 failed run 打绿勾，和「系统会自动重试」那句假话
+是同一类错误。
 
 ---
 
@@ -287,13 +356,42 @@ tier 2 的 fixture 由真实模型产生，不是手写的 —— 手写 stub �
 
 ## 现状与限制
 
-**已完成**：会话与消息 · run/attempt/工具调用三层模型 · wake/join · 心跳与 reconciler · 事件流 · provider 熔断与预检 · MCP client · 凭据管理 · context 装配 · CLI
+**已完成**
 
-**未完成**：HTTP API + SSE（所以前端还接不上）· 计划式编排（目前是 ad-hoc 委派）· 长期记忆 · 定时任务 · LLM 压缩
+- **执行模型**：会话与消息 · run/attempt/工具调用三层 · wake/join · 心跳与
+  reconciler · 事件流 · fence token · **run 级重试**（等到 provider 说的时刻，
+  不受退避上限约束）
+- **provider 层**：熔断与预检 · 模型链降级 · `provider_events` 追溯
+  （`picked`/`ok`/`failed`/`breaker.*`/`exhausted`）· 网络错误分类
+- **能力与边界**：**permission 与工具分离**（`read`/`write`/`artifact`/
+  `execute`/`network`/`delegate`/`user`，未分类的 MCP 工具走 `unclassified`
+  哨兵，配置校验拒绝授予）· 委派深度与 run 数上限
+- **专家 agent**：`agents/*.md` 单一来源 · `agent new [--describe]` ·
+  `agent try [--n] [--compare]` · 可声明的结果字段与必填校验 · 任务信封三段
+- **定时任务**：cron 表达式（时区靠 `Intl`，夏令时不漂）· per-schedule 停机
+  补偿 · 重入跳过 · 幂等键用**计划**时刻 · `schedule_fires` 触发账本
+- **可追溯性**：transcripts（prompt + 回复）· 诊断包 + `replay` 还原现场 ·
+  产出内容入库 · 上下文装配与 token 预算
 
-**已知风险**：
-- 前沿模型对输出 schema 的实际遵守率未知（本地只有小模型的真实响应）
-- 四个订阅模型的 `baseUrl` / `contextWindow` / `maxTokens` **需要部署方自行确认**（它们比开发方的知识截止更新）—— 见 [部署指南 阶段 0.5](./docs/DEPLOYMENT.md#-阶段-05你需要自己搞清楚的事)
+**未完成**
+
+- **HTTP API + SSE** —— 所以前端还接不上
+- **compact** —— 超预算时历史是被丢掉而不是压缩；assembler 的 `summary` 入口
+  已留但没喂东西
+- **规则的三层**：注册表与遵守率统计有了，但 T1（注入约束）、T2（检查器）、
+  T3（能力边界）还不是一个可编写的单元
+- **`ask_user`** —— `waiting_user` 状态与会话锁已声明，没接线
+- **长期记忆** —— L2 事实层 / L3 向量层都没有（pgvector 在本地不可用）
+- **计划式编排** —— 目前是 ad-hoc 委派，没有先出计划再执行
+
+**已知风险**
+
+- 前沿模型对输出 schema 的遵守率**只有一个真实样本**：GLM-5.2 端到端一次，
+  0 次 `contract.rejected`。一个样本不足以下结论，但至少不是全靠小模型推测。
+- 本地小模型（ollama）会忽略 prompt 层的规则 —— 这正是「规则要能被运行时强制，
+  不能只写在 prompt 里」的由来。
+- 四个订阅模型的 `baseUrl` / `contextWindow` / `maxTokens` **需要部署方自行确认**
+  （它们比开发方的知识截止更新）—— 见 [部署指南 阶段 0.5](./docs/DEPLOYMENT.md#-阶段-05你需要自己搞清楚的事)
 
 ---
 

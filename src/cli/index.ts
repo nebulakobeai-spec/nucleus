@@ -15,6 +15,14 @@ import { agentTry } from './agent-try.js'
 import { artifactCat, artifactList } from './artifact.js'
 import { providersCmd } from './providers.js'
 import { rulesCmd } from './rules.js'
+import { ScheduleStore } from '../store/schedules.js'
+import {
+  scheduleAdd,
+  scheduleHistory,
+  scheduleList,
+  scheduleRm,
+  scheduleToggle,
+} from './schedule.js'
 import { bundleCmd, replayCmd } from './bundle.js'
 import { loadConfig } from '../config-file.js'
 import { c, duration, heading, ICON, line, money, parseArgv, recoveryHint, statusColor, table, strFlag } from './ui.js'
@@ -249,6 +257,46 @@ async function doctor(flags: Record<string, string | true>): Promise<number> {
         ok: st.state === 'ready',
         detail: st.state === 'ready' ? `${st.toolCount} 个工具` : `${st.state}${st.lastError ? ` — ${st.lastError}` : ''}`,
       })
+    }
+
+    /**
+     * 定时任务。
+     *
+     * 指向已删掉的 agent 的计划会每天产出一个 `config.agent_not_found` 的
+     * failed run —— 有痕迹，但**没人会去看**：定时任务没有人在旁边等结果，
+     * 症状只是「产出不再出现」。所以它必须出现在自检里，而不是等人想起来翻。
+     */
+    try {
+      const scheds = await new ScheduleStore(n.db, n.deps).list()
+      const known = new Set(n.config.agents.map((a) => a.id))
+      const orphans = scheds.filter((x) => !known.has(x.agentId))
+      if (orphans.length) {
+        checks.push({
+          name: '定时任务的 agent',
+          ok: false,
+          detail:
+            orphans.map((o) => `${o.name} → 不存在的「${o.agentId}」`).join('；') +
+            '（每次触发都会产出 config.agent_not_found 的失败 run）',
+        })
+      }
+      const enabled = scheds.filter((x) => x.enabled)
+      if (scheds.length) {
+        const next = enabled
+          .map((x) => x.nextFireAt)
+          .filter((d): d is Date => d !== null)
+          .sort((a, b) => a.getTime() - b.getTime())[0]
+        checks.push({
+          name: '定时任务',
+          ok: true,
+          detail:
+            `${enabled.length}/${scheds.length} 启用` +
+            (next ? ` · 最近一次 ${next.toISOString().slice(0, 16).replace('T', ' ')}Z` : '') +
+            // 最常见的困惑：加了计划但什么都没发生
+            ' · 需要有 worker 在跑才会执行',
+        })
+      }
+    } catch {
+      // schedules 表还没 migrate —— migrate 那条检查会说
     }
 
     const health = await n.router.health.all()
@@ -494,6 +542,9 @@ ${c.bold('agent 与规则')}
   agent new <id>              生成专家定义骨架（含写法说明）
   agent try <id> [任务]        只跑这一个专家：--n 重复、--compare 与旧版并排
   rules                       规则遵守率：谁不听哪条规则
+  schedule list               定时任务：下次什么时候跑
+  schedule add <名称>          加一个：--cron "30 8 * * *" --agent <id> --goal "…"
+  schedule history <名称>      每次触发的结果，含被跳过的那些与原因
   providers [log]             provider 层：熔断、失败、跳过原因、用量
   artifact list [run]         产出清单
   artifact cat <路径>         读产出内容
@@ -631,6 +682,35 @@ export async function main(argv: string[]): Promise<number> {
         default:
           // nucleus artifact <路径片段> 等价于 cat
           return artifactCat(rest, flags)
+      }
+    }
+    case 'schedule':
+    case 'schedules':
+    case 'cron': {
+      const sub = rest[0]
+      const args = rest.slice(1)
+      switch (sub) {
+        case 'list':
+        case 'ls':
+        case undefined:
+          return scheduleList(args, flags)
+        case 'add':
+        case 'new':
+          return scheduleAdd(args, flags)
+        case 'rm':
+        case 'remove':
+        case 'del':
+          return scheduleRm(args, flags)
+        case 'enable':
+          return scheduleToggle(args, flags, true)
+        case 'disable':
+          return scheduleToggle(args, flags, false)
+        case 'history':
+        case 'log':
+          return scheduleHistory(args, flags)
+        default:
+          // nucleus schedule <名称> 等价于 history
+          return scheduleHistory(rest, flags)
       }
     }
     case 'providers':

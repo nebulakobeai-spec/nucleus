@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { boot } from '../boot.js'
+import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { redactText } from '../auth/credentials.js'
 import { errorSpec } from '../errors.js'
+import { describeCron } from '../runtime/cron.js'
 import { c, heading, ICON, line, strFlag, resolveDb } from './ui.js'
 
 /**
@@ -49,6 +50,14 @@ export interface Bundle {
     agents: unknown[]
     /** 每个 agent 来自哪个文件 */
     agentSources: Record<string, string>
+    /**
+     * 定时任务连最近的触发历史。
+     *
+     * 为什么在 environment 而不是 run 下面：**「该跑的没跑」是无 run 的故障**。
+     * 一条指向已删除 agent 的计划每天静默失败，症状只是「产出不再出现」——
+     * 没有 run 可以指，所以只能靠这里发现。
+     */
+    schedules: unknown[]
   }
   run?: {
     root: unknown
@@ -60,10 +69,98 @@ export interface Bundle {
     artifacts: unknown[]
     /** 模型被问了什么、答了什么 —— 「为什么那么做」唯一的证据 */
     transcripts: unknown[]
+    /** 这次 run 是哪条定时任务触发的（手工发起时为 null） */
+    schedule: unknown | null
     /** 每个 error_code 的恢复性，避免对方还要查文档 */
     errorSpecs: Record<string, unknown>
   }
   recentFailures?: unknown[]
+}
+
+/**
+ * 计划定义 + 最近的触发结果。
+ *
+ * 表还不存在（旧库没 migrate）时返回空 —— 诊断包不该因为一张表缺失就导不出来。
+ */
+async function scheduleSnapshot(n: Nucleus): Promise<unknown[]> {
+  try {
+    const r = await n.db.query<Record<string, unknown>>(
+      `select s.*,
+              (select json_agg(x) from (
+                 -- 带上 run 的最终状态：outcome='fired' 只说明触发成功，
+                 -- run 随后失败才是最需要被看见的组合
+                 select f.planned_at, f.fired_at, f.outcome, f.run_id, f.reason,
+                        r.status as run_status, r.error_code as run_error_code
+                   from schedule_fires f
+                   left join runs r on r.id = f.run_id
+                  where f.schedule_id = s.id
+                  order by f.planned_at desc limit 10
+               ) x) as recent_fires
+         from schedules s order by s.name`,
+    )
+    return r.rows
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 定时任务与最近的触发结果。
+ *
+ * 「该跑的没跑」是**无 run 的故障** —— 一条指向已删除 agent 的计划每天静默
+ * 失败，症状只是「产出不再出现」。所以哪怕这个包是为别的问题导的，
+ * 只要有跳过或失败的触发，就该在这里被看到。
+ */
+function printSchedules(bundle: Bundle): void {
+  const list = (bundle.environment.schedules ?? []) as Array<{
+    name: string
+    cron: string
+    timezone: string
+    agent_id: string
+    enabled: boolean
+    next_fire_at: string | null
+    recent_fires: Array<{
+      planned_at: string
+      outcome: string
+      reason: string | null
+      run_status: string | null
+      run_error_code: string | null
+    }> | null
+  }>
+  if (list.length === 0) return
+
+  const known = new Set((bundle.environment.agents as Array<{ id: string }>).map((a) => a.id))
+  heading(`定时任务（${list.length}）`)
+  for (const s of list) {
+    const fires = s.recent_fires ?? []
+    // 「没跑成」= 没触发 **或** 触发了但 run 失败。只看 outcome 会给一条
+    // 每天都失败的计划打绿勾 —— 和「系统会自动重试」那句假话同一类
+    const bad = fires.filter((f) => f.outcome !== 'fired' || f.run_status === 'failed')
+    const mark = !s.enabled ? c.gray('○') : bad.length ? ICON.warn : ICON.ok
+    line(
+      `${mark} ${s.name} ${c.gray(describeCron(s.cron, s.timezone))} → ${s.agent_id}` +
+        `${s.enabled ? '' : c.gray('（已停用）')}`,
+    )
+    if (!known.has(s.agent_id)) {
+      // 这条是「产出静默消失」最常见的成因
+      line(`  ${ICON.fail} ${c.red(`agent「${s.agent_id}」不存在`)} —— 每次触发都会失败`)
+    }
+    if (bad.length) {
+      const kinds = new Map<string, number>()
+      for (const f of bad) {
+        const k = f.outcome === 'fired' ? `run ${f.run_error_code ?? 'failed'}` : f.outcome
+        kinds.set(k, (kinds.get(k) ?? 0) + 1)
+      }
+      line(
+        c.gray(
+          `  最近 ${fires.length} 次里有 ${bad.length} 次没跑成：` +
+            [...kinds].map(([k, v]) => `${k}×${v}`).join(' · '),
+        ),
+      )
+      const why = bad.find((f) => f.reason)?.reason
+      if (why) line(c.gray(`  例如 ${why}`))
+    }
+  }
 }
 
 function gitSha(): string | null {
@@ -170,6 +267,8 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
         })),
         agents: config.agents,
         agentSources,
+        // 带上最近 10 次触发结果：光有计划定义看不出「昨天早上那次为什么没跑」
+        schedules: await scheduleSnapshot(n),
       },
     }
 
@@ -248,6 +347,15 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
       const errorSpecs: Record<string, unknown> = {}
       for (const code of codes) errorSpecs[code] = errorSpec(code)
 
+      // 定时来源：一个「表现很奇怪」的 run 常常是因为它是定时跑的 ——
+      // 没有人在线、信封是固定的、会话是空的。少了这条会一路往错的方向查
+      const schedule = await n.db.query(
+        `select s.name, s.cron, s.timezone, s.goal, s.catch_up, r.idempotency_key
+           from runs r join schedules s on s.id = r.schedule_id
+          where r.id = $1`,
+        [rootId],
+      )
+
       bundle.run = {
         root: tree.rows.find((r) => (r as { id: string }).id === rootId) ?? null,
         tree: tree.rows,
@@ -257,6 +365,7 @@ export async function bundleCmd(argv: string[], flags: Record<string, string | t
         wakes: wakes.rows,
         artifacts: artifacts.rows,
         transcripts: transcripts.rows,
+        schedule: schedule.rows[0] ?? null,
         errorSpecs,
       }
     } else {
@@ -374,6 +483,26 @@ export async function replayCmd(argv: string[], _flags: Record<string, string | 
   )
   for (const s of bundle.environment.mcpServers as Array<{ id: string; transport: string }>) {
     line(`${ICON.info} MCP ${s.id} (${s.transport})`)
+  }
+
+  printSchedules(bundle)
+
+  if (bundle.run) {
+    // 定时来源要在时间轴之前说 —— 「没有人在线」这件事会改变对整条链的解读：
+    // 没有追问的机会、信封是固定的、会话是空的
+    const sc = bundle.run.schedule as {
+      name: string
+      cron: string
+      timezone: string
+      catch_up: boolean
+      idempotency_key: string | null
+    } | null
+    if (sc) {
+      heading('这次 run 的来源')
+      line(`${ICON.info} 定时任务 ${c.bold(sc.name)} — ${describeCron(sc.cron, sc.timezone)}`)
+      line(c.gray(`  幂等键 ${sc.idempotency_key ?? '(无)'}`))
+      line(c.gray('  定时运行时没有人在线：它不能提问、也没有会话历史可依赖'))
+    }
   }
 
   if (bundle.run) {

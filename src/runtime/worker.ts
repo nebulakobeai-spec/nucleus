@@ -5,6 +5,7 @@ import { RunStore, StaleFenceError } from '../store/runs.js'
 import { ConversationStore } from '../store/conversations.js'
 import { Runner, type AgentSpec } from './runner.js'
 import { Reconciler } from './reconciler.js'
+import { ScheduleStore, type FireResult, type Schedule } from '../store/schedules.js'
 import type { RunEventSink } from './events.js'
 import { renderEnvelope } from './envelope.js'
 import { decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicy } from './retry.js'
@@ -26,6 +27,8 @@ export interface WorkerHooks {
   onAttemptStart?(info: { runId: string; attemptId: string; agentId: string; attemptNo: number; depth: number }): void
   onAttemptEnd?(info: { runId: string; attemptId: string; status: string; errorCode?: string }): void
   onIdle?(): void
+  /** 定时任务触发（含被跳过的）—— 终端与诊断包据此显示「哪次跑了、哪次没跑」 */
+  onScheduleFire?(info: FireResult): void
 }
 
 /**
@@ -75,6 +78,7 @@ export class Worker {
   #store: RunStore
   #conversations: ConversationStore
   #reconciler: Reconciler
+  #schedules: ScheduleStore
   #stopped = false
   #loops = 0
 
@@ -90,6 +94,7 @@ export class Worker {
     this.#store = new RunStore(db, deps)
     this.#conversations = new ConversationStore(db, deps)
     this.#reconciler = new Reconciler(db, deps)
+    this.#schedules = new ScheduleStore(db, deps)
   }
 
   stop(): void {
@@ -137,8 +142,14 @@ export class Worker {
       })
     }
 
+    // 定时触发与 reconciler 同一个位置：两者都是「到点往队列塞东西」。
+    // 放在 claim 之前，所以刚到点的任务这一轮就能被领走，不用多等一圈
+    const fired = await this.#fireDueSchedules(hooks)
+
     const attempt = await this.#store.claimNext(this.opts.workerId, this.opts.leaseMs ?? 60_000)
-    if (!attempt) return false
+    // 只触发了但没领到 attempt 也算「干了活」—— 否则 run() 会去 sleep，
+    // 而队列里刚被塞进去的东西要等一个 idle 周期才动
+    if (!attempt) return fired
 
     const run = await this.#store.getRun(attempt.runId)
     if (!run) return true
@@ -153,7 +164,11 @@ export class Worker {
         errorDetail: {
           message: `配置里没有 agent「${run.agentId}」`,
           known: [...this.agents.keys()],
-          hint: 'agents 是整体替换而非合并；在 nucleus.config.json 里列出 agents 时要把入口 agent 一起列上',
+          // 两个真实成因：agents/<id>.md 被删或改名；定时任务指向了已删掉的 agent。
+          // （旧提示说的「JSON 里的 agents 是整体替换」已经不成立 —— 现在直接被拒）
+          hint:
+            `检查 agents/${run.agentId}.md 是否存在（改名后要同步引用它的地方）` +
+            (run.scheduleId ? '。这个 run 由定时任务触发：nucleus schedule list 会标出指向不存在 agent 的计划' : ''),
         },
       })
       return true
@@ -314,6 +329,46 @@ export class Worker {
     })
     await this.events.emit(attemptId, runId, 'wake.armed', { waitOn: pending.rows.length })
     return true
+  }
+
+  /**
+   * 到点的定时任务 → 队列。返回是否触发了任何东西。
+   *
+   * 不需要单独的 cron 进程：`run_queue.available_at` 与 lease 语义已经在这里，
+   * 「定时」就是「到点往队列塞一个 run」。多一个守护进程只会多一个要对齐的时钟。
+   *
+   * **一条计划出错不能打断 worker。** 这个循环跑在每个 tick 上，一条坏计划
+   * （比如 agent 被删了）会让整个系统停摆。所以逐条 catch，坏的记进
+   * schedule_fires 的 error，剩下的照跑。
+   */
+  async #fireDueSchedules(hooks: WorkerHooks = {}): Promise<boolean> {
+    const now = new Date(this.deps.clock.now())
+    let due: Schedule[]
+    try {
+      due = await this.#schedules.claimDue(now)
+    } catch {
+      // schedules 表还没 migrate 的旧库：定时不可用，但别拖死其他功能
+      return false
+    }
+    if (due.length === 0) return false
+
+    let fired = false
+    for (const s of due) {
+      try {
+        const results = await this.#schedules.fire(s, now)
+        for (const r of results) {
+          if (r.runId) fired = true
+          hooks.onScheduleFire?.(r)
+        }
+      } catch (e) {
+        await this.#schedules
+          .recordError(s.id, s.nextFireAt ?? now, (e as Error).message)
+          .catch(() => {
+            /* 记账失败也不能打断 */
+          })
+      }
+    }
+    return fired
   }
 
   /**
