@@ -586,26 +586,73 @@ describe('checkSummary（四种判定，不是一个「活下来了吗」）', (
    * **stale 是最严重的一类**：摘要留着一条你已经撤销的要求，
    * 模型会照它拒绝你现在想要的东西，而你不知道它为什么在拒绝。
    */
-  it('被撤销的约束还留着 → stale', () => {
-    const withRevision = [
-      { kind: 'constraint' as const, turn: 1, id: 'pg', text: '不��用真 Postgres', keywords: ['postgres'] },
-      { kind: 'revision' as const, turn: 5, revises: 'pg', text: '那条取消了', keywords: ['postgres'] },
-    ]
-    const r = checkSummary(withRevision, summary({ constraints: ['不要用真 Postgres'] }))
+  const REVISED = [
+    {
+      kind: 'constraint' as const,
+      turn: 1,
+      id: 'pg',
+      text: '暂时不要用真 Postgres',
+      keywords: ['postgres'],
+      // 旧结论的标志：**同一行**里既有「不要」又有 postgres
+      staleKeywords: ['不要', 'postgres'],
+    },
+    { kind: 'revision' as const, turn: 5, revises: 'pg', text: '那条取消了', keywords: ['postgres'] },
+  ]
+
+  /**
+   * **stale 是最严重的一类**：摘要留着一条你已经撤销的要求，
+   * 模型会照它拒绝你现在想要的东西，而你不知道它为什么在拒绝。
+   */
+  it('旧结论还作为有效约束留着 → stale', () => {
+    const r = checkSummary(REVISED, summary({ constraints: ['暂时不要用真 Postgres'] }))
     expect(r[0]!.verdict).toBe('stale')
-    expect(r[0]!.note).toMatch(/撤销/)
+    expect(r[1]!.verdict).toBe('stale')
   })
 
-  it('撤销被正确体现 → ok', () => {
-    const withRevision = [
-      { kind: 'constraint' as const, turn: 1, id: 'pg', text: '不要用真 Postgres', keywords: ['postgres'] },
-      { kind: 'revision' as const, turn: 5, revises: 'pg', text: '那条取消了', keywords: ['postgres'] },
-    ]
+  /**
+   * **这条是实测抓到的误报。**
+   *
+   * gemma4:31b 在 revision 场景下答对了：摘要写「部署机上就用真 Postgres，
+   * 本地才用 PGlite」，旧结论一点痕迹都没留。但旧检查器把所有 constraints
+   * **拼成一整块**再查 `['postgres','pglite']` —— 两个词当然都命中，
+   * 命中的是新状态那一行。于是判成 stale，误报在了最要紧的那条检查上。
+   *
+   * 「某条约束是否存在」本来就是**单行**的性质。
+   */
+  it('撤销被正确吸收（新结论含同一话题词）→ ok，不是 stale', () => {
     const r = checkSummary(
-      withRevision,
-      summary({ constraints: ['本地用 PGlite，部署机用真 Postgres（原「不要用真 Postgres」已取消）'] }),
+      REVISED,
+      summary({
+        constraints: ['注释一律写中文。', '部署机上就用真 Postgres，本地才用 PGlite。'],
+      }),
     )
-    expect(r.every((x) => x.verdict === 'ok')).toBe(true)
+    expect(r.map((x) => x.verdict)).toEqual(['ok', 'ok'])
+    expect(r[1]!.note).toMatch(/正确吸收/)
+  })
+
+  it('跨行凑出来的匹配不算 —— 逐行匹配的核心', () => {
+    // 「不要」在第一行、postgres 在第二行 —— 拼成一块会误判成 stale
+    const r = checkSummary(
+      REVISED,
+      summary({ constraints: ['不要编造数字', '部署机上用真 Postgres'] }),
+    )
+    expect(r[0]!.verdict).toBe('ok')
+  })
+
+  it('撤销连话题一起丢了 → lost，与 stale 分开报', () => {
+    const r = checkSummary(REVISED, summary({ constraints: ['注释写中文'] }))
+    expect(r[1]!.verdict).toBe('lost')
+    expect(r[1]!.note).toMatch(/整个话题/)
+  })
+
+  /**
+   * 诱饵出现在 decisions / 背景 里是**对的** —— 那是系统事实该去的地方。
+   * 实测 gemma4:31b 就是这么做的：三条诱饵都进了「背景」。
+   */
+  it('诱饵在 decisions/背景 里不算 leaked，而且说明位置对了', () => {
+    const r = checkSummary(planted, summary({ context: '用户核对了心跳机制（不经过模型）' }))
+    expect(r[1]!.verdict).toBe('ok')
+    expect(r[1]!.note).toMatch(/那是对的位置/)
   })
 
   /** 委婉表达筛不出来，note 必须明说「这条要人读」 */

@@ -169,7 +169,7 @@ describe('委派时的信封校验', () => {
     )
     expect(v.rows.map((x) => x.payload.rule)).toContain(RULE.delegateEnvelope)
 
-    // 被拒的调用视为从未发生 —— 不留意���记录
+    // 被拒的调用视为从未发生 —— 不留意图记录
     const inv = await n.db.query<{ n: number }>(
       `select count(*)::int n from tool_invocations i
          join run_attempts a on a.id = i.run_attempt_id

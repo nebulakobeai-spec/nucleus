@@ -676,7 +676,7 @@ describe('BoxInput', () => {
     box.close()
   })
 
-  it('不读输入时 Ctrl-C 走 onInterrupt —— raw mode 下���有 SIGINT', () => {
+  it('不读输入时 Ctrl-C 走 onInterrupt —— raw mode 下没有 SIGINT', () => {
     const tty = fakeTty()
     let hit = 0
     const box = boxOn(tty, { onInterrupt: () => hit++ })

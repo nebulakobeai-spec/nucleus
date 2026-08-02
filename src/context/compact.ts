@@ -79,7 +79,11 @@ export function summarySchema(): Record<string, unknown> {
       open: {
         type: 'array',
         items: { type: 'string' },
-        description: '悬而未决的问题。丢了它，下一轮会假装一切都清楚。',
+        description:
+          '**真正还悬着**的问题：你或用户明确说了「还没定」「待确认」的事。' +
+          '不要为了填满这个字段去翻一条已经回答过的提问 —— ' +
+          '实测中模型每次都会挑一条已答的技术问题塞进来，那是噪音，而且会逐代累积。' +
+          '没有就给空数组，空着完全正常。',
       },
       artifacts: {
         type: 'array',

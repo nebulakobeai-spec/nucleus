@@ -220,6 +220,7 @@ const VALUE_FLAGS = new Set([
   'out',
   'provider',
   'run',
+  'scenario',
   'since',
   'timezone',
   'tz',

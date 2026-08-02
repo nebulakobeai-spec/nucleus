@@ -38,6 +38,14 @@ export interface SeedTurn {
   keywords?: string[]
   /** revision 专用：它撤销/修改的是哪一条（按 id 引用） */
   revises?: string
+  /**
+   * 判「**旧状态**还被当成有效约束」用的词。只有会被撤销的约束需要它。
+   *
+   * 为什么不能复用 `keywords`：撤销之后摘要**应该**还提这个话题，
+   * 只是换了结论。「暂时不要用真 Postgres」与「部署机上就用真 Postgres」
+   * 都含 postgres —— 靠话题词分不开，得靠「不要」这种表达旧结论的词。
+   */
+  staleKeywords?: string[]
   /** constraint / implicit / decoy 的标识，供 revision 引用与结果对照 */
   id?: string
 }
@@ -172,7 +180,9 @@ export const SCENARIOS: Scenario[] = [
         kind: 'constraint',
         id: 'no-pg',
         text: '暂时不要用真 Postgres，本地一律走 PGlite。',
-        keywords: ['postgres', 'pglite'],
+        keywords: ['postgres'],
+        // 旧结论的标志是「不要 + postgres 出现在同一行」
+        staleKeywords: ['不要', 'postgres'],
       },
       filler(0),
       filler(1),
@@ -366,32 +376,38 @@ export interface SeedCheck {
  * 而 `implicit` 那类本来就筛不出来。输出必须说清这一点。
  */
 export function checkSummary(
-  planted: Array<SeedTurn & { turn: number }>,
+  planted: Array<SeetTurnWithNo>,
   summary: { constraints: string[]; decisions: string[]; open: string[]; context: string },
 ): SeedCheck[] {
-  const constraintsText = summary.constraints.join('\n').toLowerCase()
-  const wholeText = [
-    ...summary.constraints,
-    ...summary.decisions,
-    ...summary.open,
-    summary.context,
-  ]
+  /**
+   * **逐行匹配，不是把 constraints 拼成一整块。**
+   *
+   * 实测踩到的：`revision` 场景里模型答对了 —— 摘要写的是
+   * 「部署机上就用真 Postgres，本地才用 PGlite」，旧结论一点痕迹都没留。
+   * 但我把所有 constraints 拼起来再查 `['postgres','pglite']`，两个词当然都
+   * 命中 —— 命中的是**新状态那一行**。于是判成 stale，误报。
+   *
+   * 「某一条约束是否存在」本来就是**单行**的性质。拼成一块之后，
+   * A 行的词 + B 行的词能凑出一个根本不存在的匹配。
+   */
+  const lines = summary.constraints.map((x) => x.toLowerCase())
+  const elsewhere = [...summary.decisions, ...summary.open, summary.context]
     .join('\n')
     .toLowerCase()
 
+  /** 有没有**某一行**同时含全部关键词 */
+  const anyLine = (kw?: string[]) =>
+    (kw ?? []).length > 0 && lines.some((l) => kw!.every((k) => l.includes(k.toLowerCase())))
+  const inElsewhere = (kw?: string[]) =>
+    (kw ?? []).length > 0 && kw!.every((k) => elsewhere.includes(k.toLowerCase()))
+
   const revisedIds = new Set(planted.filter((p) => p.revises).map((p) => p.revises!))
-  const hit = (hay: string, kw?: string[]) =>
-    (kw ?? []).length > 0 && kw!.every((k) => hay.includes(k.toLowerCase()))
-  // 摘要有没有表达「某条变了」。两个分支共用 —— 撤销可以写在 constraints 里，
-  // 也可以写在 context 里，都算体现了
-  const mentionsChange = /取消|撤销|改为|不再|已变更|后来/.test(
-    summary.constraints.join('') + summary.context,
-  )
+  const byId = new Map(planted.filter((p) => p.id).map((p) => [p.id!, p]))
 
   const out: SeedCheck[] = []
   for (const p of planted) {
     if (p.kind === 'decoy') {
-      const leaked = hit(constraintsText, p.keywords)
+      const leaked = anyLine(p.keywords)
       out.push({
         kind: p.kind,
         turn: p.turn,
@@ -399,54 +415,48 @@ export function checkSummary(
         verdict: leaked ? 'leaked' : 'ok',
         note: leaked
           ? '这是技术陈述，不是你的要求 —— 混进 constraints 会让约束段逐代变脏'
-          : '正确地没有当成约束',
+          : '正确地没有当成约束'
+          + (inElsewhere(p.keywords) ? '（出现在 decisions/背景 里，那是对的位置）' : ''),
       })
       continue
     }
 
     if (p.kind === 'revision') {
-      // 撤销本身该被体现：要么摘要里根本不再提那条，要么明确写了「已取消」
-      const stillActive = hit(constraintsText, p.keywords)
+      // 撤销做对了 = 旧结论不再作为有效约束，而话题本身可以（也应该）还在
+      const target = p.revises ? byId.get(p.revises) : undefined
+      const oldStillThere = anyLine(target?.staleKeywords ?? p.staleKeywords)
+      const topicGone = !anyLine(p.keywords) && !inElsewhere(p.keywords)
       out.push({
         kind: p.kind,
         turn: p.turn,
         text: p.text,
-        verdict: stillActive && !mentionsChange ? 'stale' : 'ok',
-        note:
-          stillActive && !mentionsChange
-            ? '被撤销的约束仍然作为有效约束存在 —— 模型会照它拒绝你现在想要的'
-            : '撤销被正确体现',
+        verdict: oldStillThere ? 'stale' : topicGone ? 'lost' : 'ok',
+        note: oldStillThere
+          ? '旧结论仍然作为有效约束存在 —— 模型会照它拒绝你现在想要的'
+          : topicGone
+            ? '整个话题都没了 —— 撤销与新结论一起丢了'
+            : '撤销被正确吸收：旧结论没了，新结论在',
       })
       continue
     }
 
-    // constraint / implicit：该留下来
+    // constraint / implicit
     if (p.id && revisedIds.has(p.id)) {
-      /**
-       * 它被后面的 revision 撤了。两种正确写法都该放过：
-       *  - 摘要里根本不再提它
-       *  - 摘要提了，但明确写着「原…已取消」
-       *
-       * 第二种更好（下一轮就知道这条讨论过并且结论变了），所以不能因为
-       * 关键词还在就判 stale —— 那会逼着摘要把变更历史整段丢掉。
-       */
-      const stillActive = hit(constraintsText, p.keywords)
-      const stale = stillActive && !mentionsChange
+      // 这条后来被撤了 → 只要旧结论不再是有效约束就算对
+      const oldStillThere = anyLine(p.staleKeywords)
       out.push({
         kind: p.kind,
         turn: p.turn,
         text: p.text,
-        verdict: stale ? 'stale' : 'ok',
-        note: stale
+        verdict: oldStillThere ? 'stale' : 'ok',
+        note: oldStillThere
           ? '这条后来被撤销了，却还作为有效约束留在 constraints 里'
-          : stillActive
-            ? '提到了但标明了已变更 —— 机器只能看到「有取消字样」，是否真的表达对要人读'
-            : '已被撤销，正确地不在了',
+          : '后来被撤销，正确地不再是有效约束',
       })
       continue
     }
 
-    const kept = hit(constraintsText, p.keywords) || hit(wholeText, p.keywords)
+    const kept = anyLine(p.keywords) || inElsewhere(p.keywords)
     out.push({
       kind: p.kind,
       turn: p.turn,
@@ -458,12 +468,16 @@ export function checkSummary(
             ? '委婉表达也被识别成了要求'
             : '委婉表达丢了 —— 也可能只是关键词没命中，**这条必须人读一遍**'
           : kept
-            ? '保留'
+            ? anyLine(p.keywords)
+              ? '保留在 constraints 里'
+              : '保留了，但不在 constraints 段 —— 位置不理想，不算丢'
             : '丢了',
     })
   }
   return out
 }
+
+type SeetTurnWithNo = SeedTurn & { turn: number }
 
 /** 从消息 meta 还原埋点 —— 只有 seed 出来的会话有 */
 export function plantedFromMessages(

@@ -194,7 +194,7 @@ export interface FieldDeclProblem {
 /**
  * 校验声明本身。
  *
- * 挡在配置加载期 —— 声��写错时应当启动就报，而不是等某个 run 提交结果时
+ * 挡在配置加载期 —— 声明写错时应当启动就报，而不是等某个 run 提交结果时
  * 才发现 schema 生成出来是坏的。
  */
 export function validateResultFields(fields: ResultFields | undefined): FieldDeclProblem[] {
