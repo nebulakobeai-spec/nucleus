@@ -125,6 +125,16 @@ export interface NucleusConfig {
       /** 少于这个条数不值得调一次模型。默认 8 */
       minMessages?: number
     }
+    /**
+     * 单次模型请求的超时（毫秒），可被 model 上的 `timeoutMs` 覆盖。
+     *
+     * 之前这个值**硬编码在 openai-compat 里是 120 秒，而且 boot 从来不传** ——
+     * 又一处「声明了但没接线」（RouterOptions.timeoutMs 一直存在）。
+     * 实测后果：gemma4:31b 写一份调研报告超过 120 秒 → provider.timeout →
+     * 因为它是 runRetryable，任务进 waiting_retry 再跑一遍，花两倍时间后
+     * 同样超时。
+     */
+    requestTimeoutMs?: number
     workerId: string
     leaseMs: number
     heartbeatMs: number
@@ -425,6 +435,9 @@ export const defaultConfig: NucleusConfig = {
   runtime: {
     captureTranscripts: true,
     transcriptMaxChars: 200_000,
+    // 本地模型是这个项目的一等场景，所以默认按本地取值。
+    // 太长的代价只是「多等一会儿才降级」，太短的代价是「任务失败并重跑」
+    requestTimeoutMs: 300_000,
     workerId: 'local-1',
     leaseMs: 60_000,
     heartbeatMs: 15_000,

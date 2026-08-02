@@ -206,6 +206,10 @@
   },
 
   "runtime": {
+    // 单次模型请求的超时（毫秒），可被单个模型的 timeoutMs 覆盖。
+    // 本地大模型写长文本很容易超过几分钟，而超时是 runRetryable ——
+    // 太短的话任务会重跑一遍再同样超时，花两倍时间。
+    "requestTimeoutMs": 300000,
     "workerId": "prod-1",
     "leaseMs": 60000,
     "heartbeatMs": 15000,

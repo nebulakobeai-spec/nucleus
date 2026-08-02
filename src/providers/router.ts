@@ -319,17 +319,19 @@ export class ModelRouter {
   async #callWithRetry(cfg: ModelConfig, req: Omit<ChatRequest, 'model'>): Promise<ChatResponse> {
     const key = this.secrets(cfg.apiKeyRef)
     // 按线路协议分派：Kimi coding 端点与 Anthropic 官方 API 不是 OpenAI 兼容形态
+    // 模型自己的超时优先 —— 本地 31B 与云端模型不该共用一个值
+    const timeoutMs = cfg.timeoutMs ?? this.#timeoutMs
     const provider: Provider =
       cfg.api === 'anthropic-messages'
         ? new AnthropicProvider(cfg, key, {
             clock: this.deps.clock,
             ...(this.#fetch ? { fetch: this.#fetch } : {}),
-            ...(this.#timeoutMs ? { timeoutMs: this.#timeoutMs } : {}),
+            ...(timeoutMs ? { timeoutMs } : {}),
           })
         : new OpenAICompatProvider(cfg, key, {
             clock: this.deps.clock,
             ...(this.#fetch ? { fetch: this.#fetch } : {}),
-            ...(this.#timeoutMs ? { timeoutMs: this.#timeoutMs } : {}),
+            ...(timeoutMs ? { timeoutMs } : {}),
           })
 
     let lastError: unknown

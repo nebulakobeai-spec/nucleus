@@ -82,10 +82,19 @@ export class OpenAICompatProvider implements Provider {
       const sys = systemErrorCode(e)
       const why = describeFetchError(e)
       throw timedOut
-        ? new NucleusError('provider.timeout', `${this.cfg.key} 超时（${this.#timeoutMs}ms）`, {
-            cause: e,
-            detail: { timeoutMs: this.#timeoutMs },
-          })
+        ? new NucleusError(
+            'provider.timeout',
+            `${this.cfg.key} 超时（${this.#timeoutMs}ms）—— ` +
+              `本地大模型生成长文本常常超过这个值。` +
+              `调大：该模型配置里的 timeoutMs，或全局 runtime.requestTimeoutMs`,
+            {
+              cause: e,
+              detail: {
+                timeoutMs: this.#timeoutMs,
+                hint: '本地 31B 级别的模型写长文本很容易超过 2-5 分钟；第一次调用还含模型加载时间',
+              },
+            },
+          )
         : new NucleusError(
             'provider.unreachable',
             `连不上 ${this.cfg.key}（${this.cfg.baseUrl}）：${why}`,

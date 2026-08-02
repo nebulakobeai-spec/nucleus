@@ -9,6 +9,10 @@ import { ProviderHealth } from '../src/providers/health.js'
 import { parseDuration, parseRateLimitHeaders } from '../src/providers/openai-compat.js'
 import type { ModelConfig } from '../src/providers/types.js'
 import { scriptedFetch, stubCompletion, stubError, stubStream } from './harness/provider.js'
+import { boot } from '../src/boot.js'
+import { defaultConfig } from '../src/config.js'
+import { systemDeps } from '../src/seams.js'
+import type { FetchLike } from '../src/providers/openai-compat.js'
 
 let db: Db
 let clock: FakeClock
@@ -562,3 +566,96 @@ describe('推理模型的 reasoning 字段', () => {
     expect(seen).toEqual(['答案'])
   })
 })
+
+// ═══════════════════════════════════════════════════════
+// 请求超时：配置到底有没有接线
+// ═══════════════════════════════════════════════════════
+
+describe('请求超时', () => {
+  /**
+   * 这一组守的是「声明了但没接线」这个反复出现的问题。
+   *
+   * `RouterOptions.timeoutMs` 一直存在，但 **boot 从来不传** —— 于是唯一生效的
+   * 值是 openai-compat 里硬编码的 120 秒，而且没有任何办法改。
+   *
+   * 实测后果：gemma4:31b 写一份调研报告超过 120 秒 → provider.timeout。
+   * 而 timeout 是 runRetryable，所以任务进 waiting_retry 再跑一遍 ——
+   * **花两倍时间，然后同样超时**。太短的代价比太长严重得多。
+   */
+  it('boot 把 runtime.requestTimeoutMs 传进 router', async () => {
+    const cfg = structuredClone(defaultConfig)
+    cfg.runtime.requestTimeoutMs = 234
+    const n = await boot({ config: cfg, deps: { clock: new FakeClock(), ids: new FakeIds() } })
+    try {
+      // 从超时错误里读回实际生效的值 —— 这是唯一能证明它接上了的地方
+      expect(await captureTimeout(n)).toBe(234)
+    } finally {
+      await n.close()
+    }
+  })
+
+  it('模型自己的 timeoutMs 覆盖全局 —— 本地 31B 与云端不该共用一个值', async () => {
+    const cfg = structuredClone(defaultConfig)
+    cfg.runtime.requestTimeoutMs = 100
+    cfg.models = cfg.models.map((m) => ({ ...m, timeoutMs: 777 }))
+    const n = await boot({ config: cfg, deps: { clock: new FakeClock(), ids: new FakeIds() } })
+    try {
+      expect(await captureTimeout(n)).toBe(777)
+    } finally {
+      await n.close()
+    }
+  })
+
+  it('超时报错说清该调哪个旋钮', async () => {
+    const cfg = structuredClone(defaultConfig)
+    cfg.runtime.requestTimeoutMs = 50
+    const n = await boot({ config: cfg, deps: { clock: new FakeClock(), ids: new FakeIds() } })
+    try {
+      const err = await grabTimeoutError(n)
+      expect(err.code).toBe('provider.timeout')
+      // 报错不该只说「超时了」——要说怎么办
+      expect(err.message).toMatch(/timeoutMs|requestTimeoutMs/)
+    } finally {
+      await n.close()
+    }
+  })
+})
+
+/**
+ * 用一个永不返回的 fetch 逼出超时，读回**实际生效**的 timeoutMs。
+ *
+ * router 会把 provider 的错误包一层（「链上所有模型均失败：…」），
+ * 所以要读的是 `detail.lastError.timeoutMs`，不是顶层 detail。
+ */
+async function captureTimeout(n: Awaited<ReturnType<typeof boot>>): Promise<number> {
+  const err = await grabTimeoutError(n)
+  const detail = err.detail as { lastError?: { timeoutMs?: number } }
+  return detail?.lastError?.timeoutMs ?? -1
+}
+
+async function grabTimeoutError(n: Awaited<ReturnType<typeof boot>>): Promise<NucleusError> {
+  // hang 住的 fetch：只在 abort 时 reject，这样 timeout 分支必定被走到
+  const hang: FetchLike = (_url, init) =>
+    new Promise((_res, rej) => {
+      init.signal?.addEventListener('abort', () => rej(new Error('aborted')), { once: true })
+    })
+  // 与 boot 同一套接线：全局值传给 router，模型上的 timeoutMs 由 router 解析
+  const router = new ModelRouter(
+    n.db,
+    { clock: systemDeps.clock, ids: new FakeIds() },
+    new Map(n.config.models.map((m) => [m.key, m])),
+    () => 'k',
+    {
+      fetch: hang,
+      ...(n.config.runtime.requestTimeoutMs
+        ? { timeoutMs: n.config.runtime.requestTimeoutMs }
+        : {}),
+    },
+  )
+  try {
+    await router.chat([n.config.models[0]!.key], { messages: [{ role: 'user', content: 'x' }] })
+    throw new Error('本该超时')
+  } catch (e) {
+    return e as NucleusError
+  }
+}

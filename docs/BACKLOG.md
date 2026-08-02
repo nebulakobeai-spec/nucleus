@@ -464,6 +464,23 @@
     压缩」，而 mock 摘要器是我写的，它当然会把约束抄下来。真实模型会不会把
     约束放进 `constraints`、会不会在第二代压缩时丢掉，目前**一点数据都没有**。
 
+19f. **请求超时硬编码 120 秒，而且没法配置** ✅ 已修
+
+    `RouterOptions.timeoutMs` 一直存在，但 **boot 从来不传** —— 于是唯一生效
+    的值是 `openai-compat.ts` 里硬编码的 120 秒。第 7 处「声明了但没接线」。
+
+    实测暴露的：gemma4:31b 写一份调研报告超过 120 秒 → `provider.timeout`。
+    而 timeout 是 `runRetryable`，所以任务进 `waiting_retry` 再跑一遍 ——
+    **花两倍时间，然后同样超时**。整条 live 测试跑了 280 秒就是这么来的。
+
+    太短的代价比太长严重得多：太长只是「多等一会儿才降级」。
+
+    已做：`runtime.requestTimeoutMs`（默认 300 秒，按本地模型取值）+
+    **每个模型自己的 `timeoutMs`**。差异住在模型上 —— 本地 31B 要十分钟，
+    云端 2 分钟很宽裕，一个全局值必然对一边太紧。超时报错现在说清该调哪个旋钮。
+
+    有测试钉住「配置真的传到了 provider」—— 这是这一类 bug 唯一挡得住的方式。
+
 19d. **一条 live 测试绿着，而它声称验的事根本没发生。**
 
     实测输出：
@@ -480,12 +497,27 @@
     「所有请求都连不上 provider」这种回归也会显示绿色。
 
     已改：名字只承诺断言覆盖到的东西（「跑完后没有任何悬挂状态」）；
-    failed 只接受**能力类**错误码（契约不过 / 步数用尽 / 输出截断），
-    provider / config / runtime 类一律算破了，并打印错误码与 detail。
+    failed 只接受**能力类**错误码，provider / config / runtime 类一律算破了。
 
-    另外新加一条**真的断言委派**的 live 测试（用 gemma4:31b）。它失败时
-    不一定是代码坏了 —— 可能就是本机模型不会委派，失败信息里写清了这点。
-    那也是结论：说明「编排者派活」这条路在本机模型上不成立。
+    **改完第一次跑就抓到了东西**，而且抓到的是我自己的三个错：
+
+    - `CAPABILITY_FAILURES` 是**凭记忆写的**，`budget.max_steps` /
+      `budget.max_tokens` / `rule.violation` 三个码根本不存在。实测报的
+      `budget.no_progress` 才是真的。已按 `errors.ts` 重写。
+    - 我又写了条守卫去防这个，而**守卫本身犯了同一类错**：
+      `errorSpec()` 未知码返回 `null` 不是 `undefined`，所以
+      `=== undefined` 那条检查永远不会失败。现在有一条测试钉住守卫真的有效。
+    - 新加的委派测试查 `tool_invocations.args` —— **那个列不存在**。
+      表里只有 `args_hash` / `args_ref`，完整参数刻意不落库。信封应该从
+      **子 run 的 `input`** 读，那反而更好：那是真正到达专家手里的那份。
+
+    另外「不能有 waiting 状态的 wake」这条断言是错的：它把「正在等一次已排好
+    的重试」误判成故障。实测撞上了（`orchestrator(waiting_children) →
+    researcher(waiting_retry)`）。改成**非终态必须有东西会推动它** ——
+    队列里有记录（available_at 可以在未来）或在等还活着的子 run。
+    这才是「任务挂住却看不出来」那条不变量的正确形状。
+
+    **好消息：gemma4:31b 真的会委派。** 这条此前完全没有数据。
 
 19e. **`conv compact` 的两个诊断谎言**（都由实测输出暴露）
 

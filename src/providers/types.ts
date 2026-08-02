@@ -140,6 +140,17 @@ export interface ModelConfig {
   anthropicVersion?: string
   /** env 变量名；值不进 config、不进 git */
   apiKeyRef?: string
+  /**
+   * 单次请求超时（毫秒）。不给则用 `runtime.requestTimeoutMs`。
+   *
+   * **放在模型上而不是全局**，因为差异就住在这里：本地 31B 生成一份报告要
+   * 好几分钟（第一次调用还含模型加载），而云端模型 2 分钟已经很宽裕。
+   * 一个全局值必然对一边太紧。
+   *
+   * 太短的代价比太长严重：超时是 runRetryable，于是任务进 waiting_retry
+   * 再跑一遍 —— 花两倍时间，然后同样超时。
+   */
+  timeoutMs?: number
   /** 每分钟请求数上限；无 rate-limit 响应头的家靠这个本地令牌桶 */
   rpm?: number
   /** 每分钟 token 上限 */

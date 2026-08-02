@@ -134,6 +134,8 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
 
   const router = new ModelRouter(db, deps, modelMap(config), secrets, {
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
+    // 这一行以前不存在，于是 openai-compat 里硬编码的 120 秒是唯一生效的值
+    ...(config.runtime.requestTimeoutMs ? { timeoutMs: config.runtime.requestTimeoutMs } : {}),
   })
 
   const runner = new Runner(db, deps, router, tools, events, {

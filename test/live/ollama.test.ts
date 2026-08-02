@@ -8,6 +8,7 @@ import { PgliteDb } from '../../src/db/pglite.js'
 import { migrate } from '../../src/db/migrate.js'
 import { FakeClock, FakeIds, type Deps } from '../../src/seams.js'
 import { validateResult } from '../../src/runtime/result-schema.js'
+import { errorSpec } from '../../src/errors.js'
 import { resultJsonSchema } from '../../src/runtime/result-schema.js'
 
 /**
@@ -97,6 +98,76 @@ function liveConfig(model: string, contextWindow = 131_072, maxTokens = 4096): N
   return c
 }
 
+/**
+ * 「模型能力不够」的错误码。
+ *
+ * 与「系统坏了」的区别是这一层唯一要判的事：小模型答不好是预期的，
+ * 而 `provider.unreachable` / `config.*` / `runtime.*` 这类是真出问题了。
+ * 混成一件事的话，「所有请求都连不上」这种回归会显示绿色。
+ *
+ * **第一版这份清单是凭记忆写的**，里面 `budget.max_steps` /
+ * `budget.max_tokens` / `rule.violation` 三个码根本不存在 —— 而没有任何
+ * 东西发现这一点。所以下面有一条断言守着：清单里的码必须真的注册过。
+ */
+const CAPABILITY_FAILURES = [
+  // 契约反复不过 —— 模型答不成我们要的形状
+  'contract.schema_invalid',
+  'contract.postcondition_failed',
+  'contract.plan_invalid',
+  // 预算类：步数、成本、原地打转、上下文
+  'budget.steps_exceeded',
+  'budget.cost_exceeded',
+  'budget.no_progress',
+  'budget.loop_detected',
+  'budget.context_overflow',
+  // 模型自身的输出问题
+  'provider.output_truncated',
+  'provider.degenerate_output',
+]
+
+/**
+ * 非终态本身不是问题 —— **没有东西会推动它**才是。
+ *
+ * 「任务挂住却看不出来」是这个项目要修的核心问题，所以这条检查要区分：
+ *  - 子 run 在 `waiting_retry`、队列里有一条未来才可执行的记录 → 正常
+ *  - 父 run 在 `waiting_children`、而它等的子 run 还活着 → 正常
+ *  - 非终态但既没有队列记录也没有活着的子 run → **真的挂住了**
+ *
+ * 原来这里写的是「不能有 waiting 状态的 wake」，那会把「正在等一次已排好的
+ * 重试」误判成故障 —— 实测就撞上了（`orchestrator(waiting_children) →
+ * researcher(waiting_retry)`）。
+ */
+async function expectNoStuckRuns(n: Nucleus, rootRunId: string): Promise<void> {
+  const stuck = await n.db.query<{ id: string; agent_id: string; status: string }>(
+    `select r.id, r.agent_id, r.status from runs r
+      where r.root_run_id = $1
+        and r.status not in ('succeeded','failed','cancelled')
+        -- 队列里有它（available_at 可以在未来）
+        and not exists (select 1 from run_queue q
+                          join run_attempts a on a.id = q.run_attempt_id
+                         where a.run_id = r.id)
+        -- 或者它在等还活着的子 run
+        and not exists (select 1 from runs c
+                         where c.parent_run_id = r.id
+                           and c.status not in ('succeeded','failed','cancelled'))`,
+    [rootRunId],
+  )
+  if (stuck.rows.length) {
+    // 挂住时把每个 attempt 的错误码打出来 —— 否则下次还是只能看到状态
+    const detail = await n.db.query<{ agent_id: string; attempt_no: number; status: string; error_code: string | null }>(
+      `select r.agent_id, a.attempt_no, a.status, a.error_code
+         from run_attempts a join runs r on r.id = a.run_id
+        where r.root_run_id = $1 order by a.created_at`,
+      [rootRunId],
+    )
+    console.log('[live] attempt 明细：', JSON.stringify(detail.rows))
+  }
+  expect(
+    stuck.rows.map((r) => `${r.agent_id}(${r.status})`),
+    '有 run 非终态、且既没有排队也没有在等子 run —— 真的挂住了',
+  ).toEqual([])
+}
+
 let n: Nucleus | null = null
 afterEach(async () => {
   await n?.close()
@@ -106,6 +177,39 @@ afterEach(async () => {
 // ═══════════════════════════════════════════════════════
 // 前置：环境本身
 // ═══════════════════════════════════════════════════════
+
+/**
+ * 这条不碰模型，但必须留在这个文件里 —— 它守的是**这个文件自己的清单**。
+ *
+ * 我第一版把 CAPABILITY_FAILURES 凭记忆写成了 `budget.max_steps` /
+ * `budget.max_tokens` / `rule.violation`，三个都不存在。后果是那条
+ * 「failed 必须是已知失败模式」的断言**永远不可能通过** —— 而这一层平时
+ * 没人跑，所以错了一整轮才被发现。
+ */
+describe('这个文件自己的一致性', () => {
+  it('CAPABILITY_FAILURES 里的错误码都真的注册过', () => {
+    // errorSpec 未知码返回 **null**，不是 undefined ——
+    // 第一版这里写的是 `=== undefined`，于是这条守卫永远不会失败。
+    // 一个防止清单写错的检查，自己犯了同一类错。
+    const unknown = CAPABILITY_FAILURES.filter((code) => errorSpec(code) == null)
+    expect(unknown, `这些码不存在（打错了或被改名了）`).toEqual([])
+  })
+
+  it('守卫本身是有效的 —— 假码必须被抓出来', () => {
+    // 钉住上面那条检查真的会失败。没有这条，`=== undefined` 那个 bug
+    // 会一直躺在那里，而清单里塞满不存在的码也照样绿
+    expect(errorSpec('budget.max_steps')).toBeNull()
+    expect(errorSpec('rule.violation')).toBeNull()
+    expect(errorSpec('budget.steps_exceeded')).not.toBeNull()
+  })
+
+  it('清单里不含系统类错误码 —— 那些不该被当成「模型能力不够」放行', () => {
+    const systemish = CAPABILITY_FAILURES.filter((code) =>
+      /^(config|runtime|provider\.(unreachable|auth_failed|bad_request))/.test(code),
+    )
+    expect(systemish, '系统类错误码不能算能力问题').toEqual([])
+  })
+})
 
 describe('ollama 环境', () => {
   /**
@@ -282,15 +386,6 @@ describe.skipIf(!reachable)('真模型驱动完整编排', () => {
       expect(['succeeded', 'failed'], `root 停在 ${root.status}`).toContain(root.status)
 
       if (root.status === 'failed') {
-        // 能力不够的几种：契约反复不过、步数用尽、思考吃掉了输出预算
-        const CAPABILITY_FAILURES = [
-          'contract.postcondition_failed',
-          'contract.schema_invalid',
-          'budget.max_steps',
-          'budget.max_tokens',
-          'provider.output_truncated',
-          'rule.violation',
-        ]
         console.log(
           `[live] root failed: ${root.errorCode} —— ${JSON.stringify(root.errorDetail).slice(0, 300)}`,
         )
