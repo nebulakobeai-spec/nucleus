@@ -1,4 +1,5 @@
 import type { ModelRouter } from '../providers/router.js'
+import type { Db } from '../db/types.js'
 import type { ConversationStore, Message } from '../store/conversations.js'
 import type { RunEventSink } from './events.js'
 import type { ChatMessage } from '../providers/types.js'
@@ -7,6 +8,7 @@ import { countMessage, heuristicTokenizer, type Tokenizer } from '../context/tok
 import {
   buildCompactPrompt,
   decideCompact,
+  reconcileArtifacts,
   renderSummary,
   summarySchema,
   validateSummary,
@@ -54,6 +56,8 @@ export class Compactor {
     private conversations: ConversationStore,
     private router: ModelRouter,
     private events: RunEventSink,
+    /** 核对产出要读 artifacts 表 */
+    private db: Db,
     private opts: {
       policy?: CompactPolicy
       tokenizer?: Tokenizer
@@ -129,6 +133,17 @@ export class Compactor {
         tokensBefore,
       )
 
+      /**
+       * 核对声称的产出。
+       *
+       * 实测 gemma4:31b 把 `DESIGN.md` / `agents/*.md` 当成了产出 ——
+       * 那只是对话里提到的文件名。产出登记在 artifacts 表里，是可核对的事实，
+       * 所以不靠 prompt 自觉。丢掉的要报出来，不静默处理。
+       */
+      const known = await this.#knownArtifacts(input.conversationId)
+      const { kept, dropped } = reconcileArtifacts(summary.artifacts, known)
+      summary.artifacts = kept
+
       const tokensAfter = this.#tokenizer.count(
         renderSummary(summary, conv.summaryGeneration + 1),
       )
@@ -161,6 +176,8 @@ export class Compactor {
         model: modelKey,
         constraints: summary.constraints.length,
         decisions: summary.decisions.length,
+        // 摘要声称但对不上的产出 —— 说明字段语义没被理解，会逐代累积
+        artifactsDropped: dropped,
       })
       return {
         compacted: true,
@@ -195,6 +212,21 @@ export class Compactor {
       })
       return { compacted: false, decision, tokensBefore, error }
     }
+  }
+
+  /** 这个会话的 run 真正登记过的产出（ref 与路径都算） */
+  async #knownArtifacts(conversationId: string): Promise<string[]> {
+    const r = await this.db.query<{ ref: string; path: string | null }>(
+      `select a.ref, a.path from artifacts a
+         join runs r on r.id = a.run_id
+        where r.conversation_id = $1 or r.root_run_id in (
+          select id from runs where conversation_id = $1
+        )`,
+      [conversationId],
+    )
+    return r.rows.flatMap((x: { ref: string; path: string | null }) =>
+      [x.ref, x.path].filter((v): v is string => !!v),
+    )
   }
 
   /** attemptId 为 null（手动压缩）时不发事件 —— 持久记录在 compactions 表 */

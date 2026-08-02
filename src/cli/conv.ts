@@ -324,7 +324,7 @@ export async function convCompact(
     // 手动触发时把阈值降到 0：命令的语义是「现在压」，不是「够了就压」。
     // keepRecent / minMessages 仍然生效 —— 前者保证「上一句刚说了什么」还在，
     // 后者避免为两条消息调一次模型
-    const compactor = new Compactor(n.conversations, n.runner.router, n.events, {
+    const compactor = new Compactor(n.conversations, n.runner.router, n.events, n.db, {
       policy: manualPolicy(flags),
     })
 

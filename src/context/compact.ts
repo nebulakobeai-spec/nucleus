@@ -84,7 +84,11 @@ export function summarySchema(): Record<string, unknown> {
       artifacts: {
         type: 'array',
         items: { type: 'string' },
-        description: '提到过的产出路径或 ref。**只写引用，不要抄内容** —— 正文另有存处。',
+        description:
+          '**本系统登记过的产出**的 ref 或路径（由 write_report / write_file 这类工具产生的）。' +
+          '不要写对话里顺口提到的普通文件名 —— 比如 README.md、DESIGN.md、某个源码路径' +
+          '都不是产出，写进来会让后续回合以为存在一个可读取的 artifact。' +
+          '**不确定它是不是登记过的产出，就不要写。** 没有就给空数组。',
       },
       context: {
         type: 'string',
@@ -340,6 +344,36 @@ export function validateSummary(
   }
 
   return problems.length ? { problems } : { summary, problems }
+}
+
+/**
+ * 摘要声称的产出里，哪些是真的。
+ *
+ * 实测：gemma4:31b 把 `DESIGN.md` 与 `agents/*.md` 写进了 `artifacts` ——
+ * 那是对话里顺口提到的文件名，不是这个系统登记过的产出。
+ * 我的字段描述原文是「提到过的产出路径或 ref」，它照「提到过的路径」理解，
+ * **是描述含糊，不是模型的错**。
+ *
+ * 描述已经写清了，但光靠 prompt 不够 —— 这正是这个项目的一贯立场：
+ * 机器能判的就机器判。产出登记在 `artifacts` 表里，是可以核对的事实。
+ *
+ * 不静默丢弃：丢了什么要报出来，否则「摘要为什么没提那份报告」又变成谜案。
+ */
+export function reconcileArtifacts(
+  claimed: string[],
+  known: string[],
+): { kept: string[]; dropped: string[] } {
+  if (claimed.length === 0) return { kept: [], dropped: [] }
+  // 宽松匹配：模型可能写 ref、也可能写路径，还可能带前后空白
+  const norm = (s: string) => s.trim().toLowerCase()
+  const index = new Set(known.map(norm))
+  const kept: string[] = []
+  const dropped: string[] = []
+  for (const c of claimed) {
+    if (index.has(norm(c))) kept.push(c.trim())
+    else dropped.push(c.trim())
+  }
+  return { kept, dropped }
 }
 
 /** 压缩比，给终端与诊断包看 */

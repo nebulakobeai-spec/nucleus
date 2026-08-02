@@ -8,6 +8,7 @@ import { checkConstraints, seedConversation } from '../src/cli/seed.js'
 import {
   DEFAULT_COMPACT_POLICY,
   decideCompact,
+  reconcileArtifacts,
   renderSummary,
   validateSummary,
   type ConversationSummary,
@@ -386,7 +387,7 @@ describe('手动压缩（conv compact）', () => {
     for (let i = 0; i < 4; i++) await ask(n, conv.id, `第 ${i + 1} 步`)
 
     const msgs = await n.conversations.recent(conv.id, 500)
-    const compactor = new Compactor(n.conversations, n.runner.router, n.events, {
+    const compactor = new Compactor(n.conversations, n.runner.router, n.events, n.db, {
       policy: { triggerRatio: 0, keepRecent: 2, minMessages: 2 },
     })
     const r = await compactor.maybeCompact({
@@ -419,7 +420,7 @@ describe('手动压缩（conv compact）', () => {
     const before = await n.db.query<{ n: number }>(
       `select count(*)::int n from run_events where kind like 'compact.%'`,
     )
-    const compactor = new Compactor(n.conversations, n.runner.router, n.events, {
+    const compactor = new Compactor(n.conversations, n.runner.router, n.events, n.db, {
       policy: { triggerRatio: 0, keepRecent: 2, minMessages: 2 },
     })
     const r = await compactor.maybeCompact({
@@ -438,6 +439,46 @@ describe('手动压缩（conv compact）', () => {
     // 一条事件都没多 —— 持久记录在 compactions 表里，不依赖 run_events
     expect(after.rows[0]!.n).toBe(before.rows[0]!.n)
     expect((await n.conversations.compactions(conv.id)).length).toBeGreaterThan(0)
+  })
+})
+
+describe('reconcileArtifacts（核对声称的产出）', () => {
+  /**
+   * 实测踩到的：gemma4:31b 把 `DESIGN.md` 与 `agents/*.md` 写进了 artifacts。
+   * 那是对话里顺口提到的文件名，不是这个系统登记过的产出。
+   *
+   * **是我的字段描述含糊，不是模型的错** —— 原文写的是「提到过的产出路径或
+   * ref」，它照「提到过的路径」理解了。描述改清楚了，但光靠 prompt 不够：
+   * 产出登记在 artifacts 表里，是可核对的事实。
+   */
+  it('对不上的被拿掉，并且报出来 —— 不静默丢弃', () => {
+    const r = reconcileArtifacts(
+      ['DESIGN.md', 'reports/调研.md', 'agents/*.md'],
+      ['reports/调研.md', 'art_abc123'],
+    )
+    expect(r.kept).toEqual(['reports/调研.md'])
+    expect(r.dropped).toEqual(['DESIGN.md', 'agents/*.md'])
+  })
+
+  it('ref 与路径都算 —— 模型写哪个都认', () => {
+    const r = reconcileArtifacts(['art_abc123'], ['reports/x.md', 'art_abc123'])
+    expect(r.kept).toEqual(['art_abc123'])
+  })
+
+  it('大小写与前后空白不影响匹配', () => {
+    const r = reconcileArtifacts(['  Reports/X.md '], ['reports/x.md'])
+    expect(r.kept).toEqual(['Reports/X.md'])
+    expect(r.dropped).toEqual([])
+  })
+
+  it('声称为空时不做事', () => {
+    expect(reconcileArtifacts([], ['a'])).toEqual({ kept: [], dropped: [] })
+  })
+
+  it('一个产出都没登记过时全部拿掉', () => {
+    const r = reconcileArtifacts(['DESIGN.md', 'README.md'], [])
+    expect(r.kept).toEqual([])
+    expect(r.dropped).toHaveLength(2)
   })
 })
 

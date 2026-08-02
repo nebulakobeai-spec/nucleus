@@ -104,7 +104,7 @@ export class Worker {
     // compactor 需要 router；runner 持有它。没有就退回「不压缩」——
     // 这条路径下行为与压缩上线前完全一致
     this.#compactor = runner.router
-      ? new Compactor(this.#conversations, runner.router, events, {
+      ? new Compactor(this.#conversations, runner.router, events, db, {
           ...(opts.compactPolicy ? { policy: opts.compactPolicy } : {}),
         })
       : null
