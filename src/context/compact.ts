@@ -238,19 +238,43 @@ export function decideCompact(input: {
   // 保留最近 keepRecent 条原文：摘要替代不了「上一句刚说了什么」
   const retireCount = fresh.length - policy.keepRecent
   if (retireCount <= 0) {
-    // 少量消息就吃掉了整个预算（比如贴了一大段日志）。压缩解决不了 ——
-    // 装配器会照常裁剪，而这里明说原因，不假装压缩过了
+    /**
+     * 这里只有一种情况：**未摘要的消息还不够多**。
+     *
+     * 原来这个分支的文案是「单条消息过大，压缩无从下手」，理由写的是
+     * 「少量消息就吃掉了整个预算」。但条件 `retireCount <= 0` 等价于
+     * `fresh.length <= keepRecent` —— 纯粹是条数，与消息大小毫无关系。
+     * 也就是说那句话**从来没描述过它自己的条件**，而且它确实在一个
+     * 4 条消息、总共 40 tok 的会话上被打了出来。
+     *
+     * 说错原因的诊断会把人带去改错的东西，比不给原因更糟。
+     */
     return {
       compact: false,
       throughSeq: 0,
-      reason: `${fresh.length} 条就占了 ${tokens} tok，但要保留最近 ${policy.keepRecent} 条 —— 单条消息过大，压缩无从下手`,
+      reason:
+        `只有 ${fresh.length} 条未摘要的消息，而要保留最近 ${policy.keepRecent} 条 ——` +
+        ` 没有可退役的（--keep 可以调小，但这么短的对话压缩没有意义）`,
     }
   }
+
+  /**
+   * 真正的「压缩也救不了」是另一种形状：退役完之后，**留下的那几条本身**
+   * 就超预算（比如贴了一大段日志）。这时压缩会成功，但装配器仍然要裁剪 ——
+   * 所以要在理由里说出来，不能让人以为压缩过就够了。
+   */
+  const keptTokens = fresh.slice(retireCount).reduce((n, m) => n + t.count(textOf(m.message)), 0)
+  const stillOver = keptTokens > input.historyBudget
 
   return {
     compact: true,
     throughSeq: fresh[retireCount - 1]!.seq,
-    reason: `历史 ${tokens} tok 超过阈值 ${threshold}，退役最旧的 ${retireCount} 条`,
+    reason:
+      `历史 ${tokens} tok 超过阈值 ${threshold}，退役最旧的 ${retireCount} 条` +
+      (stillOver
+        ? `（注意：保留的 ${policy.keepRecent} 条本身就占 ${keptTokens} tok，` +
+          `超过预算 ${input.historyBudget} —— 压缩之后装配器仍会裁剪）`
+        : ''),
   }
 }
 

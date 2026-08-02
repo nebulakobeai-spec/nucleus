@@ -80,12 +80,62 @@ describe('decideCompact（纯判定）', () => {
     expect(d.reason).toMatch(/只有 5 条/)
   })
 
-  it('单条消息过大时明说压缩无从下手，不假装压缩过了', () => {
-    // 10 条巨大的消息，但要保留最近 10 条 → 无可退役
-    const messages = longMessages(10, 4000)
-    const d = decideCompact({ messages, summaryThroughSeq: 0, historyBudget: 500 })
+  /**
+   * 「压缩也救不了」的真实形状：退役完之后，**留下的那几条本身**就超预算
+   * （贴了一大段日志）。这时压缩会成功，但装配器仍然要裁剪 —— 必须说出来，
+   * 否则人会以为压缩过就够了。
+   *
+   * 原来这里有个分支叫「单条消息过大，压缩无从下手」，但它的条件
+   * `retireCount <= 0` 等价于 `fresh.length <= keepRecent` —— 纯粹是条数，
+   * 与大小毫无关系。**那句话从来没描述过它自己的条件**，而且确实在一个
+   * 4 条消息、40 tok 的会话上被打出来过。已删掉。
+   */
+  it('保留的消息本身就超预算时，压缩成功但明说仍会裁剪', () => {
+    const messages = longMessages(20, 4000)
+    const d = decideCompact({
+      messages,
+      summaryThroughSeq: 0,
+      historyBudget: 500,
+      policy: { triggerRatio: 0.7, keepRecent: 10, minMessages: 8 },
+    })
+    expect(d.compact).toBe(true)
+    expect(d.reason).toMatch(/保留的 10 条本身就占 \d+ tok/)
+    expect(d.reason).toMatch(/仍会裁剪/)
+  })
+
+  it('留下的部分放得进预算时不加那句提醒', () => {
+    const messages = longMessages(20, 20)
+    const d = decideCompact({
+      messages,
+      summaryThroughSeq: 0,
+      historyBudget: 4_000,
+      policy: { triggerRatio: 0.01, keepRecent: 10, minMessages: 8 },
+    })
+    expect(d.compact).toBe(true)
+    expect(d.reason).not.toMatch(/仍会裁剪/)
+  })
+
+  /**
+   * 这两种情况原来共用一句「单条消息过大，压缩无从下手」。
+   * 实测在一个 4 条消息、总共 40 tok 的会话上也打出了那句话
+   * （手动压缩把 triggerRatio 设成 0，token 阈值形同虚设）——
+   * 40 tok 显然不是「单条过大」。**说错原因的诊断会把人带去改错的东西。**
+   */
+  it('消息数少于 keepRecent 时说的是「没有可退役的」，不是「单条过大」', () => {
+    const messages = longMessages(4, 10)
+    const d = decideCompact({
+      messages,
+      summaryThroughSeq: 0,
+      historyBudget: 4_000,
+      // 手动压缩用的那份策略
+      policy: { triggerRatio: 0, keepRecent: 10, minMessages: 2 },
+    })
     expect(d.compact).toBe(false)
-    expect(d.reason).toMatch(/单条消息过大/)
+    expect(d.reason).toMatch(/只有 4 条/)
+    expect(d.reason).toMatch(/没有可退役的/)
+    expect(d.reason).not.toMatch(/单条消息过大/)
+    // 而且给出下一步
+    expect(d.reason).toMatch(/--keep/)
   })
 })
 

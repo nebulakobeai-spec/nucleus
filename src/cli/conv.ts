@@ -6,6 +6,8 @@ import {
   compressionRatio,
   decideCompact,
   renderSummary,
+  DEFAULT_COMPACT_POLICY,
+  type CompactPolicy,
   type ConversationSummary,
 } from '../context/compact.js'
 import { heuristicTokenizer } from '../context/tokenizer.js'
@@ -164,8 +166,31 @@ export async function convShow(
   })
 }
 
+/**
+ * 手动压缩用的策略。
+ *
+ * `--dry-run` 与真正执行**必须用同一份** —— 否则那不叫 dry run。
+ * 实测踩到：dry-run 说「只有 4 条，不值得调一次模型」（用的是配置里的
+ * minMessages: 8），真跑却说「单条消息过大」（用的是 minMessages: 2 +
+ * triggerRatio: 0）。同一个情况两个互相矛盾的原因，两个都没说对。
+ */
+function manualPolicy(flags: Record<string, string | true>): CompactPolicy {
+  return {
+    // 命令的语义是「现在压」，不是「够了就压」
+    triggerRatio: 0,
+    // 仍然保留最近几条原文：摘要替代不了「上一句刚说了什么」
+    keepRecent: Number(strFlag(flags, 'keep') ?? 10),
+    // 但不为两条消息调一次模型
+    minMessages: 2,
+  }
+}
+
 /** 「为什么还没压缩」和「压缩了什么」一样需要能回答 */
-async function printWhyNot(n: Nucleus, convId: string): Promise<void> {
+async function printWhyNot(
+  n: Nucleus,
+  convId: string,
+  policy?: CompactPolicy,
+): Promise<void> {
   const conv = (await n.conversations.get(convId))!
   const msgs = await n.conversations.recent(convId, 500)
   const chain = n.config.defaults.modelChain
@@ -181,15 +206,14 @@ async function printWhyNot(n: Nucleus, convId: string): Promise<void> {
     })),
     summaryThroughSeq: conv.summaryThroughSeq,
     historyBudget: budget,
-    ...(n.config.runtime.compact
-      ? {
-          policy: {
-            triggerRatio: n.config.runtime.compact.triggerRatio ?? 0.7,
-            keepRecent: n.config.runtime.compact.keepRecent ?? 10,
-            minMessages: n.config.runtime.compact.minMessages ?? 8,
-          },
-        }
-      : {}),
+    policy:
+      policy ??
+      // 没指定就用「自动压缩会怎么判」的那份
+      {
+        triggerRatio: n.config.runtime.compact?.triggerRatio ?? DEFAULT_COMPACT_POLICY.triggerRatio,
+        keepRecent: n.config.runtime.compact?.keepRecent ?? DEFAULT_COMPACT_POLICY.keepRecent,
+        minMessages: n.config.runtime.compact?.minMessages ?? DEFAULT_COMPACT_POLICY.minMessages,
+      },
     tokenizer: heuristicTokenizer,
   })
 
@@ -225,7 +249,8 @@ export async function convCompact(
 
     if (dry) {
       heading('压缩判定（不执行）')
-      await printWhyNot(n, r.id)
+      // 与真正执行同一份策略 —— 否则 dry-run 预测不了真跑的结果
+      await printWhyNot(n, r.id, manualPolicy(flags))
       return 0
     }
 
@@ -242,11 +267,7 @@ export async function convCompact(
     // keepRecent / minMessages 仍然生效 —— 前者保证「上一句刚说了什么」还在，
     // 后者避免为两条消息调一次模型
     const compactor = new Compactor(n.conversations, n.runner.router, n.events, {
-      policy: {
-        triggerRatio: 0,
-        keepRecent: Number(strFlag(flags, 'keep') ?? 10),
-        minMessages: 2,
-      },
+      policy: manualPolicy(flags),
     })
 
     const result = await compactor.maybeCompact({
