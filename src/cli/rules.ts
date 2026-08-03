@@ -2,6 +2,7 @@ import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { agentSpec } from '../config.js'
 import { RULES, ruleSpec } from '../runtime/rules.js'
+import { tiersOf } from '../runtime/user-rules.js'
 import { c, heading, ICON, line, strFlag, table, resolveDb } from './ui.js'
 
 /**
@@ -78,6 +79,47 @@ function printRuleList(n: Nucleus): void {
         'postcondition 把不合格的结果退回重写。',
     ),
   )
+
+  /**
+   * 用户自己写的规则。
+   *
+   * 与内置规则分开显示：内置的由代码强制、不可增删；这些是你写的，
+   * 而且**每一条都要能看出它靠什么强制** —— 三层的代价差好几个数量级：
+   * T3 零成本且不可违反，T1 每一轮都吃约束块的 token 而且只是提示。
+   */
+  const userRules = n.config.rules ?? []
+  if (userRules.length) {
+    heading(`你写的规则（${userRules.length}）`)
+    table(
+      userRules.map((r) => [
+        r.id,
+        tiersOf(r).map(tierLabel).join(' '),
+        r.appliesTo.length === 0 || r.appliesTo.includes('*') ? c.gray('全部') : r.appliesTo.join(', '),
+        r.check?.requiredFields?.join(', ') ?? c.gray('—'),
+        r.denyTools.join(', ') || c.gray('—'),
+      ]),
+      ['ID', '层', '作用于', '必填字段（T2）', '禁用工具（T3）'],
+    )
+    line()
+    // 把 T1 的永久成本说出来 —— 加规则时看不到它，就会越加越多
+    const withT1 = userRules.filter((r) => r.constraint)
+    if (withT1.length) {
+      const tokens = withT1.reduce((n, r) => n + Math.ceil((r.constraint ?? '').length / 2), 0)
+      line(
+        c.gray(
+          `${withT1.length} 条带 T1 正文，约 ${tokens} tok —— **每一轮都占约束块预算**。` +
+            `超出上限时会被砍半（shrink_constraints）。`,
+        ),
+      )
+    }
+    for (const r of withT1) {
+      line(`  ${c.gray(`${r.id}：`)}${r.constraint}`)
+    }
+  } else {
+    line()
+    line(c.gray('还没有你自己写的规则。加一条：把 examples/rules/*.md 复制到 rules/ 下。'))
+    line(c.gray('一条规则同时携带三层，运行时按字段决定它落到哪 —— 见那个目录的 README。'))
+  }
 
   heading('各 agent 的契约与边界')
   const rows: string[][] = []
@@ -289,4 +331,15 @@ function rateColor(rate: number): string {
   if (rate >= 0.9) return c.green(pct)
   if (rate >= 0.6) return c.yellow(pct)
   return c.red(pct)
+}
+
+
+/**
+ * 三层的标签。**颜色即代价**：
+ * T3 绿（零成本、不可违反）、T2 青（一次重写）、T1 黄（每轮都花，而且只是提示）。
+ */
+function tierLabel(t: 'T1' | 'T2' | 'T3'): string {
+  if (t === 'T3') return c.green('T3')
+  if (t === 'T2') return c.cyan('T2')
+  return c.yellow('T1')
 }

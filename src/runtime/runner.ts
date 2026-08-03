@@ -32,6 +32,13 @@ import type { Permission } from './permissions.js'
 import type { RunEventSink } from './events.js'
 
 export interface AgentSpec {
+  /**
+   * T1 约束原文 —— 每回合注入**末尾**约束块。
+   *
+   * 刻意不进 systemPrompt：前缀要逐字节稳定才能命中 prompt cache，
+   * 而规则是会改的。放在末尾则改了也不影响前缀。
+   */
+  constraints?: string[]
   id: string
   /** 静态 prompt 前缀（identity + policy）。必须逐字节稳定，见 §5 */
   systemPrompt: string
@@ -324,6 +331,11 @@ export class Runner {
       identity: '',
       policy: '',
       history: input.history,
+      /**
+       * T1 注入。`buildTail()` 与 `maxConstraintTokens` 预算一直都在，
+       * **只是没人调** —— 第 8 处「声明了没接线」。
+       */
+      constraints: agent.constraints ?? [],
       // 摘要接上线。这两档降级（shrink_summary / drop_summary）在装配器里
       // 一直存在，但此前永远不会触发 —— 没有任何代码产生摘要
       summary: input.summary ?? null,

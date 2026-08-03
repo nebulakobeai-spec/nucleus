@@ -246,28 +246,58 @@ describe('回调解析', () => {
 // ═══════════════════════════════════════════════════════
 
 /**
- * 回调服务器需要监听本地端口。
+ * 这组测试需要**两种**能力，而门禁原本只检查了一种。
  *
- * 开发机的安全策略禁止 Node 进程监听（`listen EPERM`，与 tsx IPC 被挡同源），
- * 所以这组在本地自动跳过 —— **不是代码问题**。
- * 部署机上会正常执行；`canListen` 探测的就是这个能力。
+ * 它们既要 `listen` 一个本地端口，也要 `fetch` 自己那个端口（模拟浏览器回调）。
+ * 开发机的沙箱里这两件事**是分开授权的**：绑定有时能成，而 Node 出网
+ * （连 localhost 都算）一律 EPERM。
+ *
+ * 后果是真实发生过的：`canListen` 通过 → 这 8 个跑起来 → 其中做 fetch 的那些
+ * 失败。而症状看起来像「代码有问题」，实际是**门禁问错了问题**。
+ *
+ * 所以探测把两件事都做一遍：绑一个临时端口，然后真的去 fetch 它。
+ * 部署机上两者都可用，这 8 个会正常执行（已验证：48 passed，0 skipped）。
  */
-const canListen = await (async () => {
+const canServe = await (async () => {
   const { createServer } = await import('node:http')
-  return new Promise<boolean>((resolve) => {
-    const s = createServer()
-    s.once('error', () => resolve(false))
-    s.once('listening', () => {
-      s.close()
-      resolve(true)
+  const server = createServer((_req, res) => {
+    res.writeHead(200)
+    res.end('ok')
+  })
+  const port = await new Promise<number | null>((resolve) => {
+    server.once('error', () => resolve(null))
+    server.once('listening', () => {
+      const a = server.address()
+      resolve(typeof a === 'object' && a ? a.port : null)
     })
     try {
-      s.listen(0, '127.0.0.1')
+      // 端口 0 = 让系统给一个空闲的，避免与本机其它服务撞车
+      server.listen(0, '127.0.0.1')
     } catch {
-      resolve(false)
+      resolve(null)
     }
   })
+  if (port === null) {
+    server.close()
+    return { ok: false, why: 'listen 被拒（沙箱不允许监听端口）' }
+  }
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3_000) })
+    await r.text()
+    return { ok: true, why: '' }
+  } catch (e) {
+    // 能绑定但连不上自己 —— 这组测试仍然跑不了
+    return { ok: false, why: `能 listen 但 fetch 不到自己：${(e as Error).message}` }
+  } finally {
+    server.close()
+  }
 })()
+
+const canListen = canServe.ok
+if (!canListen) {
+  console.warn(`\n[oauth] 回调服务器那组跳过：${canServe.why}`)
+  console.warn('[oauth] 部署机上两者都可用时会正常执行（应为 0 skipped）\n')
+}
 
 describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
   let servers: Array<{ close: () => void }> = []

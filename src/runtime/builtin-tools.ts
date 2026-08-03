@@ -289,3 +289,14 @@ export function registerBuiltins(
     registry.register(delegateTool(opts.store, opts.delegateTargets, opts.delegateLimits))
   }
 }
+
+
+/**
+ * 内置工具名 —— 供**配置加载期**的校验用。
+ *
+ * 为什么不在运行时用完整注册表校验：MCP 工具要连上 server 才知道名字，
+ * 而规则校验必须在启动就做完（一条引用了拼错工具名的规则**不会报错**，
+ * 只会让那层 T3 形同虚设）。MCP 工具名带 `__`，用 `server__*` 通配符写
+ * 就绕过校验 —— 那是刻意留的口子。
+ */
+export const BUILTIN_TOOL_NAMES = ['read_file', 'write_file', 'write_report', 'delegate']

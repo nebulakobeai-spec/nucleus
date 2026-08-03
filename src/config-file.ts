@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { defaultConfig, type NucleusConfig } from './config.js'
 import { resolveModels } from './providers/registry.js'
+import { DEFAULT_RULES_DIR, loadRuleFiles, validateRules } from './runtime/user-rules.js'
+import { BUILTIN_TOOL_NAMES } from './runtime/builtin-tools.js'
 import { DEFAULT_AGENTS_DIR, loadAgentFiles } from './config/agent-files.js'
 import { GRANTABLE, isPermission } from './runtime/permissions.js'
 import { validateResultFields } from './runtime/result-schema.js'
@@ -27,6 +29,13 @@ export interface LoadedConfig {
   overrides: string[]
   /** 每个 agent 来自哪 —— 两种来源并存时，「这个 agent 哪来的」必须答得出 */
   agentSources: Record<string, string>
+  /**
+   * 非阻断的规则提醒（比如「T3 已经挡住了，还写 T1 是白花预算」）。
+   *
+   * 与阻断性错误分开：那些在加载时直接抛，而这些要让 doctor / rules 显示出来 ——
+   * 静默吞掉提醒就等于没有提醒。
+   */
+  ruleWarnings: Array<{ path: string; message: string }>
   /** agents/ 目录里的试题集 */
   cases: Record<string, string[]>
 }
@@ -34,10 +43,18 @@ export interface LoadedConfig {
 export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   const path = explicitPath ?? findConfigFile()
   if (!path) {
-    // 没有配置文件也要读 agents/ —— 否则「只用 md 定义专家」这条路走不通
+    // 没有配置文件也要读 agents/ 与 rules/ —— 否则「只用 md 定义」这条路走不通
     const merged = mergeAgentFiles(defaultConfig, agentsDir(defaultConfig))
+    const r = loadRuleFiles(rulesDir(merged.config))
+    merged.config.rules = r.rules
     validate(merged.config, '(内置默认)')
-    return { config: merged.config, path: null, overrides: [], ...merged.meta }
+    return {
+      config: merged.config,
+      path: null,
+      overrides: [],
+      ...merged.meta,
+      ruleWarnings: r.problems.filter((p) => !p.fatal),
+    }
   }
 
   let raw: string
@@ -88,8 +105,46 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   config.models = resolved.models
 
   const merged = mergeAgentFiles(config, agentsDir(config))
+
+  /**
+   * `rules/*.md` —— 用户自己写的规则，一条同时携带三层。
+   *
+   * 与 agents 同样的理由用文件而不是 JSON：T1 正文是改得最勤的东西。
+   *
+   * 校验放在这里而不是运行时：引用不存在的 agent / 工具**不会报错**，
+   * 只会让规则静默失效 —— 而一条看起来存在、实际不生效的规则比没有更糟。
+   */
+  const loadedRules = loadRuleFiles(rulesDir(merged.config))
+  const ruleProblems = [
+    ...loadedRules.problems,
+    ...validateRules(loadedRules.rules, {
+      agents: merged.config.agents.map((a) => a.id),
+      // 工具清单在 boot 时才完整（MCP 要连上才知道），所以这里只校验内置的。
+      // MCP 工具名带 `__`，用通配符写就绕过校验 —— 那是刻意的
+      tools: BUILTIN_TOOL_NAMES,
+    }),
+  ]
+  const fatal = ruleProblems.filter((p) => p.fatal)
+  if (fatal.length) {
+    throw new Error(
+      `规则有问题（${fatal.length} 条）：\n` +
+        fatal.map((p) => `  ${p.path}\n    ${p.message}`).join('\n'),
+    )
+  }
+  merged.config.rules = loadedRules.rules
+
   validate(merged.config, path)
-  return { config: merged.config, path, overrides, ...merged.meta }
+  return {
+    config: merged.config,
+    path,
+    overrides,
+    ...merged.meta,
+    ruleWarnings: ruleProblems.filter((p) => !p.fatal),
+  }
+}
+
+function rulesDir(cfg: NucleusConfig): string {
+  return process.env['NUCLEUS_RULES_DIR'] ?? cfg.rulesDir ?? DEFAULT_RULES_DIR
 }
 
 function agentsDir(cfg: NucleusConfig): string {

@@ -3,6 +3,12 @@ import type { Permission } from './runtime/permissions.js'
 import type { ResultFields } from './runtime/result-schema.js'
 import type { ModelConfig } from './providers/types.js'
 import type { ProviderConfig } from './providers/registry.js'
+import {
+  constraintsForAgent,
+  denyToolsForAgent,
+  requiredFieldsForAgent,
+  type UserRule,
+} from './runtime/user-rules.js'
 import type { AgentSpec } from './runtime/runner.js'
 import type { McpServerConfig } from './mcp/protocol.js'
 import type { McpRegisterOptions } from './mcp/registry.js'
@@ -44,6 +50,15 @@ export interface NucleusConfig {
    */
   models: ModelConfig[]
   agents: AgentConfig[]
+  /**
+   * 用户自己写的规则（来自 `rules/*.md`）。
+   *
+   * 不在 JSON 里声明 —— 与 agents 同样的理由：T1 正文是改得最勤的东西，
+   * 写在 JSON 里是转义串，diff 读不出改了什么。
+   */
+  rules?: UserRule[]
+  /** 规则目录，默认 `rules/` */
+  rulesDir?: string | null
   /** MCP server 列表；部署与运行归用户，Nucleus 只负责连接 */
   mcp?: McpServerConfig[]
   /**
@@ -255,7 +270,18 @@ export const RUNTIME_CONTRACT = `# 运行时契约
 - summary 只写结论与关键数据，完整内容写成 artifact 后在 artifacts 中引用。
 - 只能使用下方列出的工具。工具被拒绝时，按返回的说明修正后重试。`
 
-export function agentSpec(cfg: AgentConfig, defaults: NucleusConfig['defaults']): AgentSpec {
+export function agentSpec(
+  cfg: AgentConfig,
+  defaults: NucleusConfig['defaults'],
+  /**
+   * 用户规则。三层在这里落地：
+   *  T3 → 合并进 toolsDeny（工具根本不出现在模型看到的定义里）
+   *  T2 → 合并进 requiredFields（缺字段就退回让它重写）
+   *  T1 → **不在这里** —— 它是每回合装配 context 时注入末尾约束块的，
+   *       放进 systemPrompt 会破坏缓存前缀的逐字节稳定性
+   */
+  rules: UserRule[] = [],
+): AgentSpec {
   const spec: AgentSpec = {
     id: cfg.id,
     systemPrompt: buildSystemPrompt(cfg),
@@ -266,14 +292,27 @@ export function agentSpec(cfg: AgentConfig, defaults: NucleusConfig['defaults'])
   }
   if (cfg.maxTokens !== undefined) spec.maxTokens = cfg.maxTokens
   if (cfg.toolsAllow) spec.toolsAllow = cfg.toolsAllow
-  if (cfg.toolsDeny) spec.toolsDeny = cfg.toolsDeny
-  if (cfg.capabilities || cfg.requiredFields || cfg.resultFields) {
+
+  // T3：规则禁掉的工具与 agent 自己的 toolsDeny 合并
+  const ruleDeny = denyToolsForAgent(rules, cfg.id)
+  const deny = [...new Set([...(cfg.toolsDeny ?? []), ...ruleDeny])]
+  if (deny.length) spec.toolsDeny = deny
+
+  // T2：规则要求的必填字段与 agent 自己声明的合并
+  const ruleRequired = requiredFieldsForAgent(rules, cfg.id)
+  const required = [...new Set([...(cfg.requiredFields ?? []), ...ruleRequired])]
+  if (cfg.capabilities || required.length || cfg.resultFields) {
     spec.resultSpec = {
       ...(cfg.capabilities ? { capabilities: cfg.capabilities } : {}),
       ...(cfg.resultFields ? { fields: cfg.resultFields } : {}),
-      ...(cfg.requiredFields ? { requiredFields: cfg.requiredFields } : {}),
+      ...(required.length ? { requiredFields: required } : {}),
     }
   }
+
+  // T1：交给 runner 在装配时注入末尾约束块。放进 systemPrompt 会破坏缓存前缀
+  const constraints = constraintsForAgent(rules, cfg.id)
+  if (constraints.length) spec.constraints = constraints
+
   return spec
 }
 
@@ -364,7 +403,8 @@ export function modelMap(cfg: NucleusConfig): Map<string, ModelConfig> {
 }
 
 export function agentMap(cfg: NucleusConfig): Map<string, AgentSpec> {
-  return new Map(cfg.agents.map((a) => [a.id, agentSpec(a, cfg.defaults)]))
+  // 规则从 cfg 上取 —— 三层在 agentSpec 里落地
+  return new Map(cfg.agents.map((a) => [a.id, agentSpec(a, cfg.defaults, cfg.rules ?? [])]))
 }
 
 /** 从 env 取密钥。config 里只有 ref。 */
