@@ -2,7 +2,15 @@ import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { agentSpec } from '../config.js'
 import { RULES, ruleSpec } from '../runtime/rules.js'
-import { coverageOf, TIER_LABEL, TIER_WHAT, tiersOf, type RuleTier } from '../runtime/user-rules.js'
+import { resultSchemaTokens } from '../runtime/result-schema.js'
+import {
+  coverageOf,
+  resultFieldsForAgent,
+  TIER_LABEL,
+  TIER_WHAT,
+  tiersOf,
+  type RuleTier,
+} from '../runtime/user-rules.js'
 import { c, heading, ICON, line, strFlag, table, resolveDb } from './ui.js'
 
 /**
@@ -147,6 +155,39 @@ function printRuleList(n: Nucleus): void {
     }
     for (const r of withReminder) {
       line(`  ${c.gray(`${r.id}：`)}${r.constraint}`)
+    }
+
+    /**
+     * **检查也有每轮成本，而这一直没人算。**
+     *
+     * 提醒的成本上面一直在报（约束块有 2000 的预算）。而字段声明进的是
+     * **工具 schema** —— 每一轮都随工具定义发出去，实测约 55 tok/字段。
+     * `rule new` 对这种规则原先印的是「常驻成本 0」，那是假的。
+     *
+     * 按 agent 分开报，因为 appliesTo 是唯一的杠杆：**这一层不能像长提醒
+     * 那样按需加载**（模型必须在被调用那一刻就看到完整 schema），
+     * 所以省 token 的唯一办法就是别把只有一个专家需要的字段挂到 `*` 上。
+     */
+    const bare = resultSchemaTokens({})
+    const perAgent = n.config.agents
+      .map((a) => {
+        const fields = resultFieldsForAgent(userRules, a.id).fields
+        const n2 = Object.keys(fields).length
+        return { id: a.id, count: n2, cost: n2 ? resultSchemaTokens({ fields }) - bare : 0 }
+      })
+      .filter((x) => x.count > 0)
+    if (perAgent.length) {
+      line()
+      line(
+        c.gray(
+          '规则声明的字段进**工具 schema**，也是每一轮都花 —— ' +
+            '而且不能像长提醒那样按需加载（模型必须当场看到完整 schema）：',
+        ),
+      )
+      for (const a of perAgent) {
+        line(`  ${a.id.padEnd(16)} ${a.count} 个字段 · 约 ${a.cost} tok/轮`)
+      }
+      line(c.gray('  唯一的杠杆是 appliesTo：只有一个专家需要的字段别挂到 * 上。'))
     }
   } else {
     line()

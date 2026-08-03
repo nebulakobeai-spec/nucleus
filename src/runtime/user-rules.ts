@@ -353,6 +353,7 @@ export function validateRules(
   const agents = new Set(known.agents)
   const tools = new Set(known.tools)
   const seen = new Set<string>()
+  const reported = new Set<string>()
 
   for (const r of rules) {
     if (seen.has(r.id)) {
@@ -384,13 +385,57 @@ export function validateRules(
     }
 
     // 边界已经挡住的东西不必再写提醒 —— 那是白花每轮的 token
-    if (r.constraint && r.denyTools.length > 0 && !r.check) {
-      out.push({
+    if (r.constraint && r.denyTools.length > 0 && !r.check) {      out.push({
         path: r.path,
         message:
           `既有边界又有提醒正文。边界已经让这些工具不出现在模型看到的定义里，` +
           `再写一句「不要用它们」是白花每轮的约束块预算 —— 除非那句话讲的是别的事`,
         fatal: false,
+      })
+    }
+  }
+
+  /**
+   * **两条规则声明同名字段 —— 拒绝。**
+   *
+   * ── 这是一个「声明了但没接线」的活例子 ────────────────────
+   *
+   * `resultFieldsForAgent` 一直在算 `conflicts`，一直原样返回，
+   * 而**全仓没有任何一处读它**（核对过：除了它自己的文件，零匹配）。
+   * 于是两条规则都声明 `plan` 时，后一条静默盖掉前一条 ——
+   * 而被盖掉那条的 requiredFields 还指着它，于是模型按 B 的形状填、
+   * 拿 A 的必填项去验，报出来的是一个看不懂的字段缺失。
+   *
+   * 这正是我在 F 段列的那类债：算出来的判据没人用，等于没算。
+   *
+   * ── 为什么是拒绝，而不是像 agent 覆盖规则那样取一个 ────────
+   *
+   * agent 覆盖规则是**有方向的**（更具体的赢），说得清。
+   * 规则之间没有方向 —— 两条规则平级，谁盖谁纯看加载顺序（文件名排序）。
+   * 而两条规则要同一个字段名，只有两种情况：
+   *
+   *   它们说的是同一件事 → 该合成一条声明，别写两遍
+   *   它们说的是不同的事 → 该有一条改名
+   *
+   * 两种都要人来决定。静默取一个只是把这个问题藏到运行时。
+   *
+   * 只在**可能作用于同一个 agent** 时才算冲突 —— 复用
+   * `resultFieldsForAgent` 而不是在这里重写一遍判据（重写必然漂）。
+   */
+  for (const agentId of known.agents) {
+    const { conflicts } = resultFieldsForAgent(rules, agentId)
+    for (const cf of conflicts) {
+      // 两条 `*` 规则冲突时每个 agent 都会算出一次 —— 同一件事只报一遍
+      const key = `${cf.field} ${cf.rules.map((r) => r.id).join(' ')}`
+      if (reported.has(key)) continue
+      reported.add(key)
+      out.push({
+        path: cf.rules.map((r) => r.path).join(' + '),
+        message:
+          `字段「${cf.field}」被 ${cf.rules.map((r) => r.id).join(' 与 ')} 同时声明，` +
+          `而它们都作用于 ${agentId} —— 规则之间没有优先级，谁生效纯看文件名排序。\n` +
+          `    说的是同一件事：合成一条声明；说的是不同的事：给一条改名`,
+        fatal: true,
       })
     }
   }
@@ -439,15 +484,29 @@ export function indexedRulesForAgent(rules: UserRule[], agentId: string): UserRu
  * 同名字段冲突时 **agent 的声明优先** —— 它更具体（「这个专家的 findings
  * 长这样」比「所有人的 findings 长这样」更近），而且冲突时报出来比静默取一个好。
  */
+/**
+ * 同一个字段名被两条规则声明。
+ *
+ * 带上是**哪两条**规则 —— 原先只有一句拼好的字符串，而报错要能指到文件，
+ * 否则「字段 plan 冲突」在 18 个规则文件里等于没说。
+ */
+export interface FieldConflict {
+  field: string
+  rules: UserRule[]
+}
+
 export function resultFieldsForAgent(
   rules: UserRule[],
   agentId: string,
-): { fields: ResultFields; conflicts: string[] } {
+): { fields: ResultFields; conflicts: FieldConflict[] } {
   const fields: ResultFields = {}
-  const conflicts: string[] = []
+  const owner = new Map<string, UserRule>()
+  const conflicts: FieldConflict[] = []
   for (const r of rulesForAgent(rules, agentId)) {
     for (const [name, decl] of Object.entries(r.check?.resultFields ?? {})) {
-      if (fields[name]) conflicts.push(`${name}（${r.id} 与前一条规则都声明了）`)
+      const prev = owner.get(name)
+      if (prev) conflicts.push({ field: name, rules: [prev, r] })
+      owner.set(name, r)
       fields[name] = decl
     }
   }

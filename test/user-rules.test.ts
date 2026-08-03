@@ -12,6 +12,7 @@ import {
   validateRules,
   type UserRule,
 } from '../src/runtime/user-rules.js'
+import { resultSchemaTokens } from '../src/runtime/result-schema.js'
 
 /**
  * 用户自己写的规则 —— 一条规则同时携带三层。
@@ -405,5 +406,98 @@ describe('长正文的规则', () => {
     )
     expect(rule).toBeDefined()
     expect(problems.some((p) => !p.fatal && /多占一行常驻预算/.test(p.message))).toBe(true)
+  })
+})
+
+/**
+ * ── 字段声明的可扩展性，以及它的真实边界 ──────────────────
+ *
+ * 「那 5 个核心字段够不够用」不是问题 —— 规则可以自己声明新字段，
+ * 声明会合并进 agent 的结果契约（config.ts 的 agentSpec）。
+ *
+ * 真正的边界有两条，这一组把它们钉住：
+ *
+ *  ① **同名声明**。两条规则都声明 `plan` 时谁生效？原先是「后加载的赢」，
+ *     而加载顺序是文件名排序 —— 也就是改个文件名就换了行为。
+ *     `resultFieldsForAgent` 一直在算 conflicts，而**全仓没人读**。
+ *  ② **成本**。字段声明进工具 schema，每一轮都发出去，且**不能**像长提醒
+ *     那样按需加载 —— 模型必须在被调用那一刻就看到完整 schema。
+ */
+describe('字段声明的边界', () => {
+  const decl = (fields: Record<string, 'string'>) => ({
+    type: 'object[]' as const,
+    fields,
+  })
+  const r = (id: string, field: string, appliesTo: string[]): UserRule => ({
+    id,
+    constraint: null,
+    gist: null,
+    check: { resultFields: { [field]: decl({ step: 'string' }) }, requiredFields: [`${field}[].step`] },
+    denyTools: [],
+    appliesTo,
+    uncovered: [],
+    path: `rules/${id}.md`,
+  })
+
+  /**
+   * 原先的行为：后加载的静默盖掉前一条。而被盖掉那条的 requiredFields
+   * 还指着它 —— 于是模型按 B 的形状填、拿 A 的必填项去验，
+   * 报出来的是一个看不懂的字段缺失。
+   */
+  it('两条规则声明同名字段 → 拒绝，并指出是哪两条', () => {
+    const out = validateRules([r('a', 'plan', ['*']), r('b', 'plan', ['*'])], {
+      agents: ['researcher'],
+      tools: [],
+    })
+    const hit = out.find((x) => x.fatal && /plan/.test(x.message))
+    expect(hit).toBeDefined()
+    expect(hit!.message).toMatch(/a 与 b/)
+    // 两条出路都要说出来 —— 只报「冲突」的话人不知道该怎么办
+    expect(hit!.message).toMatch(/合成一条声明/)
+    expect(hit!.message).toMatch(/改名/)
+    // 报错要能指到文件
+    expect(hit!.path).toMatch(/rules\/a\.md \+ rules\/b\.md/)
+  })
+
+  /** 作用于不同 agent 时不是冲突 —— 它们永远不会同时进一份 schema */
+  it('作用域不相交时不算冲突', () => {
+    const out = validateRules([r('a', 'plan', ['x']), r('b', 'plan', ['y'])], {
+      agents: ['x', 'y'],
+      tools: [],
+    })
+    expect(out.filter((p) => p.fatal)).toEqual([])
+  })
+
+  /** 两条 `*` 规则在每个 agent 上都会算出一次 —— 同一件事只报一遍 */
+  it('多个 agent 时同一冲突不重复报', () => {
+    const out = validateRules([r('a', 'plan', ['*']), r('b', 'plan', ['*'])], {
+      agents: ['x', 'y', 'z'],
+      tools: [],
+    })
+    expect(out.filter((p) => p.fatal)).toHaveLength(1)
+  })
+
+  it('不同字段名不冲突', () => {
+    const out = validateRules([r('a', 'plan', ['*']), r('b', 'citations', ['*'])], {
+      agents: ['x'],
+      tools: [],
+    })
+    expect(out.filter((p) => p.fatal)).toEqual([])
+  })
+
+  /**
+   * **检查不是免费的** —— 我原先在 rule new 里印的是「常驻成本 0」。
+   *
+   * 那句话对纯边界是真的，对声明了字段的检查是假的。
+   * 而检查恰好是我在鼓励人多用的那一层。
+   */
+  it('声明字段有真实的每轮成本，且随字段数增长', () => {
+    const one = resultSchemaTokens({ fields: { plan: decl({ step: 'string' }) } })
+    const bare = resultSchemaTokens({})
+    expect(one).toBeGreaterThan(bare)
+
+    const many: Record<string, ReturnType<typeof decl>> = {}
+    for (let i = 0; i < 10; i++) many[`f_${i}`] = decl({ step: 'string', why: 'string' })
+    expect(resultSchemaTokens({ fields: many })).toBeGreaterThan(one * 2)
   })
 })

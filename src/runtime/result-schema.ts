@@ -77,6 +77,38 @@ export const FIELD_NAME_HINT = '字段名只能是小写字母、数字与下划
 export const RESERVED_FIELDS = ['status', 'summary', 'artifacts', 'confidence', 'open_questions']
 
 /**
+ * 结果 schema 每轮要花多少 token。
+ *
+ * ── 为什么必须能算出来 ────────────────────────────────
+ *
+ * 「提醒」的常驻成本一直是算的（约束块有 2000 的预算，超了会砍半）。
+ * 而**检查的成本一直没人算** —— 于是 `rule new` 对着一条声明了字段的
+ * 检查规则打印「常驻成本 0 —— 纯边界 / 纯检查，不占约束块」。
+ * 那是假的：字段声明进的是**工具 schema**，每一轮都随工具定义发出去。
+ *
+ * 实测约 55 tok / 字段（object[] 带三个子字段加一句说明）：
+ *
+ *     0 条 → 139 tok      5 条 → 415 tok      20 条 → 1247 tok
+ *
+ * ── 而这一层**不能**像长规则那样按需加载 ──────────────────
+ *
+ * 长提醒可以只留索引行、正文用 read_rule 取。字段声明不行 ——
+ * 模型必须在**被调用的那一刻**就看到完整的 schema，否则它没法照着填。
+ * 所以这里没有 gist 那种技巧可用，唯一的杠杆是 appliesTo：
+ * 别把只有一个专家需要的字段挂到 `*` 上。
+ */
+export function resultSchemaTokens(spec: ResultSchemaSpec = {}): number {
+  const json = JSON.stringify(resultJsonSchema(spec))
+  // 与 roughTokens 同一套估法。不 import 是为了不让 result-schema 依赖 user-rules
+  let cjk = 0
+  for (const ch of json) {
+    const c = ch.codePointAt(0)!
+    if (c >= 0x2e80 && c <= 0x9fff) cjk++
+  }
+  return Math.ceil(cjk / 1.6 + (json.length - cjk) / 4)
+}
+
+/**
  * 内置预设。
  *
  * **用与用户声明完全相同的词表表达** —— 这样只有一条代码路径。

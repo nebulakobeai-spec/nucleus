@@ -12,7 +12,12 @@ import {
   validateRules,
   type UserRule,
 } from '../runtime/user-rules.js'
-import { FIELD_NAME, FIELD_NAME_HINT, RESERVED_FIELDS } from '../runtime/result-schema.js'
+import {
+  FIELD_NAME,
+  FIELD_NAME_HINT,
+  RESERVED_FIELDS,
+  resultSchemaTokens,
+} from '../runtime/result-schema.js'
 import { askNumber, closePrompts, confirm, readLine, select, type Choice } from './prompt.js'
 import { c, heading, ICON, line, resolveDb, strFlag } from './ui.js'
 import { isMockOnly } from '../config.js'
@@ -244,13 +249,7 @@ async function describePath(
     for (const l of text.split('\n')) line(`  ${c.gray(l)}`)
 
     line()
-    const resident = rule.gist ?? rule.constraint ?? ''
-    line(
-      resident
-        ? `常驻成本约 ${roughTokens(resident)} token/轮` +
-            c.gray(rule.gist ? '（只有索引行，正文按需加载）' : '（正文直接内联）')
-        : `常驻成本 ${c.green('0')} ${c.gray('—— 纯边界 / 纯检查，不占约束块')}`,
-    )
+    for (const l of costLines(rule)) line(l)
     for (const x of problems.filter((y) => !y.fatal)) line(`${ICON.warn} ${x.message}`)
 
     /**
@@ -323,6 +322,53 @@ export function guessKind(p: RuleProposal): 'inherent' | 'missing_mechanism' {
   return /跨回合|跨轮|状态|审核|审批|同意|伪造|幻觉|历史对话|状态机|无法验证用户/.test(t)
     ? 'missing_mechanism'
     : 'inherent'
+}
+
+/**
+ * 这条规则每轮花多少 token —— **两处都要算**。
+ *
+ * ── 我原先在这里印的是假话 ────────────────────────────
+ *
+ * 原文：`常驻成本 0 —— 纯边界 / 纯检查，不占约束块`。
+ * 前半句「不占约束块」是对的，但「0」是错的：字段声明进的是**工具 schema**，
+ * 每一轮都随工具定义发出去，实测约 55 tok / 字段。
+ *
+ * 也就是说我一边告诉人「检查比提醒便宜」（对），一边告诉他「检查免费」（错）。
+ * 而检查恰好是我在鼓励人多用的那一层 —— 把它的成本印成 0，
+ * 等于让人在不知情的情况下把预算花在 schema 上。
+ *
+ * **边界才真的是 0**：它只是让工具不出现，不加任何字段。
+ */
+function costLines(rule: UserRule): string[] {
+  const out: string[] = []
+  const resident = rule.gist ?? rule.constraint ?? ''
+  if (resident) {
+    out.push(
+      `提醒 约 ${roughTokens(resident)} tok/轮` +
+        c.gray(rule.gist ? '（只有索引行，正文按需加载）' : '（正文直接内联）'),
+    )
+  }
+  const fields = rule.check?.resultFields
+  if (fields && Object.keys(fields).length) {
+    // 只算这条规则加进去的那部分，不含核心字段的底噪
+    const delta = resultSchemaTokens({ fields }) - resultSchemaTokens({})
+    out.push(
+      `检查 约 ${Math.max(0, delta)} tok/轮 ` +
+        c.gray('（字段声明进工具 schema）'),
+    )
+    out.push(
+      c.gray('  这一层**不能**像长提醒那样按需加载 —— 模型必须在被调用那一刻就'),
+    )
+    out.push(c.gray('  看到完整 schema。唯一的杠杆是 appliesTo：别把只有一个专家'))
+    out.push(c.gray('  需要的字段挂到 * 上。'))
+  }
+  if (!out.length) {
+    out.push(
+      `每轮成本 ${c.green('0')} ` +
+        c.gray(rule.denyTools.length ? '—— 纯边界，只是让工具不出现' : '—— 没有常驻内容'),
+    )
+  }
+  return out
 }
 
 function tierColor(t: string): string {  if (t === 'boundary') return c.green('边界')
@@ -763,16 +809,8 @@ async function finish(
   for (const l of text.split('\n')) line(`  ${c.gray(l)}`)
 
   line()
-  // 常驻成本要在写之前就说出来 —— 事后才发现「怎么每轮都多几百 token」太晚
-  const resident = d.gist ?? d.constraint ?? ''
-  if (resident) {
-    line(
-      `常驻成本约 ${roughTokens(resident)} token/轮` +
-        c.gray(d.gist ? '（只有索引行；正文按需加载）' : '（正文直接内联）'),
-    )
-  } else {
-    line(`常驻成本 ${c.green('0')} ${c.gray('—— 纯边界 / 纯检查，不占约束块')}`)
-  }
+  // 成本要在写之前就说出来 —— 事后才发现「怎么每轮都多几百 token」太晚
+  for (const l of costLines(rule)) line(l)
   for (const p of problems.filter((x) => !x.fatal)) line(`${ICON.warn} ${p.message}`)
 
   /**
