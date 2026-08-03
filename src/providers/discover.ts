@@ -257,3 +257,109 @@ export async function probeModel(
   }
   return out
 }
+
+
+// ── 列出可用模型 ─────────────────────────────────────────
+
+export interface AvailableModel {
+  /** 发给 provider 的真实 id */
+  id: string
+  /** 有的话一起带出来 —— 那样连窗口都不用问你 */
+  contextWindow?: number
+  maxOutputTokens?: number
+  /** 补充说明（ollama 的参数量、云端的家族等） */
+  detail?: string
+}
+
+/**
+ * ollama：`GET /api/tags`。
+ *
+ * **它是唯一不需要凭据就能列模型的** —— 所以配置向导里 ollama 那条路径最短：
+ * 选 provider → 直接看到本机装了什么 → 选一个 → 窗口从 /api/show 读出来。
+ */
+export async function listOllamaModels(
+  baseUrl: string,
+  fetchImpl: FetchLike,
+): Promise<{ models: AvailableModel[]; error: string | null }> {
+  try {
+    const res = await fetchImpl(`${ollamaRoot(baseUrl)}/api/tags`, { method: 'GET' })
+    if (!res.ok) return { models: [], error: `/api/tags 返回 ${res.status}` }
+    const body = (await res.json()) as {
+      models?: Array<{ name: string; details?: { parameter_size?: string; family?: string } }>
+    }
+    return {
+      models: (body.models ?? []).map((m) => ({
+        id: m.name,
+        ...(m.details?.parameter_size
+          ? { detail: `${m.details.parameter_size}${m.details.family ? ` · ${m.details.family}` : ''}` }
+          : {}),
+      })),
+      error: null,
+    }
+  } catch (e) {
+    const sys = systemErrorCode(e)
+    return {
+      models: [],
+      error: `${describeFetchError(e)}${sys ? ` —— ${hintFor(sys)}` : ''}`,
+    }
+  }
+}
+
+/**
+ * OpenAI 兼容的 `GET /v1/models`。
+ *
+ * **需要凭据** —— 这就是配置向导里「先凭据、再列模型」的原因：
+ * 顺序反过来的话第二步必然失败，而那不是 bug，是依赖。
+ *
+ * 有的厂顺带返回 `context_length`（OpenRouter），那样窗口也不用问你了。
+ */
+export async function listOpenAIModels(
+  baseUrl: string,
+  apiKey: string | null,
+  fetchImpl: FetchLike,
+): Promise<{ models: AvailableModel[]; error: string | null }> {
+  try {
+    const res = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/models`, {
+      method: 'GET',
+      headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      // 401/403 要说清是凭据问题，不是「这个 provider 不支持列模型」
+      const why =
+        res.status === 401 || res.status === 403
+          ? '凭据无效或没有权限'
+          : res.status === 404
+            ? '这个 provider 没有 /models 端点'
+            : text.slice(0, 120)
+      return { models: [], error: `/models 返回 ${res.status}：${why}` }
+    }
+    const body = (await res.json()) as { data?: Array<Record<string, unknown>> }
+    const num = (v: unknown) => {
+      const n = Number(v)
+      return Number.isFinite(n) && n > 0 ? n : undefined
+    }
+    return {
+      models: (body.data ?? [])
+        .map((m) => {
+          const top = m['top_provider'] as Record<string, unknown> | undefined
+          const cw = num(m['context_length'] ?? m['context_window'] ?? top?.['context_length'])
+          const mo = num(m['max_output_tokens'] ?? top?.['max_completion_tokens'])
+          return {
+            id: String(m['id'] ?? ''),
+            ...(cw ? { contextWindow: cw } : {}),
+            ...(mo ? { maxOutputTokens: mo } : {}),
+            ...(m['owned_by'] ? { detail: String(m['owned_by']) } : {}),
+          }
+        })
+        .filter((m) => m.id),
+      error: null,
+    }
+  } catch (e) {
+    const sys = systemErrorCode(e)
+    return {
+      models: [],
+      error: `${describeFetchError(e)}${sys ? ` —— ${hintFor(sys)}` : ''}`,
+    }
+  }
+}

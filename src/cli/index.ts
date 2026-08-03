@@ -671,6 +671,7 @@ ${c.bold('agent 与规则')}
   schedule history <名称>      每次触发的结果，含被跳过的那些与原因
   providers [log]             provider 层：熔断、失败、跳过原因、用量
   providers probe [模型]       问出模型的真实窗口（ollama /api/show 权威）
+  model config                **一步步配一个模型**（选 provider → 凭据 → 选模型）
   model list                  模型清单：窗口、输出上限、计费；以及 provider 段
   model add <provider> <id>   加模型。**provider 与模型分开** —— 同一个模型
                               可以跑在 anthropic / openrouter / ollama 上

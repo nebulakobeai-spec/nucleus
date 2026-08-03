@@ -1,9 +1,20 @@
 import { loadConfig } from '../config-file.js'
-import { PROVIDER_TEMPLATES, type ProviderConfig } from '../providers/registry.js'
-import { probeModel } from '../providers/discover.js'
+import {
+  MODEL_PROVIDERS,
+  PROVIDER_TEMPLATES,
+  type AuthOption,
+  type ProviderConfig,
+} from '../providers/registry.js'
+import {
+  listOllamaModels,
+  listOpenAIModels,
+  probeModel,
+  type AvailableModel,
+} from '../providers/discover.js'
 import { CredentialStore } from '../auth/credentials.js'
 import { contextBudgetFor, describeBudget } from '../context/budget.js'
 import { c, heading, ICON, line, strFlag, table } from './ui.js'
+import { askNumber, closePrompts, readLine, select, type Choice } from './prompt.js'
 
 /**
  * `nucleus model` —— 加模型、看模型、改窗口。
@@ -339,6 +350,8 @@ export async function modelCmd(
   const sub = argv[0]
   const rest = argv.slice(1)
   switch (sub) {
+    case 'config':
+      return modelConfig(rest, flags)
     case 'add':
       return modelAdd(rest, flags)
     case 'set':
@@ -349,7 +362,296 @@ export async function modelCmd(
       return modelList(rest, flags)
     default:
       line(c.red(`未知子命令 ${sub}`))
-      line(c.gray('nucleus model list | add <provider> <id> | set <key> --context-window <n>'))
+      line(c.gray('nucleus model config              一步步问（推荐）'))
+      line(c.gray('nucleus model list'))
+      line(c.gray('nucleus model add <provider> <id> [--context-window <n>]'))
+      line(c.gray('nucleus model set <key> --context-window <n>'))
       return 1
   }
+}
+
+
+// ── nucleus model config：交互式向导 ─────────────────────
+
+/**
+ * `nucleus model config` —— 一步步问出来。
+ *
+ * ── 步骤顺序与依赖 ────────────────────────────────────
+ *
+ *   ① 选 provider
+ *   ② 选凭据方式（API key / OAuth）并确认凭据在位
+ *   ③ 列出**这个 provider 下可用的模型**，选一个
+ *   ④ 确认窗口与输出上限
+ *
+ * ②③ 的顺序是**依赖决定的，不是偏好**：云端的「列出可用模型」走
+ * `GET /v1/models`，那需要凭据。反过来的话第二步必然失败，而那不是 bug。
+ *
+ * ollama 是例外 —— `/api/tags` 不需要凭据，所以它那条路径最短：
+ * 选 provider → 直接看到本机装了什么 → 窗口从 `/api/show` 权威读出。
+ *
+ * ── 每一步都可能「问不出来」，那时必须让人接手 ──────────────
+ *
+ * 列不出模型（没有 /models 端点、凭据无效）就让人手打 id；
+ * 窗口探不到就让人填，**绝不给一个猜的默认值** —— 填错不会报错，
+ * 只会静默浪费窗口或被静默截断。
+ */
+export async function modelConfig(
+  _argv: string[],
+  flags: Record<string, string | true>,
+): Promise<number> {
+  try {
+    return await runWizard(flags)
+  } finally {
+    // 不关的话进程挂着不退 —— 共享的 readline 还持着 stdin
+    closePrompts()
+  }
+}
+
+async function runWizard(flags: Record<string, string | true>): Promise<number> {
+  const { config } = await loadConfig(strFlag(flags, 'config'))
+  const configured = config.providers ?? {}
+  const oauthConfigured = new Set(Object.keys(config.oauthProviders ?? {}))
+
+  heading('配置一个模型')
+  line(c.gray('provider 与模型分开问 —— 同一个模型可以跑在多个 provider 上。'))
+  line()
+
+  // ── ① provider ──
+  const providerChoices: Array<Choice<string>> = Object.entries(MODEL_PROVIDERS).map(([id, t]) => {
+    const bits: string[] = [t.baseUrl]
+    if (t.auth.length === 0) bits.push('不需要凭据')
+    else bits.push(t.auth.map((a) => (a === 'oauth' ? 'OAuth' : 'API key')).join(' 或 '))
+    if (configured[id]) bits.push(c.green('已配置'))
+    return { value: id, label: id, detail: bits.join(' · ') }
+  })
+  providerChoices.push({
+    value: '(custom)',
+    label: '其它（自己给端点）',
+    detail: '不在列表里的 provider：给出 baseUrl 与凭据 ref',
+  })
+
+  const providerId = await select('① 选一个 provider：', providerChoices, promptOpts(flags))
+  if (providerId === null) return cancelled()
+
+  let provider: ProviderConfig
+  let tpl = MODEL_PROVIDERS[providerId]
+  if (providerId === '(custom)') {
+    const id = (await readLine('  provider 的名字（会成为 key 的前缀）：', promptOpts(flags))).trim()
+    if (!id) return cancelled()
+    const baseUrl = (await readLine('  baseUrl（形如 https://x/v1）：', promptOpts(flags))).trim()
+    if (!baseUrl) return cancelled()
+    const ref = (await readLine('  凭据的环境变量名（不需要就回车）：', promptOpts(flags))).trim()
+    provider = { baseUrl, ...(ref ? { apiKeyRef: ref } : {}) }
+    tpl = undefined
+    return finishCustom(id, provider, flags, config.defaults.assumedContextWindow)
+  }
+  provider = configured[providerId] ?? stripMeta(tpl!)
+  line()
+  if (tpl?.note) line(c.gray(`  ${tpl.note}`))
+
+  // ── ② 凭据 ──
+  const creds = new CredentialStore()
+  let apiKey: string | null = null
+  if (tpl!.auth.length === 0) {
+    line(`② 凭据 ${c.gray('（这个 provider 不需要）')}`)
+  } else {
+    const authChoices: Array<Choice<AuthOption>> = tpl!.auth.map((a) => {
+      if (a === 'api-key') {
+        return {
+          value: a,
+          label: 'API key',
+          detail: `存进 keychain，配置里只留引用名 ${provider.apiKeyRef ?? '(要填)'}`,
+        }
+      }
+      // OAuth 需要你自己的 clientId —— 没配就明说不可选，并给出怎么配
+      const ready = oauthConfigured.has(providerId)
+      return {
+        value: a,
+        label: 'OAuth',
+        ...(ready
+          ? { detail: 'clientId 已配置 · 浏览器授权' }
+          : {
+              disabled:
+                '需要你自己申请的 clientId —— Nucleus 不内置任何第三方的 client_id' +
+                '（借用别人的等于把本程序声明成对方，配额与审计都记在人家头上）。' +
+                `先在 oauthProviders.${providerId} 里填 clientId`,
+            }),
+      }
+    })
+    line()
+    const method = await select('② 凭据怎么来：', authChoices, promptOpts(flags))
+    if (method === null) return cancelled()
+
+    if (method === 'oauth') {
+      line()
+      line(`  跑这个完成授权，然后回来再执行一次本命令：`)
+      line(c.gray(`    nucleus auth login ${provider.apiKeyRef ?? providerId.toUpperCase() + '_OAUTH'} --oauth --provider ${providerId}`))
+      return 0
+    }
+
+    const ref = provider.apiKeyRef ?? `${providerId.toUpperCase()}_API_KEY`
+    provider = { ...provider, apiKeyRef: ref }
+    const found = await creds.resolve(ref).catch(() => null)
+    if (found) {
+      line(`  ${ICON.ok} 凭据 ${ref} 已在位 ${c.gray(`（${found.source}）`)}`)
+      apiKey = found.secret
+    } else {
+      // 没有凭据 → 列模型这一步会失败。说清楚，别让人以为是别的问题
+      line(`  ${ICON.warn} 凭据 ${ref} ${c.yellow('还没有')}`)
+      line(c.gray(`    录入：nucleus auth login ${ref}（静默输入，不回显）`))
+      line(c.gray('    没有它下一步列不出模型 —— /models 要带凭据。可以先手打模型 id。'))
+    }
+  }
+
+  // ── ③ 可用模型 ──
+  line()
+  line(c.gray('③ 正在列出可用模型…'))
+  const listed = await listAvailable(providerId, provider, apiKey, tpl!.listModels)
+  let picked: AvailableModel | null = null
+
+  if (listed.models.length > 0) {
+    const sorted = [...listed.models].sort((a, b) => a.id.localeCompare(b.id))
+    const choices: Array<Choice<AvailableModel | null>> = sorted.map((m) => ({
+      value: m as AvailableModel | null,
+      label: m.id,
+      detail: [
+        m.contextWindow ? `窗口 ${(m.contextWindow / 1000).toFixed(0)}k` : null,
+        m.maxOutputTokens ? `输出 ${(m.maxOutputTokens / 1000).toFixed(0)}k` : null,
+        m.detail,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    }))
+    choices.push({ value: null, label: '（列表里没有，我自己打）' })
+    line(c.gray(`  找到 ${sorted.length} 个`))
+    const sel = await select(`③ 选一个模型：`, choices, promptOpts(flags))
+    if (sel === undefined) return cancelled()
+    picked = sel
+  } else {
+    line(`  ${ICON.warn} 列不出来：${listed.error ?? '返回为空'}`)
+    line(c.gray('    手打模型 id 也一样能配 —— 列表只是省事，不是必需的'))
+  }
+
+  const modelId =
+    picked?.id ?? (await readLine('  模型 id：', promptOpts(flags))).trim()
+  if (!modelId) return cancelled()
+
+  // ── ④ 窗口与输出上限 ──
+  line()
+  const draft: Draft = {
+    providerId,
+    provider,
+    providerSource: configured[providerId] ? 'existing' : 'template',
+    key: `${providerId}:${shortName(modelId)}`,
+    model: modelId,
+  }
+  if (picked?.contextWindow) {
+    draft.contextWindow = picked.contextWindow
+    draft.windowSource = '/models 返回的 context_length'
+    line(`④ 窗口 ${c.bold(String(picked.contextWindow))} ${c.gray('（provider 自己报的）')}`)
+  } else {
+    // 先试探测（ollama 的 /api/show 是权威的）
+    const probe = await probeModel(
+      {
+        key: draft.key,
+        provider: providerId,
+        model: modelId,
+        baseUrl: provider.baseUrl,
+        ...(provider.api ? { api: provider.api } : {}),
+      },
+      apiKey,
+      fetch as never,
+    )
+    if (probe.contextWindow) {
+      draft.contextWindow = probe.contextWindow
+      draft.windowSource = probe.source ?? '探测'
+      line(`④ 窗口 ${c.bold(String(probe.contextWindow))} ${c.gray(`（${probe.source}）`)}`)
+      for (const note of probe.notes) line(c.gray(`   ${note}`))
+    } else {
+      line(`④ 窗口 —— ${c.yellow('问不出来，需要你填')}`)
+      line(c.gray('   它决定压缩何时触发、context 怎么装配。填错不会报错：'))
+      line(c.gray('   填小了压缩过早触发（1M 窗口的模型在 3% 就开始压），'))
+      line(c.gray('   填大了请求被拒，或者更糟 —— 被 provider 静默截断。'))
+      const n = await askNumber('   contextWindow（去 provider 文档查）：', {
+        ...promptOpts(flags),
+        min: 1_000,
+        required: true,
+      })
+      if (n === null) return cancelled()
+      draft.contextWindow = n
+      draft.windowSource = '你填的'
+    }
+  }
+
+  if (picked?.maxOutputTokens) draft.maxTokens = picked.maxOutputTokens
+  if (!draft.maxTokens) {
+    const n = await askNumber(
+      `   maxTokens（输出上限，回车跳过 —— 它决定给输出留多少余量）：`,
+      promptOpts(flags),
+    )
+    if (n) draft.maxTokens = n
+  }
+
+  line()
+  printSnippet(draft, configured)
+  return 0
+}
+
+function stripMeta(t: (typeof MODEL_PROVIDERS)[string]): ProviderConfig {
+  const { note: _n, modelIdHint: _h, auth: _a, listModels: _l, ...rest } = t
+  return rest
+}
+
+function promptOpts(flags: Record<string, string | true>) {
+  // --numbered 强制走编号路径 —— 也是脚本与测试用的入口
+  return flags['numbered'] === true ? { forceNumbered: true } : {}
+}
+
+function cancelled(): number {
+  line()
+  line(c.gray('已取消，什么都没改。'))
+  return 1
+}
+
+async function listAvailable(
+  providerId: string,
+  provider: ProviderConfig,
+  apiKey: string | null,
+  kind: 'ollama-tags' | 'openai-models' | undefined,
+): Promise<{ models: AvailableModel[]; error: string | null }> {
+  if (kind === 'ollama-tags') return listOllamaModels(provider.baseUrl, fetch as never)
+  if (kind === 'openai-models') {
+    return listOpenAIModels(provider.baseUrl, apiKey, fetch as never)
+  }
+  return { models: [], error: `不知道怎么列 ${providerId} 的模型` }
+}
+
+/** 自定义 provider 的收尾 —— 端点未知，模型也只能手打 */
+async function finishCustom(
+  id: string,
+  provider: ProviderConfig,
+  flags: Record<string, string | true>,
+  assumed: number,
+): Promise<number> {
+  const modelId = (await readLine('  模型 id：', promptOpts(flags))).trim()
+  if (!modelId) return cancelled()
+  line(c.gray(`  自定义 provider 列不出模型，窗口也只能你填（fallback 是 ${assumed}，那也是猜的）`))
+  const n = await askNumber('  contextWindow：', {
+    ...promptOpts(flags),
+    min: 1_000,
+    required: true,
+  })
+  if (n === null) return cancelled()
+  const draft: Draft = {
+    providerId: id,
+    provider,
+    providerSource: 'custom',
+    key: `${id}:${shortName(modelId)}`,
+    model: modelId,
+    contextWindow: n,
+    windowSource: '你填的',
+  }
+  line()
+  printSnippet(draft, {})
+  return 0
 }

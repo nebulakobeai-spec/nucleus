@@ -171,57 +171,103 @@ export function resolveModels(
   return { models: out, problems }
 }
 
+/** 这个 provider 的凭据能怎么来 */
+export type AuthOption =
+  /** 直接发 API key —— 存进 keychain，配置里只留 ref */
+  | 'api-key'
+  /**
+   * OAuth。**需要你自己申请 clientId** —— Nucleus 不内置任何第三方的
+   * client_id（借用别人的等于把本程序声明成对方，配额与审计都记在人家头上）。
+   * 端点模板在 `src/auth/providers.ts`。
+   */
+  | 'oauth'
+
 /**
- * 内置的 provider 模板 —— **只有端点与协议，没有 clientId、没有 key**。
+ * 内置的 provider 端点模板 —— **只有端点与协议，没有 clientId、没有 key**。
  *
- * 这些是公开的协议事实，填在这里省得每个人去查。但**绝不内置任何凭据**，
- * 也不猜 contextWindow：模型版本更新比这份代码快，猜出来的数字会被当成
- * 已知事实（见 `providers probe` 与 DATA-INTEGRITY）。
+ * 名字叫 `MODEL_PROVIDERS` 而不是 `PROVIDER_TEMPLATES`：后者在
+ * `src/auth/providers.ts` 里已经被 **OAuth 端点模板**占用了。
+ * 同名不同义最容易在几个月后被搞混 —— 那和 tools.js 的 DEFAULT_MAX_OUTPUT
+ * 是同一类问题。
+ *
+ * 不猜 contextWindow：模型版本更新比这份代码快，猜出来的数字会被当成已知事实
+ * （见 `providers probe` 与 DATA-INTEGRITY）。
  */
-export const PROVIDER_TEMPLATES: Record<
+export const MODEL_PROVIDERS: Record<
   string,
-  ProviderConfig & { note?: string; modelIdHint?: string }
+  ProviderConfig & {
+    note?: string
+    modelIdHint?: string
+    /**
+     * 凭据能怎么来。顺序即推荐顺序。
+     *
+     * 空数组 = 不需要凭据（ollama）。有 'oauth' 不代表能直接用 ——
+     * 还需要你在 `oauthProviders` 里给出 clientId。
+     */
+    auth: AuthOption[]
+    /** 能不能列出可用模型，以及要不要凭据 */
+    listModels?: 'ollama-tags' | 'openai-models'
+  }
 > = {
+  ollama: {
+    api: 'openai-completions',
+    baseUrl: 'http://localhost:11434/v1',
+    // 本机服务，不需要凭据 —— 也因此是唯一能在没有 key 时就列出模型的
+    auth: [],
+    listModels: 'ollama-tags',
+    modelIdHint: '本机 `ollama list` 里的名字，形如 kimi-k3、gemma4:31b',
+    note: '窗口能从 /api/show 权威读出（但那是训练窗口，实际由 num_ctx 决定）',
+  },
   anthropic: {
     api: 'anthropic-messages',
     baseUrl: 'https://api.anthropic.com',
     apiKeyRef: 'ANTHROPIC_API_KEY',
-    anthropicVersion: '2023-06-01',
+    auth: ['api-key'],
+    // Anthropic 的 /v1/models 存在，但走的是 anthropic-messages 那套头部
+    listModels: 'openai-models',
     modelIdHint: '形如 claude-opus-5 / claude-sonnet-5',
-  },
-  openai: {
-    api: 'openai-completions',
-    baseUrl: 'https://api.openai.com/v1',
-    apiKeyRef: 'OPENAI_API_KEY',
-    note: '订阅不发 API key —— 走 OAuth（nucleus auth login OPENAI_OAUTH --oauth）',
   },
   openrouter: {
     api: 'openai-completions',
     baseUrl: 'https://openrouter.ai/api/v1',
     apiKeyRef: 'OPENROUTER_API_KEY',
+    auth: ['api-key'],
+    listModels: 'openai-models',
     modelIdHint: '带命名空间，形如 moonshotai/kimi-k3、anthropic/claude-opus-5',
-    note: '/models 会返回 context_length —— nucleus providers probe 能直接问出来',
+    note: '/models 会返回 context_length —— 窗口能直接问出来，不用你填',
   },
-  ollama: {
+  openai: {
     api: 'openai-completions',
-    baseUrl: 'http://localhost:11434/v1',
-    modelIdHint: '本机 `ollama list` 里的名字，形如 kimi-k3、gemma4:31b',
-    note: '不需要 key。窗口用 nucleus providers probe 问 /api/show（权威）',
-  },
-  zai: {
-    api: 'openai-completions',
-    baseUrl: 'https://api.z.ai/v1',
-    apiKeyRef: 'ZAI_API_KEY',
-  },
-  kimi: {
-    api: 'openai-completions',
-    baseUrl: 'https://api.moonshot.cn/v1',
-    apiKeyRef: 'KIMI_API_KEY',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKeyRef: 'OPENAI_API_KEY',
+    // 订阅不发 API key，所以 OAuth 排前面
+    auth: ['oauth', 'api-key'],
+    listModels: 'openai-models',
+    note: '订阅不发 API key，只能走 OAuth；按量付费的 API key 两者都行',
   },
   xai: {
     api: 'openai-completions',
     baseUrl: 'https://api.x.ai/v1',
     apiKeyRef: 'XAI_API_KEY',
-    note: '订阅不发 API key —— 走 OAuth',
+    auth: ['oauth', 'api-key'],
+    listModels: 'openai-models',
+    note: '订阅不发 API key，只能走 OAuth（auth_code 或 device flow）',
+  },
+  zai: {
+    api: 'openai-completions',
+    baseUrl: 'https://api.z.ai/v1',
+    apiKeyRef: 'ZAI_API_KEY',
+    auth: ['api-key'],
+    listModels: 'openai-models',
+  },
+  kimi: {
+    api: 'openai-completions',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    apiKeyRef: 'KIMI_API_KEY',
+    auth: ['api-key'],
+    listModels: 'openai-models',
   },
 }
+
+/** 兼容旧名。新代码用 MODEL_PROVIDERS */
+export const PROVIDER_TEMPLATES = MODEL_PROVIDERS

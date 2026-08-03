@@ -247,6 +247,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   'yes',
   'dry-run',
   'no-probe',
+  'numbered',
   'help',
 ])
 

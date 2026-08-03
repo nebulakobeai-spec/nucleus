@@ -497,7 +497,36 @@
     `PROVIDER_TEMPLATES` 内置 7 个 provider 的**端点与协议**，
     但**没有凭据、也不猜 contextWindow** —— 有测试钉住这两条。
 
-19r. **配置模型的 workflow** ✅ 已做
+19s. **`nucleus model config` 交互式向导** ✅ 已做
+
+        ① 选 provider
+        ② 选凭据方式（API key / OAuth）并确认凭据在位
+        ③ 列出这个 provider 下**可用的模型**，选一个
+        ④ 确认窗口与输出上限
+
+    **②③ 的顺序是依赖决定的，不是偏好。** 云端的「列出可用模型」走
+    `GET /v1/models`，那需要凭据 —— 反过来的话第二步必然失败，而那不是 bug。
+    ollama 是例外（`/api/tags` 不需要凭据），所以它那条路径最短。
+
+    每一步都可能「问不出来」，那时必须让人接手：列不出模型就手打 id，
+    窗口探不到就让人填，**绝不给一个猜的默认值**。
+
+    OAuth 没配 clientId 时显示成**不可选并说明为什么**，而不是藏起来 ——
+    藏起来等于让人猜为什么少了一项。
+
+    实现上撞了两个 stdin 的坑，都是「不报错的那种」：
+
+    - 每次 `readLine` 新建再 `close` 一个 readline 接口。「用完就关」听起来
+      很干净，但 `close()` 把 stdin 一起带走 —— 第二次读**什么都拿不到而且
+      不报错**，症状是向导问完第一个问题就卡住。
+    - 改成共享一个之后：管道输入时 readline 会把能读的**一次全读进缓冲**，
+      然后在 EOF 关闭接口 —— 哪怕后面的问题还没问，直接抛
+      `readline was closed`（一句和「输入」毫无关系的话）。
+
+    最终：**管道下一次读完 stdin、按行出队**（既正确又可测，测试直接喂字符串
+    数组），TTY 下才用 readline（要它的行编辑）。
+
+19r. **`nucleus model add` 非交互形式** ✅ 已做
 
         nucleus model add anthropic  claude-opus-5
         nucleus model add openrouter moonshotai/kimi-k3
