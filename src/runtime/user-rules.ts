@@ -92,6 +92,27 @@ export interface UserRule {
   denyTools: string[]
   /** 作用于哪些 agent。`*` 或空表示全部 */
   appliesTo: string[]
+  /**
+   * 这条要求里**没有被机械管住的分句**，原样留着。
+   *
+   * ── 为什么必须落到文件里，而不是创建时打印一次 ──────────────
+   *
+   * 真实的要求几乎都是复合的。实测那条：
+   *
+   *   「每次执行任务前必须写计划，计划写完必须由用户审核后同意后再执行」
+   *
+   * 前半句今天就能查（要求结果里有 plan 字段 —— 伪造它等于真把计划写了）；
+   * 后半句要等用户审批原语。也就是说这条规则**管住了一半**。
+   *
+   * 而「管住一半」在规则清单里长得和「全管住」一模一样 ——
+   * `tiersOf` 只看规则里有什么，看不出要求里还有什么没进来。
+   * 那正是这个项目要修的第一个毛病，只是降到了分句这一级：
+   * **看起来有约束比没有约束更糟。**
+   *
+   * 所以没管住的分句要跟着规则一起存、一起显示。打印一次是不够的 ——
+   * 下个月清单上写着「plan-first：检查」，没人会记得另一半从来没生效。
+   */
+  uncovered: string[]
   /** 来自哪个文件 */
   path: string
 }
@@ -103,7 +124,15 @@ export interface RuleProblem {
   fatal: boolean
 }
 
-const KNOWN_KEYS = ['appliesTo', 'denyTools', 'requiredFields', 'resultFields', 'id', 'gist']
+const KNOWN_KEYS = [
+  'appliesTo',
+  'denyTools',
+  'requiredFields',
+  'resultFields',
+  'id',
+  'gist',
+  'uncovered',
+]
 
 /**
  * 正文超过这么多 token 就必须给 `gist`，正文改为按需加载。
@@ -163,6 +192,9 @@ export function parseRuleFile(path: string, text: string): { rule?: UserRule; pr
     ? (data['requiredFields'] as string[])
     : []
   const appliesTo = Array.isArray(data['appliesTo']) ? (data['appliesTo'] as string[]) : []
+  const uncovered = Array.isArray(data['uncovered'])
+    ? (data['uncovered'] as string[]).map((x) => String(x).trim()).filter(Boolean)
+    : []
   const constraint = body.trim() || null
   const gist = typeof data['gist'] === 'string' ? data['gist'].trim() || null : null
   const resultFields =
@@ -268,7 +300,7 @@ export function parseRuleFile(path: string, text: string): { rule?: UserRule; pr
   if (problems.some((p) => p.fatal)) return { problems }
 
   return {
-    rule: { id, constraint, gist, check, denyTools, appliesTo, path },
+    rule: { id, constraint, gist, check, denyTools, appliesTo, uncovered, path },
     problems,
   }
 }
@@ -484,4 +516,27 @@ export function tiersOf(r: UserRule): RuleTier[] {
   if (r.check) out.push('check')
   if (r.constraint) out.push('reminder')
   return out
+}
+
+/**
+ * 这条规则**把要求管住了多少**。
+ *
+ * ── 为什么 tiersOf 不够 ──────────────────────────────
+ *
+ * `tiersOf` 只看规则里**有什么**，看不出要求里还有什么**没进来**。
+ * 于是「管住一半」和「全管住」在清单里长得一模一样。
+ *
+ * 实测那条要求是两句话：「必须写计划」（今天就能查）+「用户同意后再执行」
+ * （要等审批原语）。落成规则只能管前半句 —— 而清单上会写着
+ * 「plan-first：检查」，看起来这件事已经有人管了。
+ *
+ * 这就是这个项目要修的第一个毛病降到分句一级：
+ * **看起来有约束比没有约束更糟。** 所以要能显示出来。
+ */
+export type Coverage = 'full' | 'partial' | 'none'
+
+export function coverageOf(r: UserRule): Coverage {
+  const enforced = r.denyTools.length > 0 || r.check !== null
+  if (!enforced) return 'none'
+  return r.uncovered.length ? 'partial' : 'full'
 }

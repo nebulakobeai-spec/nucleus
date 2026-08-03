@@ -81,13 +81,47 @@ export function parseFrontmatter(text: string): {
   const body = text.slice(m[0].length).trim()
   const data: Record<string, unknown> = {}
 
-  // 按缩进层级解析。栈里存 (缩进, 容器)
-  const stack: Array<{ indent: number; obj: Record<string, unknown> }> = [{ indent: -1, obj: data }]
+  // 按缩进层级解析。栈里存 (缩进, 容器)，以及**这一层是由哪个键开出来的** ——
+  // 块状列表要用它把已经建好的空映射改成数组（见下）
+  const stack: Array<{
+    indent: number
+    obj: Record<string, unknown>
+    key?: string
+    parent?: Record<string, unknown>
+  }> = [{ indent: -1, obj: data }]
 
   for (const raw of m[1]!.split(/\r?\n/)) {
     if (!raw.trim() || raw.trim().startsWith('#')) continue
     const indent = raw.length - raw.trimStart().length
     const line = raw.trim()
+
+    /**
+     * 块状列表：
+     *
+     *     uncovered:
+     *       - 计划写完必须由用户审核同意后再执行
+     *
+     * ── 为什么不用行内 `[a, b]` 了事 ──────────────────────
+     *
+     * 行内数组按 `,` 切。**没管住的分句是散文**，里面本来就可能有逗号 ——
+     * 那时一句话会被切成两句，而且不报错，只是清单上多一条半截的句子。
+     * 全角「，」当前不会切，但那只是运气好，不是设计。
+     *
+     * 所以散文列表必须用块状写法。`rest === ''` 那一支已经先建了一个空映射，
+     * 这里把它换成数组 —— 一个键要么全是 `- `，要么全是子键，不会混。
+     */
+    if (line.startsWith('- ')) {
+      const top = stack[stack.length - 1]!
+      if (!top.key || !top.parent) {
+        errors.push(`列表项没有对应的键：${line}`)
+        continue
+      }
+      const cur = top.parent[top.key]
+      const arr = Array.isArray(cur) ? cur : []
+      arr.push(parseScalar(line.slice(2)))
+      top.parent[top.key] = arr
+      continue
+    }
 
     const kv = /^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/.exec(line)
     if (!kv) {
@@ -100,10 +134,11 @@ export function parseFrontmatter(text: string): {
     const parent = stack[stack.length - 1]!.obj
 
     if (rest === '') {
-      // 空值 = 嵌套映射的开始
+      // 空值 = 嵌套映射**或**块状列表的开始 —— 哪一种要看下一行，
+      // 所以先按映射建，遇到 `- ` 再换成数组
       const child: Record<string, unknown> = {}
       parent[key!] = child
-      stack.push({ indent, obj: child })
+      stack.push({ indent, obj: child, key: key!, parent })
       continue
     }
     parent[key!] = parseScalar(rest!)

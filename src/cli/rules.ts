@@ -2,7 +2,7 @@ import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { agentSpec } from '../config.js'
 import { RULES, ruleSpec } from '../runtime/rules.js'
-import { TIER_LABEL, TIER_WHAT, tiersOf, type RuleTier } from '../runtime/user-rules.js'
+import { coverageOf, TIER_LABEL, TIER_WHAT, tiersOf, type RuleTier } from '../runtime/user-rules.js'
 import { c, heading, ICON, line, strFlag, table, resolveDb } from './ui.js'
 
 /**
@@ -93,7 +93,16 @@ function printRuleList(n: Nucleus): void {
     table(
       userRules.map((r) => [
         r.id,
-        tiersOf(r).map(tierLabel).join(' '),
+        /**
+         * 「管住了多少」和「靠哪几层管」是两件事，都得显示。
+         *
+         * `tiersOf` 只看规则里**有什么**，看不出那条要求里还有什么**没进来**。
+         * 于是管住一半的规则在清单里和全管住的长得一模一样 ——
+         * 而这正是这个项目要修的第一个毛病降到了分句一级：
+         * **看起来有约束比没有约束更糟。**
+         */
+        tiersOf(r).map(tierLabel).join(' ') +
+          (coverageOf(r) === 'partial' ? ` ${c.yellow(`半 (${r.uncovered.length})`)}` : ''),
         r.appliesTo.length === 0 || r.appliesTo.includes('*') ? c.gray('全部') : r.appliesTo.join(', '),
         r.check?.requiredFields?.join(', ') ?? c.gray('—'),
         r.denyTools.join(', ') || c.gray('—'),
@@ -101,6 +110,27 @@ function printRuleList(n: Nucleus): void {
       ['ID', '强制方式', '作用于', '必填字段（检查）', '禁用工具（边界）'],
     )
     line()
+
+    /**
+     * 没管住的分句要**逐条列出来**，不只在表里标一个数字。
+     *
+     * 标数字只说明「有遗漏」，而人需要知道**遗漏的是哪一句** ——
+     * 否则「plan-first 半」看起来像个小瑕疵，而实际上没管住的
+     * 可能恰好是那条要求的重点（实测就是：「必须经用户同意」）。
+     */
+    const partial = userRules.filter((r) => coverageOf(r) === 'partial')
+    if (partial.length) {
+      line(
+        `${ICON.warn} ${c.yellow(`${partial.length} 条只管住了一部分`)} —— ` +
+          c.gray('下面这些分句**没有任何机械强制**，靠模型自觉：'),
+      )
+      for (const r of partial) {
+        line(`  ${c.bold(r.id)}`)
+        for (const u of r.uncovered) line(`    ${c.yellow('·')} ${u}`)
+      }
+      line(c.gray('  多数是运行时缺原语（用户审批、验运行时事实）—— 见 docs/BACKLOG.md C-17。'))
+      line()
+    }
     // 把「提醒」的永久成本说出来 —— 加规则时看不到它，就会越加越多
     const withReminder = userRules.filter((r) => r.constraint)
     if (withReminder.length) {

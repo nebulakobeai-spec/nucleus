@@ -7,6 +7,7 @@ import {
   DEFAULT_RULES_DIR,
   INLINE_MAX_TOKENS,
   roughTokens,
+  coverageOf,
   TIER_WHAT,
   validateRules,
   type UserRule,
@@ -58,6 +59,13 @@ interface Draft {
   requiredFields: string[]
   resultFields: Record<string, unknown>
   appliesTo: string[]
+  /**
+   * 这条要求里**没管住的分句**。
+   *
+   * 树上也要能表达「一半能管一半不能」—— 否则模型路径能拆、人的路径只能
+   * 全要或全不要，而那正是我刚在模型路径上修掉的毛病。
+   */
+  uncovered: string[]
 }
 
 export async function ruleNew(
@@ -256,6 +264,22 @@ async function describePath(
       line(c.yellow('机器判不了的一件事：这个检查真的对应你那句要求吗？'))
       line(c.gray('  形式合法但不相干的检查比没有检查更糟 —— 它看起来像多了一层保障。'))
     }
+
+    /**
+     * **管住了一半就要说清是哪一半** —— 这是这次改动的核心。
+     *
+     * 复合要求几乎是常态，而 `cannotEnforce` 是整条规则的布尔值，
+     * 于是模型只能二选一，实测就整条判了强制不了。而那条要求的前半句
+     * 「必须写计划」今天就能查。现在它能拆，代价是必须把没管住的那半
+     * 一路显示到底、并写进文件 —— 否则清单上一条「检查」看起来就是全管住了。
+     */
+    if (coverageOf(rule) === 'partial') {
+      line()
+      line(`${ICON.warn} ${c.yellow('这条规则只管住了一部分。')} 没管住的：`)
+      for (const u of rule.uncovered) line(`  ${c.yellow('·')} ${u}`)
+      line(c.gray('  会写进文件的 uncovered，并在 nucleus rules 里标成「半」。'))
+      line(c.gray('  管一半比不管好 —— 但前提是没人误以为整条都生效了。'))
+    }
     for (const u of p.uncertain ?? []) {
       line(`${ICON.warn} ${c.yellow('模型拿不准')}：${u}`)
     }
@@ -358,6 +382,7 @@ async function wizardWith(
       requiredFields: [],
       resultFields: {},
       appliesTo: [],
+      uncovered: [],
     }
 
     heading(`加一条规则：${c.bold(id)}`)
@@ -452,92 +477,58 @@ async function wizardWith(
      */
     if (isCheck === 'runtime') {
       line()
-      line(c.yellow('  这一类目前强制不了 —— 但原因是运行时缺原语，不是你这条要求不好。'))
+      line(c.yellow('  这一句目前强制不了 —— 但原因是运行时缺原语，不是你这条要求不好。'))
       line(c.gray('  check 校验的只有**模型自己提交的那份结果**，没有别的信息源。'))
-      line(c.gray('  所以「它有没有真的先问过人」这种事，现在验不了 ——'))
-      line(c.gray('  加一个 `approved: true` 字段是同一个模型自己填的，等于给自己签字。'))
+      line(c.gray('  所以「它有没有真的先问过人」这种事现在验不了 ——'))
+      line(c.gray('  加一个 `approved: true` 是同一个模型自己填的，等于给自己签字。'))
       line()
       line(c.gray('  已知的缺口，都在 backlog 上：'))
       for (const g of KNOWN_GAPS) line(c.gray(`  · ${g}`))
       line()
-      line(`  ${c.yellow('不要把它写进 identity。')}`)
-      line(c.gray('  identity 就是提醒 —— 把一个能修的缺口埋成一句没人强制的话，'))
-      line(c.gray('  从此没人会再想起它。先不加，或者找出它可机械判定的那一小块。'))
-      return 1
-    }
 
-    if (isCheck === 'yes') {
-      const shape = await select('字段长什么样？', [
+      /**
+       * **不要在这里就放弃整条规则。**
+       *
+       * 这是我刚在模型路径上修掉的同一个毛病：要求几乎都是复合的，
+       * 「有一句管不住」不等于「整条管不住」。实测那条就是两句 ——
+       * 「必须写计划」今天能查，「必须经用户同意」不能。
+       *
+       * 所以先把管不住的那句记下来（它会写进文件、显示在清单里），
+       * 然后**接着问剩下的部分**。整条都管不住时，末尾的
+       * 「只有提醒」判据自然会拒掉它，不需要在这里提前下结论。
+       */
+      const clause = (await readLine('  把管不住的那一句抄下来（回车＝整条都是这一句）：')).trim()
+      draft.uncovered.push(clause || what)
+      line(c.gray(`  记下了，它会写进规则文件的 uncovered，并在 nucleus rules 里标出来 ——`))
+      line(c.gray('  否则下个月清单上写着「已有检查」，没人记得这半句从来没生效。'))
+      line()
+      line('  现在看**剩下的部分**：')
+      const rest = await select('去掉那一句之后，还有能从结果里机械看出来的吗？', [
         {
-          value: 'core' as const,
-          label: `要求核心字段必填`,
-          detail: `从 ${RESERVED_FIELDS.join(' / ')} 里选 —— 不用声明新东西`,
+          value: 'yes' as const,
+          label: '有 —— 继续定检查',
+          detail: `管住能管的那部分。例：「必须写计划」→ 要求结果里有 plan 字段`,
         },
         {
-          value: 'list' as const,
-          label: '要求一个「条目列表」，每条都得带某些字段',
-          detail: '例：data_points[] 每条都要 value / source / fetched_at',
+          value: 'no' as const,
+          label: '没有了 —— 整条要求都靠那个缺的原语',
+          detail: '那就先不加这条规则，等原语落地',
         },
       ])
-      if (shape === null) return cancelled()
-
-      if (shape === 'core') {
-        const f = await select(
-          '哪个字段必填？',
-          RESERVED_FIELDS.map((x) => ({ value: x, label: x })),
-        )
-        if (f === null) return cancelled()
-        draft.requiredFields = [f]
-      } else {
-        /**
-         * 名字在**输入时**就校验，而不是等到最后。
-         *
-         * 我第一版的示例文案自己写的是 `dataPoints`（camelCase），
-         * 而字段名必须 snake_case —— 于是照着提示填完，最后一步才被加载器拒。
-         * 「向导让我这么填，加载器又说不行」是最难堪的那种错。
-         * 正则从 result-schema 导入，不在这里重写一份（重写必然漂）。
-         */
-        const listName = (await readLine('  列表字段叫什么？（如 data_points）：')).trim()
-        if (!listName) return cancelled()
-        if (RESERVED_FIELDS.includes(listName)) {
-          line(c.red(`  ${listName} 是核心字段，不能覆盖。换个名字`))
-          return 1
-        }
-        if (!FIELD_NAME.test(listName)) {
-          line(c.red(`  ${FIELD_NAME_HINT}`))
-          line(c.gray(`  比如 ${toSnake(listName)}`))
-          return 1
-        }
-        line(c.gray('  每条要带哪些字段？一行一个，空行结束。'))
-        line(c.gray('  形如 `source:string` / `value:number` / `fetched_at:string`'))
-        const fields: Record<string, string> = {}
-        for (;;) {
-          const l = (await readLine('    ')).trim()
-          if (!l) break
-          const [name, type = 'string'] = l.split(':').map((x) => x.trim())
-          if (!name) continue
-          if (!FIELD_NAME.test(name)) {
-            line(c.red(`    ${FIELD_NAME_HINT} —— 比如 ${toSnake(name)}`))
-            continue
-          }
-          if (!['string', 'number', 'boolean'].includes(type)) {
-            line(c.red(`    类型只能是 string / number / boolean，收到「${type}」`))
-            continue
-          }
-          fields[name] = type
-        }
-        if (Object.keys(fields).length === 0) return cancelled()
-
-        draft.resultFields = {
-          [listName]: { type: 'object[]', description: what, fields },
-        }
-        // 每个元素都必填 —— `a[].b` 表示 a 非空且每一条的 b 都非空
-        draft.requiredFields = Object.keys(fields).map((f) => `${listName}[].${f}`)
+      if (rest === null) return cancelled()
+      if (rest === 'no') {
         line()
-        line(`${ICON.ok} 检查：${c.cyan(draft.requiredFields.join(', '))}`)
-        line(c.gray(`  少任何一项都会被退回，规则原文回给模型让它重做。`))
+        line(c.yellow('  那先不加 —— 整条都没有机械强制的部分。'))
+        line(`  ${c.yellow('也不要写进 agent 的 identity。')}`)
+        line(c.gray('  identity 就是提醒 —— 把一个能修的缺口埋成一句没人强制的话，'))
+        line(c.gray('  从此没人会再想起它。它现在记在 backlog 的 C-17 上。'))
+        return 1
       }
+      line()
+      if (!(await fillCheck(draft, what))) return cancelled()
     }
+
+    if (isCheck === 'yes' && !(await fillCheck(draft, what))) return cancelled()
 
     // ── ③ 提醒 ──
     line()
@@ -589,6 +580,93 @@ async function wizardWith(
   }
 }
 
+/**
+ * 填 check 的具体形状。返回 false 表示取消 / 填不下去。
+ *
+ * ── 为什么从树里拆出来 ────────────────────────────────
+ *
+ * 有两条路会到这里：直接答「能从结果里看出来」，以及答「要验的是运行时事实」
+ * 之后**剩下的那部分**仍然能查。后者是关键 —— 一条要求里有一句管不住时，
+ * 不该整条放弃，而该管住能管的、把管不住的记进 uncovered。
+ *
+ * 填完两条路都要继续问「提醒」，所以这里只填不收尾。
+ */
+async function fillCheck(draft: Draft, what: string): Promise<boolean> {
+
+    const shape = await select('字段长什么样？', [
+      {
+        value: 'core' as const,
+        label: `要求核心字段必填`,
+        detail: `从 ${RESERVED_FIELDS.join(' / ')} 里选 —— 不用声明新东西`,
+      },
+      {
+        value: 'list' as const,
+        label: '要求一个「条目列表」，每条都得带某些字段',
+        detail: '例：data_points[] 每条都要 value / source / fetched_at',
+      },
+    ])
+    if (shape === null) return false
+
+    if (shape === 'core') {
+      const f = await select(
+        '哪个字段必填？',
+        RESERVED_FIELDS.map((x) => ({ value: x, label: x })),
+      )
+      if (f === null) return false
+      draft.requiredFields = [f]
+    } else {
+      /**
+       * 名字在**输入时**就校验，而不是等到最后。
+       *
+       * 我第一版的示例文案自己写的是 `dataPoints`（camelCase），
+       * 而字段名必须 snake_case —— 于是照着提示填完，最后一步才被加载器拒。
+       * 「向导让我这么填，加载器又说不行」是最难堪的那种错。
+       * 正则从 result-schema 导入，不在这里重写一份（重写必然漂）。
+       */
+      const listName = (await readLine('  列表字段叫什么？（如 data_points）：')).trim()
+      if (!listName) return false
+      if (RESERVED_FIELDS.includes(listName)) {
+        line(c.red(`  ${listName} 是核心字段，不能覆盖。换个名字`))
+        return false
+      }
+      if (!FIELD_NAME.test(listName)) {
+        line(c.red(`  ${FIELD_NAME_HINT}`))
+        line(c.gray(`  比如 ${toSnake(listName)}`))
+        return false
+      }
+      line(c.gray('  每条要带哪些字段？一行一个，空行结束。'))
+      line(c.gray('  形如 `source:string` / `value:number` / `fetched_at:string`'))
+      const fields: Record<string, string> = {}
+      for (;;) {
+        const l = (await readLine('    ')).trim()
+        if (!l) break
+        const [name, type = 'string'] = l.split(':').map((x) => x.trim())
+        if (!name) continue
+        if (!FIELD_NAME.test(name)) {
+          line(c.red(`    ${FIELD_NAME_HINT} —— 比如 ${toSnake(name)}`))
+          continue
+        }
+        if (!['string', 'number', 'boolean'].includes(type)) {
+          line(c.red(`    类型只能是 string / number / boolean，收到「${type}」`))
+          continue
+        }
+        fields[name] = type
+      }
+      if (Object.keys(fields).length === 0) return false
+
+      draft.resultFields = {
+        [listName]: { type: 'object[]', description: what, fields },
+      }
+      // 每个元素都必填 —— `a[].b` 表示 a 非空且每一条的 b 都非空
+      draft.requiredFields = Object.keys(fields).map((f) => `${listName}[].${f}`)
+      line()
+      line(`${ICON.ok} 检查：${c.cyan(draft.requiredFields.join(', '))}`)
+      line(c.gray(`  少任何一项都会被退回，规则原文回给模型让它重做。`))
+    }
+  
+  return true
+}
+
 async function askAppliesTo(agents: string[]): Promise<string[]> {
   line()
   const scope = await select('作用于谁？', [
@@ -634,26 +712,13 @@ function cancelled(): number {
   return 1
 }
 
-function render(d: Draft): string {
-  const fm: string[] = []
-  if (d.gist) fm.push(`gist: ${d.gist}`)
-  fm.push(`appliesTo: [${d.appliesTo.map((x) => `'${x}'`).join(', ')}]`)
-  if (d.denyTools.length) fm.push(`denyTools: [${d.denyTools.join(', ')}]`)
-  if (d.requiredFields.length) fm.push(`requiredFields: [${d.requiredFields.join(', ')}]`)
-  for (const [name, decl] of Object.entries(d.resultFields)) {
-    fm.push('resultFields:')
-    fm.push(`  ${name}:`)
-    const o = decl as { type: string; description?: string; fields?: Record<string, string> }
-    fm.push(`    type: ${o.type}`)
-    if (o.description) fm.push(`    description: ${o.description}`)
-    if (o.fields) {
-      fm.push(`    fields:`)
-      for (const [k, v] of Object.entries(o.fields)) fm.push(`      ${k}: ${v}`)
-    }
-  }
-  return `---\n${fm.join('\n')}\n---\n${d.constraint ? `\n${d.constraint}\n` : ''}`
-}
-
+/**
+ * 树以前有**自己一份渲染器**，和 rule-propose 的 renderRuleMd 并存。
+ *
+ * 删掉了：两份渲染同一种文件的代码必然漂 —— 加 uncovered 时就得改两处，
+ * 漏掉一处的症状是「树生成的规则少了一半信息」，而且**不报错**。
+ * `finish` 本来就已经拼出一个 UserRule，直接用那一个。
+ */
 async function finish(
   d: Draft,
   n: Awaited<ReturnType<typeof boot>>,
@@ -676,6 +741,7 @@ async function finish(
         : null,
     denyTools: d.denyTools,
     appliesTo: d.appliesTo,
+    uncovered: d.uncovered,
     path,
   }
 
@@ -693,7 +759,7 @@ async function finish(
 
   line()
   heading('这条规则')
-  const text = render(d)
+  const text = renderRuleMd(rule)
   for (const l of text.split('\n')) line(`  ${c.gray(l)}`)
 
   line()
@@ -720,6 +786,21 @@ async function finish(
     line()
     line(c.yellow('机器判不了的一件事：这个检查真的对应你那句要求吗？'))
     line(c.gray('  形式合法但不相干的检查比没有检查更糟 —— 它看起来像多了一层保障。'))
+  }
+
+  /**
+   * **管住了一半，就得在写之前说清是哪一半。**
+   *
+   * 这条信息也会跟着规则进文件（frontmatter 的 uncovered）并显示在
+   * `nucleus rules` 里 —— 只在创建时打印一次是不够的：下个月清单上写着
+   * 「plan-first：检查」，没人会记得另一半从来没生效。
+   */
+  if (coverageOf(rule) === 'partial') {
+    line()
+    line(`${ICON.warn} ${c.yellow('这条规则只管住了一部分。')} 没管住的：`)
+    for (const u of rule.uncovered) line(`  ${c.yellow('·')} ${u}`)
+    line(c.gray('  会写进文件的 uncovered，并在 nucleus rules 里标成「半」。'))
+    line(c.gray('  管一半比不管好 —— 但前提是没人误以为整条都生效了。'))
   }
 
   line()

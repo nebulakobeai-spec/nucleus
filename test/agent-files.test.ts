@@ -362,3 +362,45 @@ describe('来源标签', () => {
     }
   })
 })
+
+/**
+ * 块状列表 —— 为 `uncovered`（没管住的分句）加的。
+ *
+ * **不能用行内 `[a, b]`**：那按 `,` 切，而没管住的分句是散文，
+ * 里面本来就可能有逗号。那时一句话会被切成两句，**而且不报错** ——
+ * 清单上只是多出一条半截的句子。
+ */
+describe('块状列表', () => {
+  it('解析 `- ` 列表项', () => {
+    const r = parseFrontmatter(`---\nuncovered:\n  - 甲\n  - 乙\n---\n`)
+    expect(r.errors).toEqual([])
+    expect(r.data['uncovered']).toEqual(['甲', '乙'])
+  })
+
+  /** 这才是用块状写法的**理由** —— 行内数组会在这里切错 */
+  it('列表项里的逗号原样保留', () => {
+    const r = parseFrontmatter(`---\nuncovered:\n  - 先写计划, 再执行\n---\n`)
+    expect(r.errors).toEqual([])
+    expect(r.data['uncovered']).toEqual(['先写计划, 再执行'])
+  })
+
+  it('列表与嵌套映射能共存 —— 同一份 frontmatter 里两种都有', () => {
+    const r = parseFrontmatter(
+      `---\nresultFields:\n  plan:\n    type: object[]\nuncovered:\n  - 要人同意\n---\n`,
+    )
+    expect(r.errors).toEqual([])
+    expect(r.data['resultFields']).toEqual({ plan: { type: 'object[]' } })
+    expect(r.data['uncovered']).toEqual(['要人同意'])
+  })
+
+  it('没有对应键的列表项报错，而不是静默丢掉', () => {
+    const r = parseFrontmatter(`---\n- 孤立项\n---\n`)
+    expect(r.errors.some((e) => /列表项没有对应的键/.test(e))).toBe(true)
+  })
+
+  it('行内数组照旧有效 —— 老写法不能坏', () => {
+    const r = parseFrontmatter(`---\nappliesTo: ['*', 'researcher']\n---\n`)
+    expect(r.errors).toEqual([])
+    expect(r.data['appliesTo']).toEqual(['*', 'researcher'])
+  })
+})

@@ -109,6 +109,7 @@ describe('validateRules', () => {
     check: null,
     denyTools: [],
     appliesTo: [],
+    uncovered: [],
     path: 'rules/r.md',
     ...over,
   })
@@ -169,6 +170,7 @@ describe('按 agent 解析三层', () => {
       gist: null,
       denyTools: [],
       appliesTo: ['researcher'],
+      uncovered: [],
       path: 'a',
     },
     {
@@ -178,6 +180,7 @@ describe('按 agent 解析三层', () => {
       check: null,
       denyTools: ['exec_shell'],
       appliesTo: [],
+      uncovered: [],
       path: 'b',
     },
     {
@@ -187,6 +190,7 @@ describe('按 agent 解析三层', () => {
       gist: null,
       denyTools: [],
       appliesTo: ['*'],
+      uncovered: [],
       path: 'c',
     },
   ]
@@ -311,6 +315,7 @@ describe('长正文的规则', () => {
       check: { requiredFields: ['summary'] },
       denyTools: [],
       appliesTo: [],
+      uncovered: [],
       path: `rules/rule-${i}.md`,
     }))
 
@@ -335,6 +340,7 @@ describe('长正文的规则', () => {
         check: { requiredFields: ['summary'] },
         denyTools: [],
         appliesTo: [],
+        uncovered: [],
         path: 'a',
       },
       {
@@ -344,6 +350,7 @@ describe('长正文的规则', () => {
         check: { requiredFields: ['summary'] },
         denyTools: [],
         appliesTo: [],
+        uncovered: [],
         path: 'b',
       },
       {
@@ -353,6 +360,7 @@ describe('长正文的规则', () => {
         check: null,
         denyTools: ['write_file'],
         appliesTo: [],
+        uncovered: [],
         path: 'c',
       },
     ]

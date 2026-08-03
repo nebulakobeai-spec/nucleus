@@ -24,6 +24,7 @@ const rule = (over: Partial<UserRule> = {}): UserRule => ({
   check: null,
   denyTools: [],
   appliesTo: [],
+  uncovered: [],
   path: 'rules/r.md',
   ...over,
 })

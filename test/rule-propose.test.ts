@@ -11,7 +11,7 @@ import {
   validateRuleProposal,
   type RuleProposal,
 } from '../src/cli/rule-propose.js'
-import { parseRuleFile } from '../src/runtime/user-rules.js'
+import { coverageOf, parseRuleFile } from '../src/runtime/user-rules.js'
 import { guessKind } from '../src/cli/rule-new.js'
 
 /**
@@ -283,5 +283,95 @@ describe('模型没给 kind 时的兜底', () => {
    */
   it('看不出来时落回保守的那一边', () => {
     expect(guessKind({ tier: ['reminder'], reasoning: '不好说' })).toBe('inherent')
+  })
+})
+
+/**
+ * ── 复合要求：管住能管的那半 ─────────────────────────────
+ *
+ * 这一组是整个模块最重要的一条不变量，而它原先根本不存在。
+ *
+ * `cannotEnforce` 是**整条规则**的布尔值，而真实的要求几乎都是复合的。
+ * 于是「一半能管一半不能」没有表达方式，模型只能二选一 —— 而我加的
+ * cannotEnforce 出口让「全不能」成了最省事的那个答案。
+ *
+ * 实测那条：「每次执行前必须写计划，计划写完必须由用户审核后同意后再执行」
+ * 被整条判为强制不了。但前半句今天就能查（要求结果里有 plan 字段 ——
+ * 伪造它等于真把计划写了），只有后半句要等审批原语。
+ *
+ * **不拆的话，每一条复合要求都会被向下取整到零。**
+ */
+describe('复合要求', () => {
+  it('提示词第 0 步就是拆句，并给出 plan-first 那个例子', () => {
+    const text = buildRulePrompt(n, 'x', 'y')
+    expect(text).toMatch(/第 0 步/)
+    expect(text).toMatch(/不要因为有一句管不住就整条放弃/)
+    expect(text).toMatch(/uncoveredClauses/)
+    // 例子要具体到能照着做
+    expect(text).toMatch(/必须写计划/)
+  })
+
+  /**
+   * 这两者同时为真时，向导会走 cannotEnforce 那条路（打印「强制不了」然后
+   * 什么都不写）—— 于是**已经找出来的那半个 check 被静默丢掉**。
+   * 而模型混用它们很自然（「大体上强制不了，不过顺手加了个字段」）。
+   */
+  it('cannotEnforce 与「已管住一部分」互斥 —— 否则那半个 check 会被静默丢掉', () => {
+    const out = validateRuleProposal(
+      n,
+      p({ requiredFields: ['summary'], cannotEnforce: true, uncoveredClauses: ['要用户同意'] }),
+    )
+    expect(out.some((x) => x.fatal && /别整条放弃/.test(x.message))).toBe(true)
+  })
+
+  it('说了强制不了却不说是哪几句 —— 提示（没法核对，也不知道缺什么原语）', () => {
+    const out = validateRuleProposal(n, p({ tier: ['reminder'], cannotEnforce: true }))
+    expect(out.some((x) => !x.fatal && x.field === 'uncoveredClauses')).toBe(true)
+    expect(out.filter((x) => x.fatal)).toEqual([])
+  })
+
+  it('管一半是合法的，不阻断', () => {
+    const out = validateRuleProposal(
+      n,
+      p({ requiredFields: ['summary'], uncoveredClauses: ['计划要经用户同意后才能执行'] }),
+    )
+    expect(out.filter((x) => x.fatal)).toEqual([])
+  })
+
+  /**
+   * **没管住的那半必须活到文件里。**
+   *
+   * 只在创建时打印一次是不够的：下个月 `nucleus rules` 上写着
+   * 「plan-first：检查」，没人会记得另一半从来没生效过。
+   */
+  it('uncovered 写进文件并能读回来 —— 打印一次不算', () => {
+    const proposal = p({
+      tier: ['check'],
+      resultFields: { plan: { type: 'object[]', fields: { step: 'string' } } },
+      requiredFields: ['plan[].step'],
+      uncoveredClauses: ['计划写完必须由用户审核同意后再执行'],
+    })
+    const rule = toRule('plan-first', proposal, 'rules/plan-first.md')
+    expect(coverageOf(rule)).toBe('partial')
+
+    const md = renderRuleMd(rule)
+    expect(md).toMatch(/uncovered:/)
+
+    const back = parseRuleFile('rules/plan-first.md', md)
+    expect(back.problems.filter((x) => x.fatal), md).toEqual([])
+    expect(back.rule!.uncovered).toEqual(['计划写完必须由用户审核同意后再执行'])
+    expect(coverageOf(back.rule!)).toBe('partial')
+  })
+
+  it('全管住时不写 uncovered 这个键', () => {
+    const rule = toRule('x', p({ requiredFields: ['summary'] }), 'x.md')
+    expect(coverageOf(rule)).toBe('full')
+    expect(renderRuleMd(rule)).not.toMatch(/uncovered/)
+  })
+
+  /** 一个字段都没管住的规则，coverage 是 none —— 加载器本来就会拒 */
+  it('什么都没强制 → none', () => {
+    const rule = toRule('x', p({ tier: ['reminder'], constraint: '要礼貌' }), 'x.md')
+    expect(coverageOf(rule)).toBe('none')
   })
 })

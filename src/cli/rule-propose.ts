@@ -76,6 +76,23 @@ export interface RuleProposal {
   missingMechanism?: string
   /** 拿不准的地方 —— 有内容时向导会就这几点问你 */
   uncertain?: string[]
+  /**
+   * 这条要求里**没被管住的分句**，原样抄回来。
+   *
+   * ── 为什么必须有这个字段 ──────────────────────────────
+   *
+   * 真实的要求几乎都是复合的，而 `cannotEnforce` 是**整条规则**的布尔值。
+   * 于是「一半能管一半不能」没有表达方式，模型只能二选一 ——
+   * 而我加的 cannotEnforce 出口让「全不能」成了最省事的那个答案。
+   *
+   * 实测：「每次执行前必须写计划，用户审核同意后再执行」被整条判为强制不了。
+   * 但前半句今天就能查（要求结果里有 plan 字段 —— 伪造它等于真把计划写了），
+   * 只有后半句要等审批原语。**该给的是拆分，不是全盘否决。**
+   *
+   * 有了这个字段，「管住一半」才有地方说，而且会跟着规则存进文件、
+   * 显示在清单里 —— 否则下个月没人记得另一半从来没生效。
+   */
+  uncoveredClauses?: string[]
 }
 
 export function ruleProposalSchema(): Record<string, unknown> {
@@ -161,6 +178,15 @@ export function ruleProposalSchema(): Record<string, unknown> {
         items: { type: 'string' },
         description: '拿不准的地方，一条一句。会拿去问使用者。宁可多写。',
       },
+      uncoveredClauses: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          '这条要求里**没有被 boundary/check 管住的分句**，从原文抄回来。' +
+          '复合要求里有一句管不住、别的能管住时，**不要整条 cannotEnforce** ——' +
+          '管住能管的，把管不住的列在这里。这个清单会写进规则文件并显示在清单里，' +
+          '所以不会有人误以为整条都生效了。',
+      },
     },
     required: ['tier', 'reasoning'],
   }
@@ -208,6 +234,22 @@ export function buildRulePrompt(n: Nucleus, id: string, description: string): st
     agents || '（无）',
     '',
     '## 判断顺序',
+    /**
+     * **先拆句 —— 这一步原先完全没有。**
+     *
+     * 实测那条要求是两句话，前半句今天就能查，后半句不能。而提示词只给了
+     * 「全能 / 全不能」两个答案，于是它整条判了强制不了。真实的要求几乎都是
+     * 复合的（用户自己的规则就是多句的文档），不拆的话**每一条都会被向下取整到零**。
+     */
+    '**第 0 步：把这句要求拆成分句。**',
+    '复合要求几乎是常态，而各分句往往落在不同的层，甚至一句能管一句不能。',
+    '逐句判，然后合起来 —— **不要因为有一句管不住就整条放弃**。',
+    '例：「必须写计划，且计划要经用户同意后才能执行」是两句。',
+    '「必须写计划」→ check（要求结果里有 plan 字段，伪造它等于真把计划写了）；',
+    '「经用户同意后才能执行」→ 现在管不住，放进 uncoveredClauses。',
+    '结果是一条**管住一半**的规则，而不是没有规则。',
+    '',
+    '每一句按强度倒着问：',
     '先问：这条约束是不是「不许用某个工具」？→ 是则 boundary，到此为止，不必写任何文本。',
     '再问：违反了之后，能不能**只看提交的结果**就机械判出来？→ 能则 check。',
     '最后：reminder 只负责解释「为什么」，而且必须已经有 check 或 boundary。',
@@ -232,6 +274,8 @@ export function buildRulePrompt(n: Nucleus, id: string, description: string): st
     '',
     '**如果两者都不行，置 cannotEnforce: true 并说明原因。那是合法答案** ——',
     '不要编一个不相干的 check 来凑数。',
+    '**但 cannotEnforce 是说整条要求的每一句都管不住** ——',
+    '只要有一句能管，就管住它，把剩下的放进 uncoveredClauses。',
     '同时必须给 unenforceableKind：本质判不了（inherent），',
     '还是这条要求本可机械判定、只是运行时缺原语（missing_mechanism，',
     '比如需要用户审批、跨回合状态、或者要验运行时发生过什么）。',
@@ -333,9 +377,35 @@ export function validateRuleProposal(
     out.push({ field: 'tier', message: '什么都没提议', fatal: true })
   }
 
-  // 边界够了还写提醒 —— 提示而非阻断（那句话可能讲的是别的事）
-  if (hasBoundary && hasReminder && !hasCheck) {
+  /**
+   * `cannotEnforce` 与「已经管住了一部分」互斥。
+   *
+   * 这不是钻字眼：两者同时为真时，向导会走 cannotEnforce 那条路
+   * （打印「强制不了」然后什么都不写），于是**已经找出来的那半个 check
+   * 被静默丢掉**。而模型混用这两者是很自然的（「大体上强制不了，
+   * 不过顺手加了个字段」）。
+   */
+  if (p.cannotEnforce && (hasCheck || hasBoundary)) {
     out.push({
+      field: 'cannotEnforce',
+      message:
+        'cannotEnforce 说的是「每一句都管不住」，但这里已经有 check / boundary 了 ——' +
+        '既然管住了一部分，就别整条放弃：去掉 cannotEnforce，' +
+        '把管不住的那几句放进 uncoveredClauses',
+      fatal: true,
+    })
+  }
+  // 全都管不住却没说是哪几句 —— 那句「强制不了」就没法核对
+  if (p.cannotEnforce && !(p.uncoveredClauses ?? []).length) {
+    out.push({
+      field: 'uncoveredClauses',
+      message: '说了强制不了，但没列出是哪几句 —— 列出来才能核对，也才知道缺什么原语',
+      fatal: false,
+    })
+  }
+
+  // 边界够了还写提醒 —— 提示而非阻断（那句话可能讲的是别的事）
+  if (hasBoundary && hasReminder && !hasCheck) {    out.push({
       field: 'constraint',
       message: '边界已经让那些工具不出现在模型看到的定义里，再写一句提醒是白花每轮的预算',
       fatal: false,
@@ -371,6 +441,7 @@ export function toRule(id: string, p: RuleProposal, path: string): UserRule {
         : null,
     denyTools: p.denyTools ?? [],
     appliesTo: p.appliesTo?.length ? p.appliesTo : ['*'],
+    uncovered: (p.uncoveredClauses ?? []).map((x) => x.trim()).filter(Boolean),
     path,
   }
 }
@@ -398,6 +469,16 @@ export function renderRuleMd(r: UserRule): string {
         }
       }
     }
+  }
+  /**
+   * **没管住的分句要写进文件。**
+   *
+   * 打印一次是不够的：下个月 `nucleus rules` 上写着「plan-first：检查」，
+   * 没人会记得那条要求的后半句从来没生效过。
+   */
+  if (r.uncovered.length) {
+    fm.push(`uncovered:`)
+    for (const u of r.uncovered) fm.push(`  - ${u}`)
   }
   return `---\n${fm.join('\n')}\n---\n${r.constraint ? `\n${r.constraint}\n` : ''}`
 }
