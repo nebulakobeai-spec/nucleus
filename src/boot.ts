@@ -12,6 +12,7 @@ import { RunStore } from './store/runs.js'
 import { ConversationStore } from './store/conversations.js'
 import { ToolRegistry } from './runtime/tools.js'
 import { registerBuiltins } from './runtime/builtin-tools.js'
+import { presenceOf } from './runtime/user-rules.js'
 import { Runner } from './runtime/runner.js'
 import { Worker, type WorkerOptions } from './runtime/worker.js'
 import { DEFAULT_COMPACT_POLICY } from './context/compact.js'
@@ -111,6 +112,14 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
       maxDepth: config.defaults.maxDelegationDepth,
       maxRunsPerRoot: config.defaults.maxRunsPerRoot,
     },
+    /**
+     * 正文按需加载的规则。工具注册表是全局的，所以这里放**所有** agent 的
+     * 按需规则 —— 谁能看到 read_rule 由权限层决定（它无需权限，所以人人可见）。
+     *
+     * 那是对的：约束块里的索引行只会列出这个 agent 自己受约束的那些，
+     * 所以它不会去读与自己无关的规则；而万一读了也无害（规则不是秘密）。
+     */
+    indexedRules: (config.rules ?? []).filter((r) => presenceOf(r) === 'indexed'),
   })
 
   // MCP：部署与运行 server 是用户的事；这里只负责连接、翻译、命名空间、调用。

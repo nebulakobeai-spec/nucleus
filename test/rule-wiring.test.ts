@@ -20,6 +20,7 @@ import type { MockScript } from '../src/providers/mock.js'
 const rule = (over: Partial<UserRule> = {}): UserRule => ({
   id: 'r',
   constraint: null,
+  gist: null,
   check: null,
   denyTools: [],
   appliesTo: [],

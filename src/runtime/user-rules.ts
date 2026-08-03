@@ -46,8 +46,31 @@ export interface RuleCheck {
 
 export interface UserRule {
   id: string
-  /** T1：注入末尾约束块的原文。没有正文说明这条规则纯靠 T2/T3 强制 */
+  /**
+   * T1 正文。没有正文说明这条规则纯靠 T2/T3 强制。
+   *
+   * **可以很长。** 真实的规则往往是文档：实测一份规则集 18 个文件、
+   * 共 28k token，单个最大 7k。一两句话说得清的规则是少数。
+   *
+   * 长正文**不会**每轮进 context —— 见 `gist`。
+   */
   constraint: string | null
+  /**
+   * 索引行 —— **永远在 context 里的那一句**，正文按需加载。
+   *
+   * ── 为什么必须有这个字段 ──────────────────────────────
+   *
+   * 把整段正文每轮塞进末尾约束块是行不通的：约束块预算只有 ~2000 token
+   * （131k 窗口），而 18 条规则就是 28k。超了会被**静默砍半**
+   * （`shrink_constraints`）—— 对一份文档来说砍半等于毁掉，而且不报错。
+   *
+   * ── 索引行里必须带触发条件 ────────────────────────────
+   *
+   * 「工作区路径规则」这种索引是没用的 —— 模型不知道什么时候该去读。
+   * 有用的是「**创建或部署文件前必读**」「**禁止推测硬件参数**」：
+   * 那既是提醒也是触发条件。一句话同时干两件事，这是它值得占常驻预算的理由。
+   */
+  gist: string | null
   /** T2：机械校验 */
   check: RuleCheck | null
   /** T3：不给这些工具 —— 零成本、不可违反 */
@@ -65,7 +88,34 @@ export interface RuleProblem {
   fatal: boolean
 }
 
-const KNOWN_KEYS = ['appliesTo', 'denyTools', 'requiredFields', 'id']
+const KNOWN_KEYS = ['appliesTo', 'denyTools', 'requiredFields', 'id', 'gist']
+
+/**
+ * 正文超过这么多 token 就必须给 `gist`，正文改为按需加载。
+ *
+ * 120 token 大约是三四行中文 —— 能一口气读完、放进常驻预算也不心疼的量。
+ * 实测的真实规则最小的一个是 320 token，也就是说**几乎所有真规则都需要 gist**。
+ * 那不是负担：写索引行的过程本身就是在回答「什么时候该看这条规则」，
+ * 而那个答案不写下来，规则就只是一堆没人读的文档。
+ */
+export const INLINE_MAX_TOKENS = 120
+
+/** 粗估 token —— 中文约 2 字符 1 token，英文约 4 */
+export function roughTokens(text: string): number {
+  let cjk = 0
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!
+    if (c >= 0x2e80 && c <= 0x9fff) cjk++
+  }
+  const other = text.length - cjk
+  return Math.ceil(cjk / 1.6 + other / 4)
+}
+
+/** 这条规则的正文是内联还是按需 */
+export function presenceOf(r: UserRule): 'inline' | 'indexed' | 'none' {
+  if (!r.constraint) return 'none'
+  return roughTokens(r.constraint) <= INLINE_MAX_TOKENS && !r.gist ? 'inline' : 'indexed'
+}
 
 export const DEFAULT_RULES_DIR = 'rules'
 const SKIP = new Set(['readme.md', 'index.md', 'notes.md'])
@@ -99,7 +149,70 @@ export function parseRuleFile(path: string, text: string): { rule?: UserRule; pr
     : []
   const appliesTo = Array.isArray(data['appliesTo']) ? (data['appliesTo'] as string[]) : []
   const constraint = body.trim() || null
+  const gist = typeof data['gist'] === 'string' ? data['gist'].trim() || null : null
   const check: RuleCheck | null = requiredFields.length ? { requiredFields } : null
+
+  /**
+   * 长正文没有索引行 → 拒绝。
+   *
+   * 不是「警告然后照样塞进去」：约束块预算是 ~2000 token，一条 3000 token 的
+   * 规则进去之后会被砍半，而砍半的文档比没有更糟 —— 前半段读起来像完整的规则，
+   * 后半段（往往是例外与反例）不见了，而且**不报错**。
+   */
+  if (constraint && !gist && roughTokens(constraint) > INLINE_MAX_TOKENS) {
+    problems.push({
+      path,
+      message:
+        `正文约 ${roughTokens(constraint)} token，超过内联上限 ${INLINE_MAX_TOKENS} ——` +
+        ` 必须给一个 gist（索引行），正文改为按需加载。\n` +
+        `    gist 要**同时是提醒和触发条件**，模型才知道什么时候去读正文：\n` +
+        `      gist: 创建或部署文件前必读 —— 路径规则\n` +
+        `      gist: 禁止推测硬件参数，必须先验证\n` +
+        `    反例（没有触发条件，等于没说）：「工作区路径规则」`,
+      fatal: true,
+    })
+  }
+  /**
+   * gist 有没有说清「什么时候该读」。
+   *
+   * **这是筛查，不是判定** —— 机器判不了一句话是否真的可行动。
+   * 但最懒的那种失败可以筛：把规则名重复一遍当索引行。
+   *
+   *   ✗ 「communication —— 相关操作前必读」  重复了 id，没说什么时候
+   *   ✓ 「禁止推测硬件参数，必须先验证」      立刻可行动
+   *   ✓ 「创建或部署文件前必读 —— 路径规则」   给了触发时机
+   *
+   * 判据：**不含任何触发词**就提醒。
+   *
+   * 一开始我还要求「gist 里抄了 id」才报，想少些误报 —— 但那漏掉了最典型的
+   * 坏例子「工作区路径规则」（纯名词短语、没抄 id）。而中文的祈使句几乎必然
+   * 带「要 / 必须 / 前 / 禁止」之一，纯名词短语才没有 —— 那正是要抓的形状。
+   */
+  if (gist) {
+    const TRIGGER = /前|时|之后|涉及|禁止|不要|必须|不得|一律|只能|超过|遇到|发现|需要|要/
+    if (!TRIGGER.test(gist)) {
+      problems.push({
+        path,
+        message:
+          `gist「${gist}」没说**什么时候**该读正文 —— 看起来只是给规则起了个名字。\n` +
+          `    模型看到的只有这一行 —— 它据此决定要不要花一次工具调用去取正文。\n` +
+          `    有用的写法带触发时机：「创建或部署文件前必读」「禁止推测硬件参数」`,
+        fatal: false,
+      })
+    }
+  }
+
+  // 短正文又给了 gist：那两句会同时出现在约束块里，其中一句是白花的
+  if (constraint && gist && roughTokens(constraint) <= INLINE_MAX_TOKENS) {
+    problems.push({
+      path,
+      message:
+        `正文只有约 ${roughTokens(constraint)} token，短到可以直接内联 ——` +
+        ` 给了 gist 反而多占一行常驻预算。要么删掉 gist（正文直接内联），` +
+        `要么把正文写全（那时 gist 才有意义）`,
+      fatal: false,
+    })
+  }
 
   /**
    * **只有 T1 的规则被拒绝。**
@@ -127,7 +240,7 @@ export function parseRuleFile(path: string, text: string): { rule?: UserRule; pr
   if (problems.some((p) => p.fatal)) return { problems }
 
   return {
-    rule: { id, constraint, check, denyTools, appliesTo, path },
+    rule: { id, constraint, gist, check, denyTools, appliesTo, path },
     problems,
   }
 }
@@ -236,11 +349,28 @@ export function rulesForAgent(rules: UserRule[], agentId: string): UserRule[] {
   )
 }
 
-/** 这个 agent 的 T1 约束原文（注入末尾约束块） */
+/**
+ * 这个 agent 的 T1 —— **注入末尾约束块的那几行**。
+ *
+ * 短规则给全文；长规则只给索引行加一句「正文在哪」。
+ * 后者是这套设计的全部意义：28k 的规则压成 1k 左右的常驻成本。
+ */
 export function constraintsForAgent(rules: UserRule[], agentId: string): string[] {
-  return rulesForAgent(rules, agentId)
-    .map((r) => r.constraint)
-    .filter((x): x is string => Boolean(x))
+  const out: string[] = []
+  for (const r of rulesForAgent(rules, agentId)) {
+    const how = presenceOf(r)
+    if (how === 'inline') out.push(r.constraint!)
+    else if (how === 'indexed') {
+      // 索引行 + 怎么取正文。规则 id 要写出来 —— 否则模型不知道该 read_rule 什么
+      out.push(`${r.gist ?? r.id}（完整规则：read_rule("${r.id}")）`)
+    }
+  }
+  return out
+}
+
+/** 正文按需加载的那些规则 —— `read_rule` 的可取清单 */
+export function indexedRulesForAgent(rules: UserRule[], agentId: string): UserRule[] {
+  return rulesForAgent(rules, agentId).filter((r) => presenceOf(r) === 'indexed')
 }
 
 /** 这个 agent 因规则而必填的字段（T2），与 agent 自己声明的合并 */

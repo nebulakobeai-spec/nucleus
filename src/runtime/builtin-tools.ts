@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { envelopeJsonSchema, envelopeSizes, validateEnvelope } from './envelope.js'
 import { RULE } from './rules.js'
+import type { UserRule } from './user-rules.js'
 import { dirname, isAbsolute, join, normalize, relative } from 'node:path'
 import type { RunStore } from '../store/runs.js'
 import { toolError, type ToolDefinition, type ToolRegistry } from './tools.js'
@@ -273,13 +274,77 @@ export function delegateTool(
  * 模型看不到也就不会去试。这才是 T3 能力边界该有的样子。
  */
 
+/**
+ * 按需读一条规则的正文。
+ *
+ * ── 为什么必须有这个工具 ────────────────────────────────
+ *
+ * 真实的规则是文档，不是一两句话：实测一份规则集 18 个文件共 28k token，
+ * 单个最大 7k。而末尾约束块的预算只有 ~2000 token（131k 窗口）——
+ * 全塞进去会被**静默砍半**，而砍半的文档比没有更糟：前半段读起来像完整的规则，
+ * 后半段（往往正是例外与反例）不见了，且不报错。
+ *
+ * 所以长规则在约束块里只留一行**索引 + 触发条件**（「创建文件前必读」），
+ * 正文靠这个工具取。28k 压成 1k 左右的常驻成本。
+ *
+ * ── 为什么不需要权限 ──────────────────────────────────
+ *
+ * 它读的是**约束这个 agent 自己的规则**。如果索引行说了「详见 read_rule(x)」
+ * 却拿不到，那条规则就等于不存在 —— 指向空处的索引比没有索引更糟。
+ * 所以它是无条件可用的，和 submit_result 同一类。
+ */
+export function readRuleTool(rules: UserRule[]): ToolDefinition {
+  const byId = new Map(rules.map((r) => [r.id, r]))
+  return {
+    name: 'read_rule',
+    description:
+      '读一条规则的完整正文。末尾约束块里只有索引行时，用它取全文。' +
+      `可取的规则：${rules.map((r) => r.id).join(', ') || '（无）'}`,
+    parameters: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          // enum 让模型不必猜。为空时上层不注册这个工具，所以这里一定非空
+          enum: rules.map((r) => r.id),
+          description: '规则 id（约束块里那行括号内写着）',
+        },
+      },
+      required: ['id'],
+    },
+    requires: [],
+    sideEffect: 'pure',
+    execute: async (args) => {
+      const id = String((args as { id?: unknown }).id ?? '')
+      const r = byId.get(id)
+      if (!r) {
+        // 报错要列出可取的 —— 「没有这条规则」让模型无从下一步
+        return {
+          ok: false,
+          content: `没有规则「${id}」。可取的：${[...byId.keys()].join(', ') || '（无）'}`,
+        }
+      }
+      return { ok: true, content: `# 规则 ${r.id}\n\n${r.constraint ?? '（这条规则没有正文）'}` }
+    },
+  }
+}
+
 export function registerBuiltins(
   registry: ToolRegistry,
-  opts: { store: RunStore; delegateTargets: DelegateTarget[]; delegateLimits: DelegateLimits },
+  opts: {
+    store: RunStore
+    delegateTargets: DelegateTarget[]
+    delegateLimits: DelegateLimits
+    /** 正文按需加载的规则。为空时**不注册** read_rule —— 宣告一个空能力没有意义 */
+    indexedRules?: UserRule[]
+  },
 ): void {
   registry.register(readFileTool)
   registry.register(writeFileTool)
   registry.register(writeReportTool)
+  // 没有按需规则时不注册 —— 与 delegate 同一个理由：给一个必然空手而回的工具
+  // 等于宣告一个不存在的能力
+  if (opts.indexedRules?.length) registry.register(readRuleTool(opts.indexedRules))
   // 没有可委派目标时**不注册** delegate。
   // 两个理由：`enum: []` 不是有意义的 JSON Schema（部分 provider 会拒）；
   // 而全新安装还没定义专家时，编排者直接作答才是正确行为 ——
@@ -299,4 +364,10 @@ export function registerBuiltins(
  * 只会让那层 T3 形同虚设）。MCP 工具名带 `__`，用 `server__*` 通配符写
  * 就绕过校验 —— 那是刻意留的口子。
  */
-export const BUILTIN_TOOL_NAMES = ['read_file', 'write_file', 'write_report', 'delegate']
+export const BUILTIN_TOOL_NAMES = [
+  'read_file',
+  'write_file',
+  'write_report',
+  'delegate',
+  'read_rule',
+]
