@@ -39,10 +39,10 @@ function config(rules: UserRule[]): NucleusConfig {
   return c
 }
 
-describe('agentSpec 里三层的落地', () => {
+describe('agentSpec 里三层（边界 / 检查 / 提醒）的落地', () => {
   const defaults = defaultConfig.defaults
 
-  it('T3 合并进 toolsDeny', () => {
+  it('边界合并进 toolsDeny', () => {
     const spec = agentSpec(
       { id: 'a', name: 'a', identity: 'x', toolsDeny: ['write_file'] },
       defaults,
@@ -51,7 +51,7 @@ describe('agentSpec 里三层的落地', () => {
     expect(spec.toolsDeny!.sort()).toEqual(['exec_shell', 'write_file'])
   })
 
-  it('T2 合并进 requiredFields', () => {
+  it('检查合并进 requiredFields', () => {
     const spec = agentSpec(
       { id: 'a', name: 'a', identity: 'x', requiredFields: ['summary'] },
       defaults,
@@ -61,12 +61,12 @@ describe('agentSpec 里三层的落地', () => {
   })
 
   /**
-   * **T1 不能进 systemPrompt。**
+   * **「提醒」不能进 systemPrompt。**
    *
    * 缓存前缀要逐字节稳定才能命中 prompt cache，而规则是会改的 ——
    * 一改就让所有历史缓存失效。放末尾则改了也不影响前缀。
    */
-  it('T1 进 spec.constraints，**不进 systemPrompt**', () => {
+  it('提醒进 spec.constraints，**不进 systemPrompt**', () => {
     const spec = agentSpec({ id: 'a', name: 'a', identity: 'x' }, defaults, [
       rule({ constraint: '结论要带来源。', check: { requiredFields: ['x'] } }),
     ])
@@ -90,7 +90,7 @@ describe('agentSpec 里三层的落地', () => {
   })
 })
 
-describe('端到端：T1 真的到了模型手里', () => {
+describe('端到端：「提醒」真的到了模型手里', () => {
   let n: Nucleus
 
   afterEach(async () => {
@@ -167,10 +167,10 @@ describe('端到端：T1 真的到了模型手里', () => {
   })
 
   /**
-   * T3 的强制方式是**工具根本不出现在给模型的定义里** ——
-   * 不是「调了被拒」。这条区别是 T3 比 T1 强的全部原因。
+   * 「边界」的强制方式是**工具根本不出现在给模型的定义里** ——
+   * 不是「调了被拒」。这条区别是边界比提醒强的全部原因。
    */
-  it('T3 禁掉的工具不出现在发给模型的工具列表里', async () => {
+  it('边界禁掉的工具不出现在发给模型的工具列表里', async () => {
     n = await boot({
       config: config([rule({ denyTools: ['write_report'], appliesTo: ['researcher'] })]),
       deps: { clock: new FakeClock(), ids: new FakeIds() },

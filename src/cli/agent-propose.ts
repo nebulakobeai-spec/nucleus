@@ -225,7 +225,7 @@ export function validateProposal(
  * 那时已经不好改了。所以生成时就要说。
  *
  * 判据故意粗糙（共同词 + 长度归一），因为它只是**提醒人去看**，
- * 不是自动拒绝。精确的语义相似度需要 embedding，而那属于 L3。
+ * 不是自动拒绝。精确的语义相似度需要 embedding，而那属于「检索」层（见 DESIGN 的三层记忆）。
  */
 export function overlapWarnings(n: Nucleus, id: string, whenToUse: string): ProposalProblem[] {
   const tokens = (s: string) =>

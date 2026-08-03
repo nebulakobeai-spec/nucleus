@@ -9,26 +9,26 @@ import { parseFrontmatter } from '../config/agent-files.js'
  *
  * 「结论必须标来源」这一条要求，落地时是三件事：
  *
- *   T1  给模型的一句话（注入末尾约束块）
- *   T2  机械校验（`requiredFields: ["findings[].sources"]`）
- *   T3  能力边界（这条用不上；但「不许写文件」就只需要 T3）
+ *   reminder（提醒）给模型的一句话，注入末尾约束块
+ *   check（检查）  机械校验：`requiredFields: ["findings[].sources"]`
+ *   boundary（边界）能力边界。这条用不上；但「不许写文件」只需要它
  *
  * 分成三处配置的话，**没有任何东西保证它们说的是同一件事** ——
- * 改了 T1 的措辞而忘了 T2，规则就退化成一句没人强制的空话，
+ * 改了提醒的措辞而忘了检查，规则就退化成一句没人强制的空话，
  * 而那正是这个项目要修的第一个问题。
  *
  * ── 两条原则，由校验强制而不是靠自觉 ─────────────────────
  *
- * **① T1 必须配 T2（或 T3）。** 只有 T1 的规则等于把「prompt 写满禁止但模型
+ * **① 提醒必须配检查或边界。** 只有提醒的规则等于把「prompt 写满禁止但模型
  * 照犯」原样搬回来。所以那种规则会被**拒绝**，不是警告。
  *
- * **② 能用 T3 表达的绝不写成 T1。** T3 零成本且**不可违反**（工具根本不出现
- * 在模型看到的定义里）；T1 每一轮都占约束块的 token，而且是永久成本。
+ * **② 能用边界表达的绝不写成提醒。** 边界零成本且**不可违反**（工具根本不出现
+ * 在模型看到的定义里）；提醒每一轮都占约束块的 token，而且是永久成本。
  * 所以只声明了 denyTools 的规则不需要正文 —— 那是好事，不是缺失。
  *
  * ── 为什么是 `rules/*.md` 而不是 JSON ───────────────────
  *
- * 与 `agents/*.md` 同样的理由：T1 正文是**改得最勤**的东西，
+ * 与 `agents/*.md` 同样的理由：提醒正文是**改得最勤**的东西，
  * 写在 JSON 里是 `"每条…\n没有…"` 这种转义串，diff 读不出改了什么。
  * 而且文件天然增量 —— 加一条规则不可能删掉别人。
  */
@@ -37,7 +37,7 @@ export interface RuleCheck {
   /**
    * 结果里必须有的字段。`a[].b` 表示 a 非空且每个元素的 b 都非空。
    *
-   * 这是目前唯一的 T2 形式 —— 刻意只做一种：结果契约是所有 agent 都有的
+   * 这是目前唯一的「检查」形式 —— 刻意只做一种：结果契约是所有 agent 都有的
    * 收尾动作，所以这一种覆盖面最广。将来要加（比如「产出必须过某个检查器」）
    * 就在这里加字段，而不是让规则去引用一段代码。
    */
@@ -47,7 +47,7 @@ export interface RuleCheck {
 export interface UserRule {
   id: string
   /**
-   * T1 正文。没有正文说明这条规则纯靠 T2/T3 强制。
+   * 提醒正文。没有正文说明这条规则纯靠检查 / 边界强制。
    *
    * **可以很长。** 真实的规则往往是文档：实测一份规则集 18 个文件、
    * 共 28k token，单个最大 7k。一两句话说得清的规则是少数。
@@ -71,9 +71,9 @@ export interface UserRule {
    * 那既是提醒也是触发条件。一句话同时干两件事，这是它值得占常驻预算的理由。
    */
   gist: string | null
-  /** T2：机械校验 */
+  /** 检查（check）：机械校验 */
   check: RuleCheck | null
-  /** T3：不给这些工具 —— 零成本、不可违反 */
+  /** 边界（boundary）：不给这些工具 —— 零成本、不可违反 */
   denyTools: string[]
   /** 作用于哪些 agent。`*` 或空表示全部 */
   appliesTo: string[]
@@ -120,7 +120,7 @@ export function presenceOf(r: UserRule): 'inline' | 'indexed' | 'none' {
 export const DEFAULT_RULES_DIR = 'rules'
 const SKIP = new Set(['readme.md', 'index.md', 'notes.md'])
 
-/** 一个 `.md` → 规则。id 取自文件名，正文即 T1 约束原文。 */
+/** 一个 `.md` → 规则。id 取自文件名，正文即「提醒」原文。 */
 export function parseRuleFile(path: string, text: string): { rule?: UserRule; problems: RuleProblem[] } {
   const id = basename(path).replace(/\.md$/, '')
   const { data, body, errors } = parseFrontmatter(text)
@@ -215,7 +215,7 @@ export function parseRuleFile(path: string, text: string): { rule?: UserRule; pr
   }
 
   /**
-   * **只有 T1 的规则被拒绝。**
+   * **只有「提醒」的规则被拒绝。**
    *
    * 这是这个模块存在的核心理由。一条只写了正文、没有任何机械强制的规则，
    * 就是「prompt 里写满禁止但模型照犯」—— 它会显示在规则清单里、看起来
@@ -225,7 +225,7 @@ export function parseRuleFile(path: string, text: string): { rule?: UserRule; pr
     problems.push({
       path,
       message:
-        `只有 T1 正文，没有任何机械强制（check 或 denyTools）——` +
+        `只有「提醒」正文，没有任何机械强制（检查或边界）——` +
         ` 那等于一句没人强制的 prompt 文本。\n` +
         `    先问：能不能用「不给工具」表达？（denyTools，零成本且不可违反）\n` +
         `    再问：能不能机械校验？（requiredFields，被拒时原文回给模型让它重做）\n` +
@@ -234,7 +234,7 @@ export function parseRuleFile(path: string, text: string): { rule?: UserRule; pr
     })
   }
   if (!constraint && !check && denyTools.length === 0) {
-    problems.push({ path, message: '空规则：既没有正文，也没有 check / denyTools', fatal: true })
+    problems.push({ path, message: '空规则：既没有提醒正文，也没有检查 / 边界', fatal: true })
   }
 
   if (problems.some((p) => p.fatal)) return { problems }
@@ -317,18 +317,18 @@ export function validateRules(
       if (!tools.has(t)) {
         out.push({
           path: r.path,
-          message: `denyTools 里的「${t}」不是已注册的工具（MCP 工具名形如 server__tool）—— 拼错了不会报错，只会让这条 T3 形同虚设`,
+          message: `denyTools 里的「${t}」不是已注册的工具（MCP 工具名形如 server__tool）—— 拼错了不会报错，只会让这条**边界**形同虚设`,
           fatal: true,
         })
       }
     }
 
-    // T3 已经挡住的东西不必再写 T1 —— 那是白花每轮的 token
+    // 边界已经挡住的东西不必再写提醒 —— 那是白花每轮的 token
     if (r.constraint && r.denyTools.length > 0 && !r.check) {
       out.push({
         path: r.path,
         message:
-          `既有 denyTools 又有 T1 正文。T3 已经让这些工具不出现在模型看到的定义里，` +
+          `既有边界又有提醒正文。边界已经让这些工具不出现在模型看到的定义里，` +
           `再写一句「不要用它们」是白花每轮的约束块预算 —— 除非那句话讲的是别的事`,
         fatal: false,
       })
@@ -350,7 +350,7 @@ export function rulesForAgent(rules: UserRule[], agentId: string): UserRule[] {
 }
 
 /**
- * 这个 agent 的 T1 —— **注入末尾约束块的那几行**。
+ * 这个 agent 的**提醒** —— 注入末尾约束块的那几行。
  *
  * 短规则给全文；长规则只给索引行加一句「正文在哪」。
  * 后者是这套设计的全部意义：28k 的规则压成 1k 左右的常驻成本。
@@ -373,7 +373,7 @@ export function indexedRulesForAgent(rules: UserRule[], agentId: string): UserRu
   return rulesForAgent(rules, agentId).filter((r) => presenceOf(r) === 'indexed')
 }
 
-/** 这个 agent 因规则而必填的字段（T2），与 agent 自己声明的合并 */
+/** 这个 agent 因规则而必填的字段（检查），与 agent 自己声明的合并 */
 export function requiredFieldsForAgent(rules: UserRule[], agentId: string): string[] {
   const out = new Set<string>()
   for (const r of rulesForAgent(rules, agentId)) {
@@ -382,7 +382,7 @@ export function requiredFieldsForAgent(rules: UserRule[], agentId: string): stri
   return [...out]
 }
 
-/** 这个 agent 被规则禁掉的工具（T3），与 agent 自己的 toolsDeny 合并 */
+/** 这个 agent 被规则禁掉的工具（边界），与 agent 自己的 toolsDeny 合并 */
 export function denyToolsForAgent(rules: UserRule[], agentId: string): string[] {
   const out = new Set<string>()
   for (const r of rulesForAgent(rules, agentId)) {
@@ -392,15 +392,47 @@ export function denyToolsForAgent(rules: UserRule[], agentId: string): string[] 
 }
 
 /**
- * 一条规则落在哪几层 —— 给清单与向导用。
+ * 三层的名字。
+ *
+ * ── 为什么不叫 T1 / T2 / T3 ───────────────────────────
+ *
+ * 编号记不住哪个是哪个 —— 每次都要回头查「T2 是强制还是提示」。
+ * 更糟的是编号**暗示了顺序而不是强度**：T1 听起来像「第一层、最基本的」，
+ * 而它恰恰是最弱的一层。那个误导正好助长了要修的毛病：
+ * 人的默认冲动是写一句 prompt 文本，而编号让那感觉像「正常的第一步」。
+ *
+ * 名字直接说出**强制方式**，强的排前面：
+ *
+ *   boundary（边界）  不给能力 —— 工具不出现在模型看到的定义里，无从违反
+ *   check（检查）     做完了验 —— 不合就退回，原文回给模型让它重做
+ *   reminder（提醒）  只是说一声 —— 模型可能照做，也可能不
+ *
+ * 「提醒」这个词本身就在提示它的弱：没人会以为「提醒」等于「强制」。
+ */
+export type RuleTier = 'boundary' | 'check' | 'reminder'
+
+export const TIER_LABEL: Record<RuleTier, string> = {
+  boundary: '边界',
+  check: '检查',
+  reminder: '提醒',
+}
+
+export const TIER_WHAT: Record<RuleTier, string> = {
+  boundary: '不给能力 —— 工具不出现在模型看到的定义里，无从违反。零成本',
+  check: '做完了验 —— 不合就退回，规则原文回给模型让它重做。代价是一次重写',
+  reminder: '只是说一声 —— 模型可能照做也可能不。**每一轮**都占约束块预算',
+}
+
+/**
+ * 一条规则落在哪几层 —— 给清单与向导用。**强的排前面。**
  *
  * 这个函数存在的意义是让「这条规则靠什么强制」变成可显示的事实，
  * 而不是要人去读 frontmatter 自己推断。
  */
-export function tiersOf(r: UserRule): Array<'T1' | 'T2' | 'T3'> {
-  const out: Array<'T1' | 'T2' | 'T3'> = []
-  if (r.constraint) out.push('T1')
-  if (r.check) out.push('T2')
-  if (r.denyTools.length) out.push('T3')
+export function tiersOf(r: UserRule): RuleTier[] {
+  const out: RuleTier[] = []
+  if (r.denyTools.length) out.push('boundary')
+  if (r.check) out.push('check')
+  if (r.constraint) out.push('reminder')
   return out
 }

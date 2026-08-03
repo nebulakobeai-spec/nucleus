@@ -16,18 +16,22 @@ import {
 /**
  * 用户自己写的规则 —— 一条规则同时携带三层。
  *
+ * 三层有名字而不是编号：**边界 / 检查 / 提醒**（强的排前面）。
+ * 编号记不住，而且 T1 听起来像「第一层、最基本的」，恰恰它最弱 ——
+ * 那个误导正好助长了要修的毛病。
+ *
  * 这一组主要钉住**两条原则由校验强制，不靠自觉**：
  *
- *  ① T1 必须配 T2 或 T3。只有 T1 的规则会被**拒绝** ——
+ *  ① 提醒必须配检查或边界。只有提醒的规则会被**拒绝** ——
  *    那等于「prompt 里写满禁止但模型照犯」，而且它会显示在规则清单里、
  *    看起来系统在管这件事。**看起来有约束比没有约束更糟。**
- *  ② 能用 T3 表达的绝不写成 T1。T3 零成本且不可违反。
+ *  ② 能用边界表达的绝不写成提醒。边界零成本且不可违反。
  */
 
 const md = (fm: string, body = '') => `---\n${fm}\n---\n\n${body}`
 
 describe('parseRuleFile', () => {
-  it('T1 + T2：正文进 constraint，requiredFields 进 check', () => {
+  it('提醒 + 检查：正文进 constraint，requiredFields 进 check', () => {
     const { rule, problems } = parseRuleFile(
       'rules/cite-sources.md',
       md('appliesTo: [researcher]\nrequiredFields: [findings[].sources]', '每条 finding 至少一个可验证来源。'),
@@ -36,10 +40,10 @@ describe('parseRuleFile', () => {
     expect(rule!.id).toBe('cite-sources')
     expect(rule!.constraint).toBe('每条 finding 至少一个可验证来源。')
     expect(rule!.check).toEqual({ requiredFields: ['findings[].sources'] })
-    expect(tiersOf(rule!)).toEqual(['T1', 'T2'])
+    expect(tiersOf(rule!)).toEqual(['check', 'reminder'])
   })
 
-  /** 只有 T3 的规则**不需要正文** —— 那是好事，不是缺失 */
+  /** 只有「边界」的规则**不需要正文** —— 那是好事，不是缺失 */
   it('只有 denyTools 也是合法规则，且不需要正文', () => {
     const { rule, problems } = parseRuleFile(
       'rules/no-exec.md',
@@ -47,7 +51,7 @@ describe('parseRuleFile', () => {
     )
     expect(problems.filter((p) => p.fatal)).toEqual([])
     expect(rule!.constraint).toBeNull()
-    expect(tiersOf(rule!)).toEqual(['T3'])
+    expect(tiersOf(rule!)).toEqual(['boundary'])
   })
 
   /**
@@ -56,14 +60,14 @@ describe('parseRuleFile', () => {
    * 一条只写了正文、没有任何机械强制的规则，就是这个项目要修的第一个问题。
    * 它会显示在规则清单里、看起来系统在管，而实际什么都没管。
    */
-  it('只有 T1 正文 → **拒绝**，并给出该问的两个问题', () => {
+  it('只有「提醒」→ **拒绝**，并给出该问的两个问题', () => {
     const { rule, problems } = parseRuleFile(
       'rules/be-nice.md',
       md('appliesTo: [researcher]', '回答要礼貌一点。'),
     )
     expect(rule).toBeUndefined()
     const msg = problems.map((p) => p.message).join('\n')
-    expect(msg).toMatch(/只有 T1 正文/)
+    expect(msg).toMatch(/只有「提醒」正文/)
     // 要给出下一步该怎么想，而不是只说「不行」
     expect(msg).toMatch(/denyTools/)
     expect(msg).toMatch(/requiredFields/)
@@ -120,7 +124,7 @@ describe('validateRules', () => {
     expect(p[0]!.message).toMatch(/orchestrator/)
   })
 
-  it('denyTools 引用不存在的工具 → 阻断（拼错会让 T3 形同虚设）', () => {
+  it('denyTools 引用不存在的工具 → 阻断（拼错会让「边界」形同虚设）', () => {
     const p = validateRules([rule({ denyTools: ['write_reprot'] })], known)
     expect(p[0]!.fatal).toBe(true)
     expect(p[0]!.message).toMatch(/形同虚设/)
@@ -143,10 +147,10 @@ describe('validateRules', () => {
   })
 
   /**
-   * 原则②：T3 已经挡住的东西不必再写 T1。提醒而非阻断 ——
+   * 原则②：边界已经挡住的东西不必再写提醒。是提示而非阻断 ——
    * 那句话可能讲的是别的事。
    */
-  it('同时有 denyTools 与 T1 正文 → 提醒白花预算（不阻断）', () => {
+  it('同时有边界与提醒正文 → 提示白花预算（不阻断）', () => {
     const p = validateRules(
       [rule({ denyTools: ['write_report'], constraint: '不要写文件' })],
       known,
@@ -206,14 +210,14 @@ describe('按 agent 解析三层', () => {
     ])
   })
 
-  it('T1 只收集有正文的', () => {
+  it('提醒只收集有正文的', () => {
     expect(constraintsForAgent(rules, 'researcher')).toEqual([
       '结论要带来源。',
       '不确定的数字不要编。',
     ])
   })
 
-  it('T2 合并且去重', () => {
+  it('检查合并且去重', () => {
     expect(requiredFieldsForAgent(rules, 'researcher').sort()).toEqual([
       'confidence',
       'findings[].sources',
@@ -221,7 +225,7 @@ describe('按 agent 解析三层', () => {
     expect(requiredFieldsForAgent(rules, 'orchestrator')).toEqual(['confidence'])
   })
 
-  it('T3 合并且去重', () => {
+  it('边界合并且去重', () => {
     expect(denyToolsForAgent(rules, 'orchestrator')).toEqual(['exec_shell'])
   })
 })

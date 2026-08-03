@@ -2,7 +2,7 @@ import { boot, type Nucleus } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import { agentSpec } from '../config.js'
 import { RULES, ruleSpec } from '../runtime/rules.js'
-import { tiersOf } from '../runtime/user-rules.js'
+import { TIER_LABEL, TIER_WHAT, tiersOf, type RuleTier } from '../runtime/user-rules.js'
 import { c, heading, ICON, line, strFlag, table, resolveDb } from './ui.js'
 
 /**
@@ -85,7 +85,7 @@ function printRuleList(n: Nucleus): void {
    *
    * 与内置规则分开显示：内置的由代码强制、不可增删；这些是你写的，
    * 而且**每一条都要能看出它靠什么强制** —— 三层的代价差好几个数量级：
-   * T3 零成本且不可违反，T1 每一轮都吃约束块的 token 而且只是提示。
+   * 边界零成本且不可违反，提醒每一轮都吃约束块的 token 而且只是说一声。
    */
   const userRules = n.config.rules ?? []
   if (userRules.length) {
@@ -98,27 +98,37 @@ function printRuleList(n: Nucleus): void {
         r.check?.requiredFields?.join(', ') ?? c.gray('—'),
         r.denyTools.join(', ') || c.gray('—'),
       ]),
-      ['ID', '层', '作用于', '必填字段（T2）', '禁用工具（T3）'],
+      ['ID', '强制方式', '作用于', '必填字段（检查）', '禁用工具（边界）'],
     )
     line()
-    // 把 T1 的永久成本说出来 —— 加规则时看不到它，就会越加越多
-    const withT1 = userRules.filter((r) => r.constraint)
-    if (withT1.length) {
-      const tokens = withT1.reduce((n, r) => n + Math.ceil((r.constraint ?? '').length / 2), 0)
+    // 把「提醒」的永久成本说出来 —— 加规则时看不到它，就会越加越多
+    const withReminder = userRules.filter((r) => r.constraint)
+    if (withReminder.length) {
+      const tokens = withReminder.reduce(
+        (n, r) => n + Math.ceil((r.gist ?? r.constraint ?? '').length / 2),
+        0,
+      )
       line(
         c.gray(
-          `${withT1.length} 条带 T1 正文，约 ${tokens} tok —— **每一轮都占约束块预算**。` +
+          `${withReminder.length} 条带「提醒」，常驻约 ${tokens} tok —— **每一轮都花**。` +
             `超出上限时会被砍半（shrink_constraints）。`,
         ),
       )
     }
-    for (const r of withT1) {
+    for (const r of withReminder) {
       line(`  ${c.gray(`${r.id}：`)}${r.constraint}`)
     }
   } else {
     line()
     line(c.gray('还没有你自己写的规则。加一条：把 examples/rules/*.md 复制到 rules/ 下。'))
     line(c.gray('一条规则同时携带三层，运行时按字段决定它落到哪 —— 见那个目录的 README。'))
+  }
+  // 三层各自是什么、代价多少 —— 名字之外还要说清代价，否则「提醒」还是会被滥用
+  if (userRules.length) {
+    line()
+    for (const t of ['boundary', 'check', 'reminder'] as RuleTier[]) {
+      line(`  ${tierLabel(t)}  ${c.gray(TIER_WHAT[t])}`)
+    }
   }
 
   heading('各 agent 的契约与边界')
@@ -157,7 +167,7 @@ function printAgentRules(n: Nucleus, id: string): void {
   line(`${c.gray('负责领域')} ${cfg.whenToUse ?? c.red('（未声明）')}`)
   line(`${c.gray('是否入口')} ${n.config.defaults.entryAgent === id ? c.cyan('是') : c.gray('否')}`)
 
-  heading('T3 能力边界')
+  heading('内置的能力边界')
   line(`  ${c.gray('授予权限')} ${spec.permissions.join(', ') || c.gray('（无）')}`)
   line(`  ${c.gray('可用工具')} ${tools.join(', ') || c.gray('（无）')}`)
   if (spec.toolsAllow?.length) line(`  ${c.gray('名字收窄')} ${spec.toolsAllow.join(', ')}`)
@@ -168,7 +178,7 @@ function printAgentRules(n: Nucleus, id: string): void {
   }
   line(c.gray('  这一层最强：不给工具，模型无从违反，成本为零'))
 
-  heading('T2 结果契约')
+  heading('内置的结果契约（检查）')
   if (cfg.requiredFields?.length) {
     for (const f of cfg.requiredFields) line(`  ${c.yellow(f)}`)
     line(c.gray('  缺了会被退回并把缺项告知模型，重试上限内改对即可'))
@@ -335,11 +345,12 @@ function rateColor(rate: number): string {
 
 
 /**
- * 三层的标签。**颜色即代价**：
- * T3 绿（零成本、不可违反）、T2 青（一次重写）、T1 黄（每轮都花，而且只是提示）。
+ * **颜色即代价**：
+ * 边界绿（零成本、不可违反）、检查青（一次重写）、提醒黄（每轮都花，而且只是提示）。
  */
-function tierLabel(t: 'T1' | 'T2' | 'T3'): string {
-  if (t === 'T3') return c.green('T3')
-  if (t === 'T2') return c.cyan('T2')
-  return c.yellow('T1')
+function tierLabel(t: RuleTier): string {
+  const s = TIER_LABEL[t]
+  if (t === 'boundary') return c.green(s)
+  if (t === 'check') return c.cyan(s)
+  return c.yellow(s)
 }
