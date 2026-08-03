@@ -13,7 +13,7 @@ import { agentList, agentMap, agentShow } from './agent.js'
 import { agentNew } from './agent-new.js'
 import { agentTry } from './agent-try.js'
 import { artifactCat, artifactList } from './artifact.js'
-import { providersCmd } from './providers.js'
+import { providersCmd, providersProbe } from './providers.js'
 import { rulesCmd } from './rules.js'
 import { ScheduleStore } from '../store/schedules.js'
 import { findStuckRuns, findUnknownToolOutcomes } from '../runtime/stuck.js'
@@ -646,6 +646,7 @@ ${c.bold('agent 与规则')}
   schedule add <名称>          加一个：--cron "30 8 * * *" --agent <id> --goal "…"
   schedule history <名称>      每次触发的结果，含被跳过的那些与原因
   providers [log]             provider 层：熔断、失败、跳过原因、用量
+  providers probe [模型]       去问出模型的真实窗口（ollama /api/show 等）
   artifact list [run]         产出清单
   artifact cat <路径>         读产出内容
 
@@ -859,8 +860,10 @@ export async function main(argv: string[]): Promise<number> {
       }
     }
     case 'providers':
-    case 'provider':
+    case 'provider': {
+      if (rest[0] === 'probe') return providersProbe(rest.slice(1), flags)
       return providersCmd(rest, flags)
+    }
     case 'rules':
       return rulesCmd(rest, flags)
     case 'bundle':

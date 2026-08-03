@@ -241,6 +241,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   'mcp',
   'yes',
   'dry-run',
+  'overflow',
   'help',
 ])
 

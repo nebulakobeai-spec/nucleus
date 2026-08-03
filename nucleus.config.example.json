@@ -93,9 +93,15 @@
       "rpm": 60,
       "costPerMTokIn": 0.6,
       "costPerMTokOut": 2.2,
-      "costPerMTokCacheRead": 0.11,
-      "contextWindow": 204800,
-      "maxTokens": 131072
+      "costPerMTokCacheRead": 0.11
+      // ⚠ 这两个数字**没有填**。理由见文件开头那条：宁可不填，不编造数字。
+      //
+      // 我（写这份模板的人）不可能知道你用的版本是多少 —— 模型更新比任何一份
+      // 代码的知识都快，而填错**不会报错**：填小了压缩会过早触发（1M 窗口的
+      // 模型在 3% 就开始压），填大了请求被拒或者被静默截断。
+      //
+      // 去问出来：nucleus providers probe zai:glm-5.2
+      // 留空则回落到 defaults.assumedContextWindow（那也是猜的，但至少是你自己定的）
     },
 
     // ── 本地模型：只在需要覆盖参数时才写 ──────────────────
@@ -110,6 +116,14 @@
       "billing": "usage",
       "costPerMTokIn": 0,
       "costPerMTokOut": 0,
+      // 这个数是**示例**，不是你的模型的真实值。本地模型可以问出来：
+      //   nucleus providers probe ollama
+      // 它读 /api/show 的 model_info["<arch>.context_length"]（权威）。
+      //
+      // ⚠ 但那是**训练窗口**，不等于 ollama 实际分配的 —— 实际由 num_ctx 决定
+      // （OLLAMA_CONTEXT_LENGTH 或每请求指定），老版本默认 4096。
+      // 那种情况下按训练窗口装配会被**静默截断**，两边对不上而且不报错。
+      // 发 45k 左右的输入、看 prompt_eval_count 回来多少才能确认。
       "contextWindow": 256000
     },
 

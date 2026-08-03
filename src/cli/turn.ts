@@ -2,6 +2,7 @@ import { ask, type Nucleus } from '../boot.js'
 import { recoveryOf } from '../errors.js'
 import { TeeEventSink, type RunEvent } from '../runtime/events.js'
 import { compressionRatio } from '../context/compact.js'
+import { formatCtx } from '../context/budget.js'
 import { compactTokens, Pet, petStill } from './pet.js'
 import { c, duration, heading, ICON, line, money, recoveryHint, statusColor, table } from './ui.js'
 
@@ -33,6 +34,13 @@ export interface TurnResult {
   hint: string | null
   /** run 在等重试时，下一次尝试的时刻 */
   retryAt: Date | null
+  /**
+   * 这一轮实际发出去的 context 与窗口。
+   *
+   * 取自最后一次 `context.assembled` 事件 —— 那是**真的发出去的那一份**，
+   * 不是估算。没有该事件（比如 run 在调模型之前就失败了）时为 null。
+   */
+  ctx: { used: number; window: number } | null
 }
 
 const p = (e: RunEvent) => (e.payload ?? {}) as Record<string, unknown>
@@ -296,6 +304,7 @@ export async function runTurn(n: Nucleus, conversationId: string, text: string):
     errorCode: run?.errorCode ?? null,
     hint: extractHint(run?.errorDetail),
     retryAt: run?.status === 'waiting_retry' ? await nextRetryAt(n, runId) : null,
+    ctx: await lastCtx(n, runId),
   }
 }
 
@@ -349,9 +358,47 @@ export function printTurn(r: TurnResult, opts: { runCount?: number } = {}): void
     money(r.costUsd, { subscription: r.allSubscription }),
     duration(r.elapsedMs),
   ]
+  /**
+   * ctx 占用放在最后一格。
+   *
+   * `tok` 是**这一轮花掉的** token（计费用），`ctx` 是**这一轮发出去的
+   * context 有多大**（离撞墙还有多远）—— 两个数字含义完全不同，
+   * 混成一个会让人以为「才花了 2k token，离窗口还远」，
+   * 而实际上 context 已经 80% 满了。
+   */
+  if (r.ctx) {
+    const f = formatCtx(r.ctx.used, r.ctx.window)
+    parts.push(f.level === 'high' ? c.red(f.text) : f.level === 'warn' ? c.yellow(f.text) : f.text)
+  }
   // 猫报账：成功时高兴，失败时难过 —— 一行里既有结论也有情绪
   const mood = r.reply ? 'happy' : 'sad'
   line(`${petStill(mood)} ${c.gray(parts.join(' · '))}`)
+}
+
+/**
+ * 这一轮**实际发出去**的 context 有多大。
+ *
+ * 读 `context.assembled` 事件的 breakdown.total，而不是自己估 ——
+ * 那个事件是装配器写的，记的就是真的发出去的那一份。自己估会与实际漂移，
+ * 而这个数字的全部用处就是「离撞墙还有多远」，漂了就没意义。
+ *
+ * 取**根 run 的最后一次**：编排者整合那一轮的 context 最大（历史最长），
+ * 子 run 的 context 不含会话历史，拿它报会低估。
+ */
+export async function lastCtx(
+  n: Nucleus,
+  rootRunId: string,
+): Promise<{ used: number; window: number } | null> {
+  const r = await n.db.query<{ payload: { window?: number; breakdown?: { total?: number } } }>(
+    `select e.payload from run_events e
+       join run_attempts a on a.id = e.run_attempt_id
+      where a.run_id = $1 and e.kind = 'context.assembled'
+      order by e.id desc limit 1`,
+    [rootRunId],
+  )
+  const p = r.rows[0]?.payload
+  if (!p?.window || p.breakdown?.total === undefined) return null
+  return { used: p.breakdown.total, window: p.window }
 }
 
 /** 列出最近的 root run */

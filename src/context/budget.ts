@@ -126,6 +126,30 @@ export function contextBudgetFor(
  */
 export const FALLBACK_BUDGET: ContextBudget = contextBudgetFor(128_000, 8_192)
 
+/**
+ * `ctx: 84.6K/131K (65%)` —— **这一轮实际发出去了多少 context**。
+ *
+ * 分母是模型窗口而不是历史预算：用户关心的是「离撞墙还有多远」，
+ * 而历史预算只是窗口里分给历史那一份。用预算做分母会显示成
+ * 「65%」而实际只用了窗口的 40% —— 那会让人以为快满了。
+ *
+ * 超过 90% 标红、超过 70% 标黄：这两条线不是随便定的 ——
+ * 70% 是压缩的触发线附近（意味着「接下来会开始压」），
+ * 90% 意味着「再长一点这一轮就装不下了」。
+ */
+export function formatCtx(
+  usedTokens: number,
+  contextWindow: number,
+): { text: string; ratio: number; level: 'ok' | 'warn' | 'high' } {
+  const ratio = contextWindow > 0 ? usedTokens / contextWindow : 0
+  const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}K` : String(n))
+  return {
+    text: `ctx ${k(usedTokens)}/${k(contextWindow)} (${Math.round(ratio * 100)}%)`,
+    ratio,
+    level: ratio >= 0.9 ? 'high' : ratio >= 0.7 ? 'warn' : 'ok',
+  }
+}
+
 /** 给人看的一行 */
 export function describeBudget(b: ContextBudget, t: Tokenizer = heuristicTokenizer): string {
   void t

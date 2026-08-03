@@ -3,6 +3,8 @@ import { loadConfig } from '../config-file.js'
 import { recoveryOf } from '../errors.js'
 import { c, duration, heading, ICON, line, money, recoveryHint, resolveDb, strFlag, table } from './ui.js'
 import { compactTokens } from './pet.js'
+import { probeModel, type ProbeResult } from '../providers/discover.js'
+import { CredentialStore } from '../auth/credentials.js'
 
 /**
  * `nucleus providers` —— 后端模型层面出了什么问题。
@@ -213,4 +215,109 @@ async function printLog(n: Nucleus, since: string): Promise<void> {
     }
     line(`${c.gray(t)} ${icon} ${e.key.padEnd(22)} ${c.gray(e.kind.padEnd(16))} ${detail}`)
   }
+}
+
+
+/**
+ * `nucleus providers probe` —— 去问出每个模型的窗口与输出上限。
+ *
+ * 这两个数字决定压缩什么时候触发、context 怎么装配，而填错的后果**不是报错**：
+ * 填小了 1M 窗口的模型在 3% 就开始压缩；填大了请求被拒，或者更糟 ——
+ * 有些实现会静默丢掉超出的部分。
+ *
+ * 而它们没法从代码里知道：模型版本更新比任何一份代码的知识都快。
+ * 所以让它去问，并且**把来源一起报出来** —— 一个从错误文本正则出来的数字与
+ * 一份官方元数据，可信度不同，不该显示成同一回事。
+ *
+ * **不自动写回配置。** 打印可直接粘的片段，由你决定要不要采纳 ——
+ * 探测（尤其溢出探测）可能出错，静默改配置会让一个错数字变成「已知事实」。
+ */
+export async function providersProbe(
+  argv: string[],
+  flags: Record<string, string | true>,
+): Promise<number> {
+  const { config } = await loadConfig(strFlag(flags, 'config'))
+  const n = await boot({ config, ...resolveDb(flags), skipMcp: true })
+  const only = argv[0]
+  // Nucleus 上没暴露凭据（刻意的：值不该在对象上到处传），这里直接用 store
+  const creds = new CredentialStore()
+
+  try {
+    const targets = n.config.models.filter(
+      (m) => m.provider !== 'mock' && (!only || m.key === only || m.key.includes(only)),
+    )
+    if (targets.length === 0) {
+      line(c.red(only ? `没有匹配「${only}」的模型` : '配置里没有非 mock 模型'))
+      return 1
+    }
+
+    heading(`探测 ${targets.length} 个模型`)
+    line(c.gray('窗口与输出上限决定压缩何时触发、context 怎么装配。'))
+    line(c.gray('填错不会报错 —— 只会静默浪费窗口，或者被静默截断。'))
+    line()
+
+    const results: Array<{ cfg: (typeof targets)[number]; r: ProbeResult }> = []
+    for (const cfg of targets) {
+      const key = cfg.apiKeyRef
+        ? ((await creds.resolve(cfg.apiKeyRef).catch(() => null))?.secret ?? null)
+        : null
+      const r = await probeModel(cfg, key, fetch as never, {
+        allowOverflow: flags['overflow'] === true,
+      })
+      results.push({ cfg, r })
+      printProbe(cfg, r)
+    }
+
+    // 与配置里现有的值对一遍 —— 差异才是这个命令真正要给出的东西
+    const diffs = results.filter(
+      ({ cfg, r }) => r.contextWindow && r.contextWindow !== cfg.contextWindow,
+    )
+    if (diffs.length) {
+      line()
+      heading('与配置不一致')
+      for (const { cfg, r } of diffs) {
+        line(
+          `  ${cfg.key}：配置写 ${cfg.contextWindow ?? '(未填)'}，探到 ${c.bold(String(r.contextWindow))}` +
+            c.gray(` · 来源 ${SOURCE_LABEL[r.source ?? 'inferred-from-error']}`),
+        )
+      }
+      line()
+      line(c.gray('要采纳就把下面这段粘进 nucleus.config.json 对应的模型里：'))
+      for (const { cfg, r } of diffs) {
+        line(c.gray(`  // ${cfg.key} —— 来源 ${SOURCE_LABEL[r.source ?? 'inferred-from-error']}`))
+        line(c.gray(`  "contextWindow": ${r.contextWindow},`))
+        if (r.maxOutputTokens) line(c.gray(`  "maxTokens": ${r.maxOutputTokens},`))
+      }
+      // 不自动写：探测可能出错，静默改配置会让错数字变成「已知事实」
+      line()
+      line(c.gray('刻意不自动写回 —— 探测可能出错，尤其从错误文本推断的那种。'))
+    } else if (results.some(({ r }) => r.contextWindow)) {
+      line()
+      line(`${ICON.ok} 探到的窗口与配置一致`)
+    }
+    return 0
+  } finally {
+    await n.close()
+  }
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  'ollama-api-show': 'ollama /api/show（权威）',
+  'models-endpoint': 'provider 的 /models',
+  'inferred-from-error': '从报错文本推断（可信度最低）',
+}
+
+function printProbe(cfg: { key: string; contextWindow?: number }, r: ProbeResult): void {
+  const head = r.contextWindow
+    ? `${ICON.ok} ${cfg.key} → 窗口 ${c.bold(String(r.contextWindow))}` +
+      (r.maxOutputTokens ? ` · 输出 ${r.maxOutputTokens}` : '') +
+      c.gray(` · ${SOURCE_LABEL[r.source ?? ''] ?? r.source ?? ''}`)
+    : `${ICON.warn} ${cfg.key} → ${c.yellow('探不到')}`
+  line(head)
+  // notes 里常常有比数字更重要的前提（比如 ollama 的 num_ctx 那条）
+  for (const note of r.notes) {
+    const warn = note.startsWith('⚠')
+    line(`    ${warn ? c.yellow(note) : c.gray(note)}`)
+  }
+  if (r.error) line(`    ${c.red(r.error)}`)
 }
