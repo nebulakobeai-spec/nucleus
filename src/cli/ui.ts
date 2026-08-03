@@ -221,6 +221,11 @@ const VALUE_FLAGS = new Set([
   'provider',
   'run',
   'scenario',
+  'base-url',
+  'key-ref',
+  'as',
+  'context-window',
+  'max-tokens',
   'since',
   'timezone',
   'tz',
@@ -241,7 +246,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   'mcp',
   'yes',
   'dry-run',
-  'overflow',
+  'no-probe',
   'help',
 ])
 

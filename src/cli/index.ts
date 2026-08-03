@@ -18,6 +18,7 @@ import { rulesCmd } from './rules.js'
 import { ScheduleStore } from '../store/schedules.js'
 import { findStuckRuns, findUnknownToolOutcomes } from '../runtime/stuck.js'
 import { convCompact, convList, convSeed, convShow, convSummary } from './conv.js'
+import { modelCmd } from './model.js'
 import {
   scheduleAdd,
   scheduleHistory,
@@ -283,6 +284,29 @@ async function doctor(flags: Record<string, string | true>): Promise<number> {
       }
     }
     checks.push({ name: 'agent 配置', ok: n.config.agents.length > 0, detail: n.config.agents.map((a) => a.id).join(', ') })
+
+    /**
+     * TLS 证书校验被全局关掉时必须报出来。
+     *
+     * `NODE_TLS_REJECT_UNAUTHORIZED=0` 会让**所有** HTTPS 请求跳过证书校验 ——
+     * 包括 Nucleus 带着 API key 去调 provider 的那些。那意味着中间人可以拿到
+     * 凭据，而且**没有任何迹象**：请求照样成功，什么都不报。
+     *
+     * 常见成因是绕公司的 MITM 代理。那个需求是真的，但正确做法是
+     * `NODE_EXTRA_CA_CERTS` 指向公司根证书 —— 那样只信任那一个额外的 CA，
+     * 而不是谁都信。
+     */
+    if (process.env['NODE_TLS_REJECT_UNAUTHORIZED'] === '0') {
+      checks.push({
+        name: 'TLS 证书校验',
+        ok: false,
+        detail:
+          'NODE_TLS_REJECT_UNAUTHORIZED=0 —— **所有 HTTPS 都不验证证书**，' +
+          '包括带着 API key 去调 provider 的请求。中间人能拿到凭据而且毫无迹象。' +
+          '如果是为了绕公司代理，改用 NODE_EXTRA_CA_CERTS=<公司根证书路径>：' +
+          '那样只多信一个 CA，而不是谁都信。',
+      })
+    }
 
     // 凭据：只报来源与有效性，绝不打印值
     for (const s of await credentialStatus(n.config)) {
@@ -646,7 +670,11 @@ ${c.bold('agent 与规则')}
   schedule add <名称>          加一个：--cron "30 8 * * *" --agent <id> --goal "…"
   schedule history <名称>      每次触发的结果，含被跳过的那些与原因
   providers [log]             provider 层：熔断、失败、跳过原因、用量
-  providers probe [模型]       去问出模型的真实窗口（ollama /api/show 等）
+  providers probe [模型]       问出模型的真实窗口（ollama /api/show 权威）
+  model list                  模型清单：窗口、输出上限、计费；以及 provider 段
+  model add <provider> <id>   加模型。**provider 与模型分开** —— 同一个模型
+                              可以跑在 anthropic / openrouter / ollama 上
+  model set <key> --context-window <n>   改窗口（会显示预算与压缩触发点的变化）
   artifact list [run]         产出清单
   artifact cat <路径>         读产出内容
 
@@ -807,6 +835,9 @@ export async function main(argv: string[]): Promise<number> {
           return artifactCat(rest, flags)
       }
     }
+    case 'model':
+    case 'models':
+      return modelCmd(rest, flags)
     case 'conv':
     case 'convs':
     case 'conversation': {

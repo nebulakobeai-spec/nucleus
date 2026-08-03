@@ -349,7 +349,8 @@ export class ModelRouter {
 
     let lastError: unknown
     for (let i = 0; i <= this.#retries; i++) {
-      this.#health.noteRequest(cfg.key)
+      // 按 provider 记 —— rpm/tpm 是账号级限制，同 provider 的模型共用一个桶
+      this.#health.noteRequest(cfg.provider)
       try {
         const res = await provider.chat({ ...req, model: cfg.model })
         this.#assertNotDegenerate(res)

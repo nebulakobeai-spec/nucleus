@@ -29,6 +29,29 @@
   //   "xai":    { "clientId": "<你申请到的 client_id>" }
   // },
 
+  // ── provider：端点 / 协议 / 凭据引用 / 账号级限流 ──────────────
+  //
+  // 与 models 分开，因为**同一个模型跑在不同 provider 上是常态**：
+  // openrouter 的 moonshotai/kimi-k3、ollama 的 kimi-k3 是同一个模型。
+  // 合在一起就得把 baseUrl / apiKeyRef 抄好几遍，而抄漏一处**不会报错** ——
+  // 只会在调用时 401，那时你会去查凭据，不会想到是配置抄漏了。
+  //
+  // rpm / tpm 住在这里而不是模型上：它们是**账号级**限制，同一个 provider 下
+  // 所有模型共用一个令牌桶。放在模型上会让 N 个模型各发满 rpm，然后一起撞 429。
+  //
+  // 这一段可以整个不写 —— 模型上直接写 baseUrl 也有效（默认 + 覆盖，不是二选一）。
+  "providers": {
+    "zai": {
+      "baseUrl": "https://api.z.ai/v1",
+      "apiKeyRef": "ZAI_API_KEY",
+      "rpm": 60
+    },
+    "ollama": {
+      "baseUrl": "http://localhost:11434/v1"
+      // 不需要 key
+    }
+  },
+
   "models": [
     // ── 订阅制：月费已付，单次调用无边际成本 ──────────────
     // 真正的约束是配额与限流，不是 token 单价。

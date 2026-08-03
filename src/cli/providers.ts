@@ -261,9 +261,7 @@ export async function providersProbe(
       const key = cfg.apiKeyRef
         ? ((await creds.resolve(cfg.apiKeyRef).catch(() => null))?.secret ?? null)
         : null
-      const r = await probeModel(cfg, key, fetch as never, {
-        allowOverflow: flags['overflow'] === true,
-      })
+      const r = await probeModel(cfg, key, fetch as never)
       results.push({ cfg, r })
       printProbe(cfg, r)
     }

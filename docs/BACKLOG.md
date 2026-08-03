@@ -464,6 +464,68 @@
     压缩」，而 mock 摘要器是我写的，它当然会把约束抄下来。真实模型会不会把
     约束放进 `constraints`、会不会在第二代压缩时丢掉，目前**一点数据都没有**。
 
+19p. **`--overflow` 溢出探测删掉了** ✅
+
+    我给的理由是「请求在生成之前就被拒，所以几乎不花钱」——**那是假设，
+    不是事实**：有的厂对被拒的请求照样按输入计费，更糟的是有的厂**接受并截断**，
+    那就真的处理了 3M token 的输入。把一个没验证的成本假设做成功能是不行的。
+
+    解析器（`parseWindowFromError`）留着：**真实调用**撞到窗口上限时报错里就带
+    这个数字，那时不额外花钱。将来可以在 `provider.bad_request` 的处理里顺手记。
+
+19q. **provider 与 model 混在一起** ✅ 已修
+
+    `ModelConfig` 里塞了两类东西：
+
+        provider 的：baseUrl / api / apiKeyRef / rpm / tpm / anthropicVersion
+        model 的：  model / contextWindow / maxTokens / 单价
+
+    而**同一个模型跑在不同 provider 上是常态** —— anthropic 的 opus-5、
+    openrouter 的 moonshotai/kimi-k3、ollama 的 kimi-k3。三条都要重抄一遍
+    baseUrl / api / apiKeyRef，而**抄漏一处不会报错**，只会在调用时 401；
+    那时人会去查凭据，不会想到是配置抄漏了。
+
+    **顺带一个真 bug**：`rpm`/`tpm` 是账号级限制，却放在 model 上、令牌桶按
+    模型 key 记 —— 同 provider 两个模型各拿一个桶，配 rpm=60 实际发到 120，
+    然后一起撞 429。桶改成按 provider 记之后自然消失。
+
+    已做：`providers` 配置段 + `resolveModels()`（分层是配置要的，扁平是运行时
+    要的，这个函数就是那道边界）。规则是「**provider 提供默认，模型写了就覆盖**」
+    而不是二选一 —— 同 provider 下某个模型走不同端点是真实存在的
+    （Kimi 的 coding 端点）。旧写法（无 providers 段）照旧有效。
+
+    `PROVIDER_TEMPLATES` 内置 7 个 provider 的**端点与协议**，
+    但**没有凭据、也不猜 contextWindow** —— 有测试钉住这两条。
+
+19r. **配置模型的 workflow** ✅ 已做
+
+        nucleus model add anthropic  claude-opus-5
+        nucleus model add openrouter moonshotai/kimi-k3
+        nucleus model add ollama     kimi-k3
+
+    两段：先确认 provider（内置模板一句话搞定，不在列表里就给 `--base-url`），
+    再问模型自己的东西。窗口的处理顺序是**能问服务就问服务，问不出来就问你，
+    绝不猜**：不给 `--context-window` 时先探测（ollama `/api/show` 权威），
+    探不到就退出并说清「这一项没法猜」+ 填错的后果。
+
+    `key` 是**别名**、`model` 是真实 id ——`openrouter:kimi-k3` 指向
+    `moonshotai/kimi-k3`，链里引用短名。
+
+    **不自动写回配置**：配置里那些注释（每个数字为什么是这个值）会被 JSON
+    序列化全部丢掉。这和 `agent new` 不同 —— 后者是**新建**文件，没有既有注释可毁。
+
+    加完会直接算给你看新模型的预算与压缩触发点。`model set` 改窗口时显示前后对比。
+
+19o2. **`NODE_TLS_REJECT_UNAUTHORIZED=0` 现在会被 doctor 报出来** ✅
+
+    做 model add 时从 Node 的警告里发现的（在开发机的 shell 里设着）。
+    它让**所有** HTTPS 跳过证书校验，包括 Nucleus 带着 API key 去调 provider
+    的那些 —— 中间人能拿到凭据，而且**没有任何迹象**：请求照样成功。
+
+    常见成因是绕公司 MITM 代理。那个需求是真的，但正确做法是
+    `NODE_EXTRA_CA_CERTS` 指向公司根证书 —— 只多信一个 CA，而不是谁都信。
+    doctor 里那条检查就是这么写的。
+
 19n. **窗口只能靠手填，而我自己就填错了一个** ✅ 已修
 
     上一条那张对比表里我写了「GLM-5.2 窗口 205k」—— 那个数字是从

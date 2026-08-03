@@ -173,10 +173,16 @@ export class ProviderHealth {
     return { model: best.cfg, reason: best.reason, skipped: perModel }
   }
 
-  /** 本地令牌桶：给没有 rate-limit 响应头的 provider 兜底。 */
+  /**
+   * 本地令牌桶：给没有 rate-limit 响应头的 provider 兜底。
+   *
+   * **桶按 provider 记，不按模型 key。** rpm/tpm 是**账号级**的限制 ——
+   * 原来按模型 key 记，于是同一个 provider 上两个模型各拿一个桶：
+   * 配了 rpm=60 实际会发到 120，然后一起撞 429。
+   */
   #localAvailability(cfg: ModelConfig, now: number): { ok: boolean; availableAt: Date | null } {
     if (!cfg.rpm) return { ok: true, availableAt: null }
-    const b = this.#local.get(cfg.key)
+    const b = this.#local.get(cfg.provider)
     if (!b) return { ok: true, availableAt: null }
     const cutoff = now - this.#windowMs
     const recent = b.reqTimes.filter((t) => t > cutoff)
@@ -185,9 +191,14 @@ export class ProviderHealth {
     return { ok: false, availableAt: new Date(oldest + this.#windowMs) }
   }
 
-  /** 每次请求发出时记一笔，供本地令牌桶计数。 */
-  noteRequest(key: string, tokens = 0): void {
+  /**
+   * 每次请求发出时记一笔，供本地令牌桶计数。
+   *
+   * `providerId` 而不是模型 key —— 见 #localAvailability 上的说明。
+   */
+  noteRequest(providerId: string, tokens = 0): void {
     const now = this.clock.now()
+    const key = providerId
     const b = this.#local.get(key) ?? { reqTimes: [], tokens: 0, windowStart: now }
     const cutoff = now - this.#windowMs
     b.reqTimes = b.reqTimes.filter((t) => t > cutoff)

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { defaultConfig, type NucleusConfig } from './config.js'
+import { resolveModels } from './providers/registry.js'
 import { DEFAULT_AGENTS_DIR, loadAgentFiles } from './config/agent-files.js'
 import { GRANTABLE, isPermission } from './runtime/permissions.js'
 import { validateResultFields } from './runtime/result-schema.js'
@@ -65,6 +66,27 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
     )
   }
   const { config, overrides } = merge(defaultConfig, parsed)
+  /**
+   * `providers` + `models` → 扁平的 ModelConfig[]。
+   *
+   * 分层是**配置**要的（别让人把 baseUrl / apiKeyRef 抄四遍），扁平是**运行时**
+   * 要的（router 拿到一个模型就该知道往哪发）。这一行就是那道边界。
+   *
+   * 旧写法（模型上直接写 baseUrl、没有 providers 段）照旧有效 —— resolveModels
+   * 的规则是「provider 提供默认，模型上写了就覆盖」，不是二选一。
+   */
+  const resolved = resolveModels(
+    config.providers ?? {},
+    config.models as unknown as Parameters<typeof resolveModels>[1],
+  )
+  if (resolved.problems.length) {
+    throw new Error(
+      `配置文件 ${path} 的 models 有问题：\n` +
+        resolved.problems.map((p) => `  ${p.key}：${p.message}`).join('\n'),
+    )
+  }
+  config.models = resolved.models
+
   const merged = mergeAgentFiles(config, agentsDir(config))
   validate(merged.config, path)
   return { config: merged.config, path, overrides, ...merged.meta }
@@ -182,6 +204,9 @@ function validate(cfg: NucleusConfig, path: string): void {
   if (cfg.models.length === 0) errors.push('models 不能为空')
 
   for (const m of cfg.models) {
+    // baseUrl 走到这里应该已经由 resolveModels 从 provider 补齐了。
+    // 还缺就说明既没有 providers[x] 也没在模型上写 —— 那条错误更具体，
+    // 已经在 resolveModels 里给出了
     if (!m.key || !m.baseUrl) errors.push(`模型 ${m.key || '(无 key)'} 缺少 key 或 baseUrl`)
   }
 

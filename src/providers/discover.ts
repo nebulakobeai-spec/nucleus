@@ -170,13 +170,18 @@ export async function probeModelsEndpoint(
 }
 
 /**
- * 从 provider 拒绝超长请求的报错里读上限。
+ * 从 provider 的报错里读出窗口上限。
  *
- * 故意发一个远超任何窗口的输入、把输出上限设成 1。请求在**生成之前**就被拒，
- * 所以几乎不花钱（多数厂对被拒的请求不计费，即便计费也只算输入的一小部分）。
+ * ── 这个函数**不主动发探测请求** ──────────────────────────
  *
- * 但它靠解析错误文本 —— provider 换个措辞就失效。所以来源标成
- * `inferred-from-error`，可信度最低。
+ * 曾经有个 `--overflow`：故意发 3M token 的输入，从被拒的报错里读上限。
+ * 我当时的理由是「请求在生成之前就被拒，所以几乎不花钱」——
+ * **那是假设，不是事实**：有的厂对被拒的请求照样按输入计费，更糟的是有的厂
+ * **接受并截断**，那就真的处理了 3M token 的输入。把一个没验证的成本假设
+ * 做成功能是不行的，已删掉。
+ *
+ * 留下这个解析器，是因为**真实调用**撞到窗口上限时，报错里就带着这个数字 ——
+ * 那时不用额外花任何钱。将来可以在 `provider.bad_request` 的处理里顺手记下来。
  */
 export function parseWindowFromError(message: string): number | null {
   const PATTERNS = [
@@ -198,52 +203,6 @@ export function parseWindowFromError(message: string): number | null {
   return null
 }
 
-export async function probeByOverflow(
-  cfg: ModelConfig,
-  apiKey: string | null,
-  fetchImpl: FetchLike,
-): Promise<Partial<ProbeResult>> {
-  // 约 3M token 的输入 —— 超过目前任何模型的窗口
-  const huge = 'x'.repeat(12_000_000)
-  const res = await fetchImpl(`${cfg.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model: cfg.model,
-      messages: [{ role: 'user', content: huge }],
-      // 输出设成 1：确保不会真的生成东西
-      max_tokens: 1,
-    }),
-  })
-
-  const text = await res.text()
-  if (res.ok) {
-    // 竟然没被拒 —— 那说明它静默截断了输入，这本身是要警告的事
-    return {
-      notes: [
-        '⚠ 发了 3M token 的输入却**没有被拒绝** —— 说明这个 provider 会' +
-          '**静默截断**超长输入。那意味着 context 溢出不会报错，只会让模型看不到' +
-          '前面的内容。窗口只能靠文档或实测确定。',
-      ],
-    }
-  }
-  const window = parseWindowFromError(text)
-  if (window === null) {
-    return { error: `拒绝了超长请求（${res.status}）但报错里读不出窗口：${text.slice(0, 200)}` }
-  }
-  return {
-    contextWindow: window,
-    source: 'inferred-from-error',
-    notes: [
-      `从 provider 的报错里读出：${text.slice(0, 160)}`,
-      '⚠ 这是**解析错误文本**得来的，provider 换个措辞就失效 —— 可信度最低，请核对',
-    ],
-  }
-}
-
 /**
  * 按可靠性依次尝试。
  *
@@ -254,7 +213,6 @@ export async function probeModel(
   cfg: ModelConfig,
   apiKey: string | null,
   fetchImpl: FetchLike,
-  opts: { allowOverflow?: boolean } = {},
 ): Promise<ProbeResult> {
   const out: ProbeResult = {
     key: cfg.key,
@@ -278,16 +236,14 @@ export async function probeModel(
       return out
     }
     merge(await probeModelsEndpoint(cfg, apiKey, fetchImpl))
-    if (out.contextWindow) return out
-
-    if (!opts.allowOverflow) {
+    if (!out.contextWindow) {
+      // 探不到就如实说，并给出唯一可靠的下一步：去文档查，然后自己填。
+      // 不主动发超长请求去试 —— 那个成本假设没法验证
       out.notes.push(
-        '/models 没给出窗口。溢出探测能问出来（发一个超长请求，从报错里读）——' +
-          ' 加 --overflow 启用。它不生成 token，但会真的发一次请求。',
+        '探不到 —— OpenAI 规范里没有上下文长度这一项，多数厂不给。' +
+          '去 provider 的文档查，然后 nucleus model set <key> --context-window <n>。',
       )
-      return out
     }
-    merge(await probeByOverflow(cfg, apiKey, fetchImpl))
   } catch (e) {
     /**
      * `fetch failed` 这四个字什么都没说。

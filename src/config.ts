@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Permission } from './runtime/permissions.js'
 import type { ResultFields } from './runtime/result-schema.js'
 import type { ModelConfig } from './providers/types.js'
+import type { ProviderConfig } from './providers/registry.js'
 import type { AgentSpec } from './runtime/runner.js'
 import type { McpServerConfig } from './mcp/protocol.js'
 import type { McpRegisterOptions } from './mcp/registry.js'
@@ -22,6 +23,25 @@ import type { OAuthProviderDeclaration } from './auth/providers.js'
  */
 
 export interface NucleusConfig {
+  /**
+   * Provider 定义 —— 端点、协议、凭据引用、账号级限流。
+   *
+   * 与 models 分开是因为**同一个模型跑在不同 provider 上是常态**
+   * （anthropic 的 opus-5、openrouter 的 kimi-k3、ollama 的 kimi-k3）。
+   * 合在一起就得把 baseUrl / apiKeyRef 抄好几遍，而抄漏一处**不会报错** ——
+   * 只会在调用时 401，那时你会去查凭据，不会想到是配置抄漏了。
+   *
+   * 留空也能跑：models 里直接写 baseUrl 即可（旧写法照旧有效）。
+   */
+  providers?: Record<string, ProviderConfig>
+  /**
+   * 模型清单。
+   *
+   * provider 级字段（baseUrl / api / apiKeyRef / rpm …）可以省略 ——
+   * 从 `providers[provider]` 取；写了就覆盖。同一 provider 下某个模型走不同
+   * 端点是真实存在的（比如 Kimi 的 coding 端点），所以是「默认 + 覆盖」
+   * 而不是「二选一」。
+   */
   models: ModelConfig[]
   agents: AgentConfig[]
   /** MCP server 列表；部署与运行归用户，Nucleus 只负责连接 */

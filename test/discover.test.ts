@@ -193,13 +193,20 @@ describe('probeModel 的取舍顺序', () => {
   })
 
   /**
-   * 溢出探测**要显式开启**：它会真的发一次请求。
-   * 默认不做，但要说清「这条路存在」—— 否则人会以为探不到就没办法了。
+   * 探不到就**如实说探不到**，并给出唯一可靠的下一步：去文档查、自己填。
+   *
+   * 曾经有个 `--overflow`：故意发 3M token 的输入，从被拒的报错里读上限。
+   * 我当时的理由是「生成之前就被拒，几乎不花钱」——**那是假设，不是事实**：
+   * 有的厂对被拒的请求照样按输入计费，更糟的是有的厂**接受并截断**，
+   * 那就真的处理了 3M token 的输入。已删掉。
    */
-  it('/models 没给出窗口时，默认不做溢出探测但说明存在这条路', async () => {
+  it('/models 没给出窗口时如实说探不到，并给出下一步', async () => {
     const r = await probeModel(cloudCfg, 'k', json({ data: [{ id: 'glm-5.2' }] }))
     expect(r.contextWindow).toBeNull()
-    expect(r.notes.join('')).toMatch(/--overflow/)
+    expect(r.notes.join('')).toMatch(/探不到/)
+    // 下一步必须是可靠的那条，而不是「再猜一次」
+    expect(r.notes.join('')).toMatch(/文档/)
+    expect(r.notes.join('')).not.toMatch(/overflow/)
   })
 
   it('探测抛异常时记进 error，不崩', async () => {
