@@ -299,6 +299,27 @@ if (!canListen) {
   console.warn('[oauth] 部署机上两者都可用时会正常执行（应为 0 skipped）\n')
 }
 
+/**
+ * 取一个空闲端口。
+ *
+ * 原来这组测试用写死的 39001-39007。那在**偶发**情况下会撞车 ——
+ * 而这组测试平时是跳过的，所以撞车只会在「偶然跑起来的那一次」出现，
+ * 看起来像随机失败。写死端口省不了什么，去掉它就少一类 flake。
+ */
+async function freePort(): Promise<number> {
+  const { createServer } = await import('node:http')
+  const s = createServer()
+  return new Promise<number>((resolve, reject) => {
+    s.once('error', reject)
+    s.once('listening', () => {
+      const a = s.address()
+      const port = typeof a === 'object' && a ? a.port : 0
+      s.close(() => resolve(port))
+    })
+    s.listen(0, '127.0.0.1')
+  })
+}
+
 describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
   let servers: Array<{ close: () => void }> = []
 
@@ -314,7 +335,7 @@ describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
   }
 
   it('收到合法回调后 resolve 出 code', async () => {
-    const port = 39001
+    const port = await freePort()
     const client = new AuthCodeClient(cfgWithPort(port))
     const server = await client.startCallbackServer('STATE-1')
     servers.push(server)
@@ -328,7 +349,7 @@ describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
   })
 
   it('state 不匹配时返回 400 并拒绝', async () => {
-    const port = 39002
+    const port = await freePort()
     const client = new AuthCodeClient(cfgWithPort(port))
     const server = await client.startCallbackServer('EXPECTED')
     servers.push(server)
@@ -339,7 +360,7 @@ describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
   })
 
   it('provider 回调带 error 时如实传递', async () => {
-    const port = 39003
+    const port = await freePort()
     const client = new AuthCodeClient(cfgWithPort(port))
     const server = await client.startCallbackServer('S')
     servers.push(server)
@@ -349,7 +370,7 @@ describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
   })
 
   it('其它路径返回 404，不影响等待', async () => {
-    const port = 39004
+    const port = await freePort()
     const client = new AuthCodeClient(cfgWithPort(port))
     const server = await client.startCallbackServer('S')
     servers.push(server)
@@ -361,7 +382,7 @@ describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
   })
 
   it('端口被占时降级而非崩溃 —— 远程环境靠手动粘贴', async () => {
-    const port = 39005
+    const port = await freePort()
     const first = await new AuthCodeClient(cfgWithPort(port)).startCallbackServer('S')
     servers.push(first)
     expect(first.listeningOn).not.toBeNull()
@@ -383,7 +404,7 @@ describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
    * 而这一组平时被跳过（本机 listen 是 EPERM），所以那次随机失败很难被抓到。
    */
   it('close 之后端口立刻可以重新绑定（不靠 sleep 猜）', async () => {
-    const port = 39006
+    const port = await freePort()
     const server = await new AuthCodeClient(cfgWithPort(port)).startCallbackServer('S')
     expect(server.listeningOn).not.toBeNull()
     await server.close()
@@ -394,7 +415,7 @@ describe.skipIf(!canListen)('回调服务器（需要监听端口）', () => {
   })
 
   it('重复 close 不抛', async () => {
-    const port = 39007
+    const port = await freePort()
     const server = await new AuthCodeClient(cfgWithPort(port)).startCallbackServer('S')
     await server.close()
     await expect(server.close()).resolves.toBeUndefined()
