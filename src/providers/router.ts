@@ -75,7 +75,7 @@ export class ModelRouter {
     private deps: Deps,
     private models: Map<string, ModelConfig>,
     private secrets: (ref: string | undefined) => string | null,
-    private opts: RouterOptions = {},
+    opts: RouterOptions = {},
   ) {
     this.#health = new ProviderHealth(db, deps.clock)
     this.#fetch = opts.fetch

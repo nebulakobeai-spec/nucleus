@@ -207,7 +207,6 @@ async function printWhyNot(
   const chain = n.config.defaults.modelChain
   // 与运行时同一份预算 —— 按模型算，不用常量
   const budget = n.runner.budgetFor(chain)
-  const window = budget.contextWindow
 
   const d = decideCompact({
     messages: msgs.map((m) => ({

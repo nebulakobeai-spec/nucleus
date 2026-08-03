@@ -1,5 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { envelopeJsonSchema, envelopeSizes, validateEnvelope } from './envelope.js'
+import { envelopeJsonSchema, validateEnvelope } from './envelope.js'
 import { RULE } from './rules.js'
 import type { UserRule } from './user-rules.js'
 import { dirname, isAbsolute, join, normalize, relative } from 'node:path'

@@ -1,15 +1,15 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { boot, type Nucleus } from '../src/boot.js'
-import { defaultConfig, isMockOnly, modelMap } from '../src/config.js'
+import { defaultConfig, isMockOnly } from '../src/config.js'
 import { withExampleAgents } from '../src/examples/agents.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import { loadEnvFile, parseEnv } from '../src/env.js'
 import { runChatCommand, type ChatSession } from '../src/cli/chat.js'
 import { parseArgv, strFlag, unknownFlags } from '../src/cli/ui.js'
-import { loadConfig, stripJsonComments } from '../src/config-file.js'
+import { loadConfig } from '../src/config-file.js'
 import type { MockScript } from '../src/providers/mock.js'
 
 // ═══════════════════════════════════════════════════════

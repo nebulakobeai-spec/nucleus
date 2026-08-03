@@ -6,7 +6,6 @@ import { Compactor } from '../src/runtime/compactor.js'
 import { DbEventSink } from '../src/runtime/events.js'
 import { checkSummary, plantedFromMessages, SCENARIOS, seedConversation } from '../src/cli/seed.js'
 import {
-  DEFAULT_COMPACT_POLICY,
   decideCompact,
   reconcileArtifacts,
   renderSummary,

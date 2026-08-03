@@ -42,7 +42,6 @@ export async function agentList(_argv: string[], flags: Record<string, string | 
     const entry = n.config.defaults.entryAgent
     table(
       n.config.agents.map((a) => {
-        const spec = agentSpec(a, n.config.defaults)
         return [
           (a.id === entry ? c.cyan('▸ ') : '  ') + a.id,
           a.name,

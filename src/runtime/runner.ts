@@ -226,7 +226,7 @@ export class Runner {
     workdir: string
     signal?: AbortSignal
   }): Promise<RunOutcome> {
-    const { attemptId, fenceToken, runId, agent } = input
+    const { attemptId, fenceToken, runId } = input
     const ctl = new AbortController()
     input.signal?.addEventListener('abort', () => ctl.abort(), { once: true })
 

@@ -5,7 +5,6 @@ import { withExampleAgents } from '../examples/agents.js'
 import { loadEnvFile } from '../env.js'
 import { chatLoop } from './chat.js'
 import { printRunList, printRunTree, printTurn, runTurn } from './turn.js'
-import { recoveryOf } from '../errors.js'
 import type { MockScript } from '../providers/mock.js'
 import { authList, authLogin, authLogout, authRefresh, authTest, credentialStatus } from './auth.js'
 import { mcpCall, mcpEnable, mcpList, mcpTools } from './mcp.js'
@@ -29,7 +28,7 @@ import {
 } from './schedule.js'
 import { bundleCmd, replayCmd } from './bundle.js'
 import { findConfigFile, loadConfig } from '../config-file.js'
-import { c, duration, heading, ICON, line, money, parseArgv, recoveryHint, statusColor, table, strFlag, resolveConversationId, unknownFlags } from './ui.js'
+import { c, duration, heading, ICON, line, money, parseArgv, statusColor, strFlag, resolveConversationId, unknownFlags } from './ui.js'
 
 /**
  * Nucleus CLI。

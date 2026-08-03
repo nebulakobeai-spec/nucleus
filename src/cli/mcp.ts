@@ -1,6 +1,6 @@
 import { boot } from '../boot.js'
 import { defaultConfig } from '../config.js'
-import { c, heading, ICON, line, table, strFlag, resolveDb } from './ui.js'
+import { c, heading, ICON, line, table, resolveDb } from './ui.js'
 
 /**
  * `nucleus mcp` 命令组。

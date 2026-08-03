@@ -541,7 +541,6 @@ export class BoxInput {
   /** 屏幕上框占了几行 */
   #height = 0
   #cursorRow = 0
-  #cursorCol = 0
   #closed = false
 
   #onData = (chunk: Buffer | string): void => this.#handle(String(chunk))
@@ -658,7 +657,6 @@ export class BoxInput {
 
     this.#height = box.lines.length
     this.#cursorRow = box.cursorRow
-    this.#cursorCol = box.cursorCol
   }
 
   #erase(): void {
@@ -672,6 +670,5 @@ export class BoxInput {
     }
     this.#height = 0
     this.#cursorRow = 0
-    this.#cursorCol = 0
   }
 }

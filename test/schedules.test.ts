@@ -161,7 +161,7 @@ describe('逾期与补偿', () => {
   })
 
   it('关了 catch_up：连续 tick 不会补出一串 run', async () => {
-    const s = await store.create({ name: 'h', cron: '@hourly', agentId: 'researcher', goal: 'x' })
+    await store.create({ name: 'h', cron: '@hourly', agentId: 'researcher', goal: 'x' })
     const now = at('2026-01-01T04:30:00.000Z')
     let total = 0
     for (let i = 0; i < 5; i++) {

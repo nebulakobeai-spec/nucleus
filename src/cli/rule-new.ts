@@ -4,21 +4,15 @@ import { join, resolve } from 'node:path'
 import { boot } from '../boot.js'
 import { loadConfig } from '../config-file.js'
 import {
-  DEFAULT_RULES_DIR,
-  INLINE_MAX_TOKENS,
-  roughTokens,
   coverageOf,
+  DEFAULT_RULES_DIR,
+  roughTokens,
   TIER_WHAT,
   validateRules,
   type UserRule,
 } from '../runtime/user-rules.js'
-import {
-  FIELD_NAME,
-  FIELD_NAME_HINT,
-  RESERVED_FIELDS,
-  resultSchemaTokens,
-} from '../runtime/result-schema.js'
-import { askNumber, closePrompts, confirm, readLine, select, type Choice } from './prompt.js'
+import { resultSchemaTokens } from '../runtime/result-schema.js'
+import { closePrompts, confirm, readLine } from './prompt.js'
 import { c, heading, ICON, line, resolveDb, strFlag } from './ui.js'
 import { isMockOnly } from '../config.js'
 import { parseArgs } from '../runtime/tools.js'
@@ -38,69 +32,54 @@ import {
 /**
  * `nucleus rule new` —— 加一条规则。
  *
- * ── 这个向导的价值不在「帮你把话写漂亮」 ──────────────────
+ * ── 说一句话，剩下的和模型聊 ────────────────────────────
  *
- * 「我想加一条规则」时，人的默认冲动是**直接写一句 prompt 文本** ——
- * 而那恰好是三层里最弱的一层。所以向导的核心是**按强度倒着逼问**：
+ *     nucleus rule new plan-first "每次执行任务前必须写计划，用户同意后再执行"
  *
- *   ① 能不能用「不给能力」表达？          边界 —— 零成本、不可违反
- *   ② 违反了能不能从**结果**里机械看出来？  检查 —— 一次重写
- *   ③ 剩下的才是提醒                      每一轮都花，而且只是说一声
+ * 模型判它落在哪几层、提议完整规则；运行时机械校验；**不满意就说一句，它改**。
  *
- * 顺序本身就是答案的一部分。先问边界，是因为一旦能用边界表达，
- * 后两层都不必写；先问提醒，就会写完提醒之后懒得再想别的。
+ * ── 这里原先有一棵决策树，删了 ──────────────────────────
  *
- * ── 什么能由 Nucleus 判定，什么必须你回答 ─────────────────
+ * 第一版是问答树：先问「是不是不许用某些工具」，再问「能不能从结果里看出来」。
+ * 逻辑没错，毛病是**谁的语言** —— 要先理解边界/检查/提醒三层才能回答，
+ * 而使用者心里想的是一句具体的要求。实测反馈两次指向同一件事：
+ * 「一问一答不如直接和模型对话来确定这个 rule」、
+ * 「你给我的那几个选项我甚至都不知道选什么」。
  *
- * 能机械判定的：工具名是否真实、字段路径是否合法、最终是否只剩提醒、
- * 提醒的常驻成本是多少。这些一律不问你。
+ * 第一次我只把树降级成兜底 —— 于是模型路径一失败就掉回同一个毛病。
+ * 所以整棵删掉。
  *
- * **判不了的是「这条约束能不能用边界表达」** —— 那要理解约束的含义。
- * 所以那一步是问你，而且问得很具体（「是不是『不许用某个工具』？」），
- * 不是让你自己去分类。
+ * ── 什么由 Nucleus 判定，什么必须你回答 ─────────────────
+ *
+ * 机械判定的一律不问你：工具名是否真实、字段路径是否合法、是否只剩提醒、
+ * 每轮成本多少。判不了的只有一件 —— **这个检查真的对应你那句要求吗** ——
+ * 那一条会显式说出来，因为形式合法但不相干的检查比没有检查更糟。
  */
-
-interface Draft {
-  id: string
-  gist: string | null
-  constraint: string | null
-  denyTools: string[]
-  requiredFields: string[]
-  resultFields: Record<string, unknown>
-  appliesTo: string[]
-  /**
-   * 这条要求里**没管住的分句**。
-   *
-   * 树上也要能表达「一半能管一半不能」—— 否则模型路径能拆、人的路径只能
-   * 全要或全不要，而那正是我刚在模型路径上修掉的毛病。
-   */
-  uncovered: string[]
-}
 
 export async function ruleNew(
   argv: string[],
   flags: Record<string, string | true>,
 ): Promise<number> {
   try {
-    /**
-     * **描述一句话是主路径，问答树是退路。**
-     *
-     * 第一版只有问答树（先问边界、再问检查、最后提醒）。逻辑没错但不直觉：
-     * 它把我的分类过程强加给使用者，而使用者心里想的是一句具体的要求，
-     * 不是「这属于哪一层」。
-     *
-     * 而「属于哪一层」恰好是模型擅长判的 —— 它只需要理解那句要求的含义。
-     * 所以：**说一句话 → 模型提议完整规则（含分层）→ 运行时校验 →
-     * 只有校验不过或它自己拿不准时才问你。**
-     *
-     * 退路仍然留着：`--interactive`，以及配置里只有 mock 模型时自动退回
-     * （那时问模型等于问一个假答案）。
-     */
+    const id = (argv[0] ?? '').trim()
     const description = strFlag(flags, 'describe') ?? argv.slice(1).join(' ').trim()
-    if (description && flags['interactive'] !== true) {
-      return await describePath(argv[0] ?? '', description, flags)
+    if (!id || !description) {
+      line(c.red('用法：nucleus rule new <规则 id> "你的要求"'))
+      line(c.gray('  id 会成为文件名：rules/<id>.md。小写字母、数字、点、连字符'))
+      line()
+      line('  例：')
+      line(c.gray('    nucleus rule new cite-sources "结论必须标明来源"'))
+      line(c.gray('    nucleus rule new no-writes "不许写文件"'))
+      line()
+      line('  要求怎么写都行 —— 模型来判它落在哪一层：')
+      for (const t of ['boundary', 'check', 'reminder'] as const) {
+        line(c.gray(`    ${TIER_WHAT[t]}`))
+      }
+      line()
+      line(c.gray('  --interactive  别急着接受第一份提案，每一版都让我过一眼'))
+      return 1
     }
-    return await wizard(argv, flags)
+    return await describePath(id, description, flags)
   } finally {
     closePrompts()
   }
@@ -128,11 +107,22 @@ async function describePath(
 
   try {
     if (isMockOnly(n.config)) {
-      // 问一个 mock 模型等于问一个假答案 —— 退回问答树，并说明为什么
+      /**
+       * 没有真实模型时**不再退回一问一答** —— 树已经删了，而且它本来也不是
+       * 这个场景的正确答案。
+       *
+       * 正确答案是：照着 `examples/rules/*.md` 写一个文件。frontmatter 加一段
+       * 正文，比答五个用我的分类法提的问题快得多，而且写完就能
+       * `nucleus rules` 看到它落在哪几层、每轮花多少。
+       */
       line(`${ICON.warn} 配置里只有 mock 模型 —— 让它判层等于拿一个假答案。`)
-      line(c.gray('  退回一问一答。配好真实模型后再用 --describe 会顺很多。'))
       line()
-      return await wizardWith(n, id, path, dir, flags, description)
+      line('  两条路：')
+      line(c.gray('  · 配一个真实模型（nucleus model config），然后重跑这条命令'))
+      line(c.gray(`  · 直接写文件 —— ${join(resolve(dir), `${id}.md`)}`))
+      line(c.gray('    照着 examples/rules/*.md，frontmatter 加一段正文就行'))
+      line(c.gray('    写完 nucleus rules 会告诉你它落在哪几层、每轮花多少'))
+      return 1
     }
 
     heading(`加一条规则：${c.bold(id)}`)
@@ -141,7 +131,20 @@ async function describePath(
     line()
     line(c.gray('正在判它属于哪一层…'))
 
-    const got = await converse(n, id, description)
+    /**
+     * **提案 → 你看 → 不满意就说一句 → 它改。**
+     *
+     * 这才是「和模型对话来确定这个 rule」。原先这里只有一次机会：
+     * 展示完就问「写入吗？[Y/n]」，答 N 就什么都没有 ——
+     * 而你想要的往往不是「不写」，是「plan 应该是步骤列表而不是一个字符串」。
+     *
+     * 循环没有硬上限：每一轮都是你**主动**说了一句才发生的，
+     * 花的 token 你自己看得见（每轮都报）。真正需要上限的是模型
+     * 自己反复重试那一段（MAX_ROUNDS），那你按不了刹车。
+     */
+    const session = newSession(n, id, description)
+    for (;;) {
+    const got = await session.next()
     if (!got) return 1
     const p = got.proposal
     const problems = got.problems
@@ -192,16 +195,19 @@ async function describePath(
       }
       line()
       /**
-       * 这里**不该推荐决策树**。
+       * **这里也该能接着说话。**
        *
-       * 树问的是「能不能从结果里机械看出来」—— 模型刚论证了不能，而且论证得对。
-       * 让人再走一遍只会走到一个不相干的检查上（实测：plan-first 落在
-       * `requiredFields: [open_questions]`）。而上面已经把两条出路说清了，
-       * 不需要再问一句。
-       *
-       * `--interactive` 仍然在，但那是明确要求走树的时候用，不是兜底。
+       * 最有用的一句往往就是「那就只要求写计划那部分」—— 把要求缩到可强制的
+       * 那一半。原先这里直接 return，等于让人重新想一句描述再跑一遍命令，
+       * 而模型刚刚已经把「哪一半可强制」分析得很清楚了，扔掉那个上下文很浪费。
        */
-      return 1
+      line(c.gray('  想缩一缩要求？说一句就行 —— 它照着重提。回车＝先不加。'))
+      line(c.gray('  例：「那就只要求写计划那部分，审核先不管」'))
+      const narrow = (await readLine('  ')).trim()
+      if (!narrow) return 1
+      session.tell(narrow)
+      line()
+      continue
     }
 
     // ── 展示分层与理由 ──
@@ -210,6 +216,33 @@ async function describePath(
     line()
 
     const rule = toRule(id, p, path)
+
+    /**
+     * **拿既有规则一起校验** —— 否则上一轮加的同名字段检查在创建时根本不跑。
+     *
+     * `validateRuleProposal` 只看这一份提案，看不出「`plan` 已经被别的规则
+     * 声明过了」。而那正是最容易犯的一种：写第二条规则时不会去翻前面 17 个文件。
+     *
+     * 这个坑我自己刚踩过一次：上一轮把冲突检查加进 `validateRules`，
+     * 而这里只 import 了它、从来没调用 —— 又一个「声明了但没接线」，
+     * 距离我修同一类问题只隔了一轮。所以不满足于「函数写好了」，要看调用点。
+     */
+    const cross = validateRules([...(n.config.rules ?? []), rule], {
+      agents: n.config.agents.map((a) => a.id),
+      tools: [...n.tools.all()].map((t) => t.name),
+    }).filter((x) => x.path.includes(path))
+    const crossFatal = cross.filter((x) => x.fatal)
+    if (crossFatal.length) {
+      line(`${ICON.fail} ${c.red('和既有规则冲突')}`)
+      for (const x of crossFatal) line(`  ${x.message}`)
+      line()
+      line(c.gray('  说一句让它改（比如换个字段名），回车＝放弃：'))
+      const fix = (await readLine('  ')).trim()
+      if (!fix) return 1
+      session.tell(`${crossFatal.map((x) => x.message).join('\n')}\n\n使用者说：${fix}`)
+      line()
+      continue
+    }
 
     heading('这条规则')
     const text = renderRuleMd(rule)
@@ -251,14 +284,34 @@ async function describePath(
     }
 
     line()
-    if (!(await confirm(`写入 ${path}？`))) {
-      line(c.gray('已取消。想自己一条条定：--interactive'))
+    /**
+     * **答 N 不等于「不要这条规则」。**
+     *
+     * 原先答 N 就直接退出并建议 `--interactive`（那棵树）。而不满意的真实内容
+     * 往往很具体：「plan 应该是步骤列表而不是一个字符串」、「只对会改生产的
+     * 那几个 agent 生效」。那一句话说给模型比走一遍分类树快得多，
+     * 也不需要你知道 boundary/check/reminder 是什么。
+     */
+    if (await confirm(`写入 ${path}？`)) {
+      await writeFile(path, text, 'utf8')
+      line(`${ICON.ok} 已写入 ${path}`)
+      line(c.gray('  看一眼：nucleus rules'))
+      return 0
+    }
+
+    line()
+    line(c.gray('  哪里不对？说一句就行 —— 它照着改。回车＝放弃。'))
+    line(c.gray('  例：「plan 要是步骤列表，不是一个字符串」'))
+    line(c.gray('      「只对会改生产环境的 agent 生效」'))
+    line(c.gray('      「提醒那段太长了，删掉」'))
+    const feedback = (await readLine('  ')).trim()
+    if (!feedback) {
+      line(c.gray('  放弃了，什么都没写。'))
       return 1
     }
-    await writeFile(path, text, 'utf8')
-    line(`${ICON.ok} 已写入 ${path}`)
-    line(c.gray('  看一眼：nucleus rules'))
-    return 0
+    session.tell(feedback)
+    line()
+    }
   } finally {
     await n.close()
   }
@@ -292,11 +345,17 @@ async function describePath(
  */
 const MAX_ROUNDS = 4
 
-async function converse(
+interface Session {
+  next(): Promise<{ proposal: RuleProposal; problems: ProposalProblem[] } | null>
+  /** 你说一句，下一轮它照着改 */
+  tell(text: string): void
+}
+
+function newSession(
   n: Awaited<ReturnType<typeof boot>>,
   id: string,
   description: string,
-): Promise<{ proposal: RuleProposal; problems: ProposalProblem[] } | null> {
+): Session {
   const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
     {
       role: 'system',
@@ -316,7 +375,10 @@ async function converse(
   ]
 
   let spent = 0
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
+  let round = 0
+  const next = async (): Promise<{ proposal: RuleProposal; problems: ProposalProblem[] } | null> => {
+   for (let i = 0; i < MAX_ROUNDS; i++) {
+    round++
     const res = await n.router.chat(n.config.defaults.modelChain, { messages, tools })
     spent += res.usage.tokensIn + res.usage.tokensOut
 
@@ -357,7 +419,7 @@ async function converse(
       }
     }
     if (!raw) {
-      if (round === MAX_ROUNDS) break
+      if (i === MAX_ROUNDS - 1) break
       line(c.gray(`  第 ${round} 轮没拿到结构化结果，让它重来…`))
       messages.push({
         role: 'user',
@@ -375,7 +437,7 @@ async function converse(
       line()
       return { proposal: p, problems }
     }
-    if (round === MAX_ROUNDS) {
+    if (i === MAX_ROUNDS - 1) {
       line(`${ICON.fail} ${c.red('改了几轮还是没过校验')}`)
       for (const x of fatal) line(`  ${c.red(x.field)}：${x.message}`)
       break
@@ -385,11 +447,19 @@ async function converse(
     messages.push({ role: 'user', content: repairPrompt(fatal) })
   }
 
-  line()
-  line(c.gray(`  ${MAX_ROUNDS} 轮用完了，共 ${spent} tok。`))
-  line(c.gray('  换个模型试试：--model <key>。或者直接照着 examples/rules/*.md 写一个文件 ——'))
-  line(c.gray('  格式很简单，而且比一问一答快。'))
-  return null
+   line()
+   line(c.gray(`  ${MAX_ROUNDS} 轮用完了，这一段共 ${spent} tok。`))
+   line(c.gray('  换个模型试试：--model <key>。或者直接照着 examples/rules/*.md 写一个'))
+   line(c.gray('  文件 —— frontmatter 加一段正文，很快。'))
+   return null
+  }
+
+  return {
+    next,
+    tell: (text: string) => {
+      messages.push({ role: 'user', content: `${text}\n\n照这个改，重新调用 propose_rule 提交完整的提案。` })
+    },
+  }
 }
 
 /**
@@ -470,484 +540,25 @@ function tierColor(t: string): string {  if (t === 'boundary') return c.green('�
   return c.yellow('提醒')
 }
 
-async function wizard(argv: string[], flags: Record<string, string | true>): Promise<number> {
-  const id = (argv[0] ?? '').trim()
-  if (!id) {
-    line(c.red('用法：nucleus rule new <规则 id>'))
-    line(c.gray('  id 会成为文件名：rules/<id>.md。小写字母、数字、点、连字符'))
-    line()
-    line('向导会按**强度倒着**问 —— 先问能不能用最强的那层表达：')
-    for (const t of ['boundary', 'check', 'reminder'] as const) {
-      line(c.gray(`  ${TIER_WHAT[t]}`))
-    }
-    return 1
-  }
-  if (!/^[a-z][a-z0-9.-]*$/.test(id)) {
-    line(c.red(`id 只能是小写字母、数字、点与连字符：${id}`))
-    return 1
-  }
-
-  const dir = strFlag(flags, 'dir') ?? DEFAULT_RULES_DIR
-  const path = join(resolve(dir), `${id}.md`)
-  if (existsSync(path) && flags['force'] !== true) {
-    line(c.red(`${path} 已存在`))
-    line(c.gray('  改它直接编辑那个文件；要覆盖加 --force'))
-    return 1
-  }
-
-  const { config } = await loadConfig(strFlag(flags, 'config'))
-  const n = await boot({ config, ...resolveDb(flags), skipMcp: flags['mcp'] !== true })
-  try {
-    return await wizardWith(n, id, path, dir, flags)
-  } finally {
-    await n.close()
-  }
-}
-
-/** 问答树本体。`described` 有值时把它作为第一个问题的默认答案 */
-async function wizardWith(
-  n: Awaited<ReturnType<typeof boot>>,
-  id: string,
-  path: string,
-  dir: string,
-  flags: Record<string, string | true>,
-  described?: string,
-): Promise<number> {
-  {
-    const draft: Draft = {
-      id,
-      gist: null,
-      constraint: null,
-      denyTools: [],
-      requiredFields: [],
-      resultFields: {},
-      appliesTo: [],
-      uncovered: [],
-    }
-
-    heading(`加一条规则：${c.bold(id)}`)
-    line(c.gray('三层的强制方式与代价差好几个数量级，所以从最强的那层开始问。'))
-    line()
-
-    const what = described ?? (await readLine('这条规则要求什么？（一句话）：')).trim()
-    if (!what) return cancelled()
-    line()
-
-    // ── ① 边界 ──
-    const tools = [...n.tools.all()].map((t) => t.name).sort()
-    line(`${c.green('① 边界')} ${c.gray(TIER_WHAT['boundary'])}`)
-    line(c.gray('  最强的一层：工具不出现在模型看到的定义里，所以它无从违反。'))
-    const isBoundary = await select('这条约束是不是「不许用某些工具」？', [
-      {
-        value: 'no' as const,
-        label: '不是',
-        detail: '它约束的是**怎么做 / 交出什么**，不是「能不能用某个工具」',
-      },
-      {
-        value: 'yes' as const,
-        label: '是',
-        detail: `选出要禁掉的工具 —— 选完这条规则就完成了，不需要写任何文本`,
-      },
-    ])
-    if (isBoundary === null) return cancelled()
-
-    if (isBoundary === 'yes') {
-      const picked: string[] = []
-      for (;;) {
-        const t = await select(
-          `选一个要禁掉的工具${picked.length ? `（已选 ${picked.join(', ')}）` : ''}：`,
-          [
-            ...tools
-              .filter((x) => !picked.includes(x))
-              .map((x) => ({ value: x, label: x })),
-            { value: '(done)', label: picked.length ? '选完了' : '（取消）' },
-          ],
-        )
-        if (t === null || t === '(done)') break
-        picked.push(t)
-      }
-      if (picked.length === 0) {
-        line(c.gray('  没选工具 —— 那就不是边界，继续问下一层。'))
-      } else {
-        draft.denyTools = picked
-        // 边界够了就到此为止：再写一句「不要用它们」是白花每轮的预算
-        line()
-        line(`${ICON.ok} ${c.green('这条规则只需要边界')} ${c.gray('—— 零成本，且不可违反')}`)
-        line(c.gray('  不需要写任何提醒文本：那些工具根本不会出现在模型看到的定义里。'))
-        draft.appliesTo = await askAppliesTo(n.config.agents.map((a) => a.id))
-        return finish(draft, n, path, dir, flags)
-      }
-    }
-
-    // ── ② 检查 ──
-    line()
-    line(`${c.cyan('② 检查')} ${c.gray(TIER_WHAT['check'])}`)
-    line(c.gray('  判据是：**违反了之后，能不能只看结果就机械判出来？**'))
-    line(c.gray(`  核心字段有 ${RESERVED_FIELDS.join(' / ')}；不够就声明新字段。`))
-    const isCheck = await select('能从结果里机械看出违反吗？', [
-      {
-        value: 'yes' as const,
-        label: '能 —— 要求结果里有某些字段',
-        detail: '例：「数据必须带来源」→ 每个数据点都要有 source 字段',
-      },
-      {
-        value: 'runtime' as const,
-        label: '要验的不是我提交的内容，而是**过程中发生了什么**',
-        detail: '例：有没有人批准过、调了哪个工具、是不是先过了某个 agent',
-      },
-      {
-        value: 'no' as const,
-        label: '不能 —— 需要人的判断',
-        detail: '例：语气、行文风格、思路是否清晰',
-      },
-    ])
-    if (isCheck === null) return cancelled()
-
-    /**
-     * **树也必须有这个出口。**
-     *
-     * 实测：「执行前必须写计划、用户同意后再执行」被模型正确判为强制不了，
-     * 而退回树之后，树把人一路问到了 `requiredFields: [open_questions]` ——
-     * 一个和那句要求毫无关系的检查。
-     *
-     * 树问的是「能不能从结果里机械看出来」，而它只有「能 / 不能」两个答案。
-     * 于是「能判，但要判的不是我提交的东西」这个真实答案无处可去，
-     * 人只能选「能」，然后随便挑一个字段。**那正是 cannotEnforce 要防的事**，
-     * 而我的模型路径防住了，人的路径没防住。
-     */
-    if (isCheck === 'runtime') {
-      line()
-      line(c.yellow('  这一句目前强制不了 —— 但原因是运行时缺原语，不是你这条要求不好。'))
-      line(c.gray('  check 校验的只有**模型自己提交的那份结果**，没有别的信息源。'))
-      line(c.gray('  所以「它有没有真的先问过人」这种事现在验不了 ——'))
-      line(c.gray('  加一个 `approved: true` 是同一个模型自己填的，等于给自己签字。'))
-      line()
-      line(c.gray('  已知的缺口，都在 backlog 上：'))
-      for (const g of KNOWN_GAPS) line(c.gray(`  · ${g}`))
-      line()
-
-      /**
-       * **不要在这里就放弃整条规则。**
-       *
-       * 这是我刚在模型路径上修掉的同一个毛病：要求几乎都是复合的，
-       * 「有一句管不住」不等于「整条管不住」。实测那条就是两句 ——
-       * 「必须写计划」今天能查，「必须经用户同意」不能。
-       *
-       * 所以先把管不住的那句记下来（它会写进文件、显示在清单里），
-       * 然后**接着问剩下的部分**。整条都管不住时，末尾的
-       * 「只有提醒」判据自然会拒掉它，不需要在这里提前下结论。
-       */
-      const clause = (await readLine('  把管不住的那一句抄下来（回车＝整条都是这一句）：')).trim()
-      draft.uncovered.push(clause || what)
-      line(c.gray(`  记下了，它会写进规则文件的 uncovered，并在 nucleus rules 里标出来 ——`))
-      line(c.gray('  否则下个月清单上写着「已有检查」，没人记得这半句从来没生效。'))
-      line()
-      line('  现在看**剩下的部分**：')
-      const rest = await select('去掉那一句之后，还有能从结果里机械看出来的吗？', [
-        {
-          value: 'yes' as const,
-          label: '有 —— 继续定检查',
-          detail: `管住能管的那部分。例：「必须写计划」→ 要求结果里有 plan 字段`,
-        },
-        {
-          value: 'no' as const,
-          label: '没有了 —— 整条要求都靠那个缺的原语',
-          detail: '那就先不加这条规则，等原语落地',
-        },
-      ])
-      if (rest === null) return cancelled()
-      if (rest === 'no') {
-        line()
-        line(c.yellow('  那先不加 —— 整条都没有机械强制的部分。'))
-        line(`  ${c.yellow('也不要写进 agent 的 identity。')}`)
-        line(c.gray('  identity 就是提醒 —— 把一个能修的缺口埋成一句没人强制的话，'))
-        line(c.gray('  从此没人会再想起它。它现在记在 backlog 的 C-17 上。'))
-        return 1
-      }
-      line()
-      if (!(await fillCheck(draft, what))) return cancelled()
-    }
-
-    if (isCheck === 'yes' && !(await fillCheck(draft, what))) return cancelled()
-
-    // ── ③ 提醒 ──
-    line()
-    line(`${c.yellow('③ 提醒')} ${c.gray(TIER_WHAT['reminder'])}`)
-    if (draft.requiredFields.length === 0 && draft.denyTools.length === 0) {
-      /**
-       * 走到这里说明前两层都答了「不能」。
-       *
-       * 那时**不该让人继续写提醒** —— 一条只有提醒的规则会出现在规则清单里、
-       * 看起来系统在管这件事，而实际什么都没管。看起来有约束比没有约束更糟。
-       */
-      line(c.red('  前两层都用不上 —— 那这条约束目前无法可靠强制。'))
-      line()
-      line(c.gray('  只写提醒的规则会被加载器拒绝，理由是：'))
-      line(c.gray('  它会出现在规则清单里、看起来系统在管这件事，而实际什么都没管。'))
-      line(c.gray('  **看起来有约束比没有约束更糟。**'))
-      line()
-      line('  两条出路：')
-      line(c.gray('  · 把它写进 agent 的 identity（那里本来就是「怎么做事」的地方，'))
-      line(c.gray('    而且不占每轮的约束块预算）'))
-      line(c.gray('  · 想清楚它有没有可机械判定的一面 —— 往往有：'))
-      line(c.gray('    「回答要简洁」判不了，但「summary 不超过 N 字」可以'))
-      return 1
-    }
-
-    line(c.gray('  提醒是给模型的解释，不是强制手段 —— 强制已经由上面两层做了。'))
-    line(c.gray('  可以留空。'))
-    const body = (await readLine('  提醒正文（回车跳过）：')).trim()
-    if (body) {
-      draft.constraint = body
-      const t = roughTokens(body)
-      if (t > INLINE_MAX_TOKENS) {
-        line()
-        line(
-          `  正文约 ${t} token，超过内联上限 ${INLINE_MAX_TOKENS} ——` +
-            ` 需要一个索引行，正文改为按需加载（read_rule）。`,
-        )
-        line(c.gray('  索引行必须带**触发条件**：模型看到的只有那一行，'))
-        line(c.gray('  它据此决定要不要花一次工具调用去读正文。'))
-        line(c.gray('  ✓「创建或部署文件前必读 —— 路径规则」   ✗「工作区路径规则」'))
-        const g = (await readLine('  索引行：')).trim()
-        if (!g) return cancelled()
-        draft.gist = g
-      }
-    }
-
-    draft.appliesTo = await askAppliesTo(n.config.agents.map((a) => a.id))
-    return finish(draft, n, path, dir, flags)
-  }
-}
-
 /**
- * 填 check 的具体形状。返回 false 表示取消 / 填不下去。
+ * 决策树删掉了。
  *
- * ── 为什么从树里拆出来 ────────────────────────────────
+ * ── 为什么整棵砍掉，而不是换个入口 ────────────────────────
  *
- * 有两条路会到这里：直接答「能从结果里看出来」，以及答「要验的是运行时事实」
- * 之后**剩下的那部分**仍然能查。后者是关键 —— 一条要求里有一句管不住时，
- * 不该整条放弃，而该管住能管的、把管不住的记进 uncovered。
+ * 实测反馈两次指向同一件事：「一问一答不如直接和模型对话来确定这个 rule」、
+ * 「你给我的那几个选项我甚至都不知道选什么」。
  *
- * 填完两条路都要继续问「提醒」，所以这里只填不收尾。
+ * 树的毛病是**谁的语言**：它问「这条约束是不是『不许用某些工具』？」，
+ * 要先理解边界/检查/提醒三层才能回答 —— 而那正是我批评它时说的
+ * 「把我的分类过程强加给使用者」。我当时只把它降级成兜底，
+ * 于是模型路径一失败就掉回同一个毛病。
+ *
+ * 它唯一还剩的用处是「没有模型时也能走完」。但那个场景的真实答案是
+ * **照着 examples/rules/*.md 写一个文件** —— frontmatter 加一段正文，
+ * 比答五个用我的分类法提的问题快得多。
+ *
+ * 450 行、零测试覆盖、已经出过一个真 bug（把 plan-first 引到
+ * `requiredFields: [open_questions]`）。留着只会继续烂。
+ *
+ * `--interactive` 现在的意思是**别急着接受第一份提案** —— 见 describePath 的循环。
  */
-async function fillCheck(draft: Draft, what: string): Promise<boolean> {
-
-    const shape = await select('字段长什么样？', [
-      {
-        value: 'core' as const,
-        label: `要求核心字段必填`,
-        detail: `从 ${RESERVED_FIELDS.join(' / ')} 里选 —— 不用声明新东西`,
-      },
-      {
-        value: 'list' as const,
-        label: '要求一个「条目列表」，每条都得带某些字段',
-        detail: '例：data_points[] 每条都要 value / source / fetched_at',
-      },
-    ])
-    if (shape === null) return false
-
-    if (shape === 'core') {
-      const f = await select(
-        '哪个字段必填？',
-        RESERVED_FIELDS.map((x) => ({ value: x, label: x })),
-      )
-      if (f === null) return false
-      draft.requiredFields = [f]
-    } else {
-      /**
-       * 名字在**输入时**就校验，而不是等到最后。
-       *
-       * 我第一版的示例文案自己写的是 `dataPoints`（camelCase），
-       * 而字段名必须 snake_case —— 于是照着提示填完，最后一步才被加载器拒。
-       * 「向导让我这么填，加载器又说不行」是最难堪的那种错。
-       * 正则从 result-schema 导入，不在这里重写一份（重写必然漂）。
-       */
-      const listName = (await readLine('  列表字段叫什么？（如 data_points）：')).trim()
-      if (!listName) return false
-      if (RESERVED_FIELDS.includes(listName)) {
-        line(c.red(`  ${listName} 是核心字段，不能覆盖。换个名字`))
-        return false
-      }
-      if (!FIELD_NAME.test(listName)) {
-        line(c.red(`  ${FIELD_NAME_HINT}`))
-        line(c.gray(`  比如 ${toSnake(listName)}`))
-        return false
-      }
-      line(c.gray('  每条要带哪些字段？一行一个，空行结束。'))
-      line(c.gray('  形如 `source:string` / `value:number` / `fetched_at:string`'))
-      const fields: Record<string, string> = {}
-      for (;;) {
-        const l = (await readLine('    ')).trim()
-        if (!l) break
-        const [name, type = 'string'] = l.split(':').map((x) => x.trim())
-        if (!name) continue
-        if (!FIELD_NAME.test(name)) {
-          line(c.red(`    ${FIELD_NAME_HINT} —— 比如 ${toSnake(name)}`))
-          continue
-        }
-        if (!['string', 'number', 'boolean'].includes(type)) {
-          line(c.red(`    类型只能是 string / number / boolean，收到「${type}」`))
-          continue
-        }
-        fields[name] = type
-      }
-      if (Object.keys(fields).length === 0) return false
-
-      draft.resultFields = {
-        [listName]: { type: 'object[]', description: what, fields },
-      }
-      // 每个元素都必填 —— `a[].b` 表示 a 非空且每一条的 b 都非空
-      draft.requiredFields = Object.keys(fields).map((f) => `${listName}[].${f}`)
-      line()
-      line(`${ICON.ok} 检查：${c.cyan(draft.requiredFields.join(', '))}`)
-      line(c.gray(`  少任何一项都会被退回，规则原文回给模型让它重做。`))
-    }
-  
-  return true
-}
-
-async function askAppliesTo(agents: string[]): Promise<string[]> {
-  line()
-  const scope = await select('作用于谁？', [
-    { value: '*', label: '全部 agent', detail: '加新 agent 时自动生效 —— 多数规则该用这个' },
-    ...(agents.length
-      ? [
-          {
-            value: 'pick',
-            label: '只对指定的几个',
-            detail: `现有：${agents.join(', ')}。**加新 agent 时不会自动生效**`,
-          },
-        ]
-      : []),
-  ])
-  if (scope !== 'pick') return ['*']
-  const picked: string[] = []
-  for (;;) {
-    const a = await select(
-      `选一个 agent${picked.length ? `（已选 ${picked.join(', ')}）` : ''}：`,
-      [
-        ...agents.filter((x) => !picked.includes(x)).map((x) => ({ value: x, label: x })),
-        { value: '(done)', label: picked.length ? '选完了' : '（改为全部）' },
-      ] as Array<Choice<string>>,
-    )
-    if (a === null || a === '(done)') break
-    picked.push(a)
-  }
-  return picked.length ? picked : ['*']
-}
-
-/** camelCase → snake_case，用来给出「你大概想写这个」 */
-function toSnake(s: string): string {
-  return s
-    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-    .replace(/[^A-Za-z0-9_]+/g, '_')
-    .toLowerCase()
-    .replace(/^_+|_+$/g, '')
-}
-
-function cancelled(): number {
-  line()
-  line(c.gray('已取消，什么都没写。'))
-  return 1
-}
-
-/**
- * 树以前有**自己一份渲染器**，和 rule-propose 的 renderRuleMd 并存。
- *
- * 删掉了：两份渲染同一种文件的代码必然漂 —— 加 uncovered 时就得改两处，
- * 漏掉一处的症状是「树生成的规则少了一半信息」，而且**不报错**。
- * `finish` 本来就已经拼出一个 UserRule，直接用那一个。
- */
-async function finish(
-  d: Draft,
-  n: Awaited<ReturnType<typeof boot>>,
-  path: string,
-  dir: string,
-  flags: Record<string, string | true>,
-): Promise<number> {
-  const rule: UserRule = {
-    id: d.id,
-    gist: d.gist,
-    constraint: d.constraint,
-    check:
-      d.requiredFields.length || Object.keys(d.resultFields).length
-        ? {
-            ...(d.requiredFields.length ? { requiredFields: d.requiredFields } : {}),
-            ...(Object.keys(d.resultFields).length
-              ? { resultFields: d.resultFields as never }
-              : {}),
-          }
-        : null,
-    denyTools: d.denyTools,
-    appliesTo: d.appliesTo,
-    uncovered: d.uncovered,
-    path,
-  }
-
-  // 写之前拿真注册表校验 —— 与 agent new --describe 同一套分工
-  const problems = validateRules([rule], {
-    agents: n.config.agents.map((a) => a.id),
-    tools: [...n.tools.all()].map((t) => t.name),
-  })
-  const fatal = problems.filter((p) => p.fatal)
-  if (fatal.length) {
-    line()
-    for (const p of fatal) line(`${ICON.fail} ${p.message}`)
-    return 1
-  }
-
-  line()
-  heading('这条规则')
-  const text = renderRuleMd(rule)
-  for (const l of text.split('\n')) line(`  ${c.gray(l)}`)
-
-  line()
-  // 成本要在写之前就说出来 —— 事后才发现「怎么每轮都多几百 token」太晚
-  for (const l of costLines(rule)) line(l)
-  for (const p of problems.filter((x) => !x.fatal)) line(`${ICON.warn} ${p.message}`)
-
-  /**
-   * **机器判不了「这个检查真的对应那句要求吗」。**
-   *
-   * 这句话原先只在 `--describe` 路径上说 —— 但树同样会走到不相干的检查上，
-   * 而且树上人更容易走过去：一路按回车挑一个字段就成了。
-   * 实测 plan-first 就落在了 `requiredFields: [open_questions]`。
-   */
-  if (rule.check) {
-    line()
-    line(c.yellow('机器判不了的一件事：这个检查真的对应你那句要求吗？'))
-    line(c.gray('  形式合法但不相干的检查比没有检查更糟 —— 它看起来像多了一层保障。'))
-  }
-
-  /**
-   * **管住了一半，就得在写之前说清是哪一半。**
-   *
-   * 这条信息也会跟着规则进文件（frontmatter 的 uncovered）并显示在
-   * `nucleus rules` 里 —— 只在创建时打印一次是不够的：下个月清单上写着
-   * 「plan-first：检查」，没人会记得另一半从来没生效。
-   */
-  if (coverageOf(rule) === 'partial') {
-    line()
-    line(`${ICON.warn} ${c.yellow('这条规则只管住了一部分。')} 没管住的：`)
-    for (const u of rule.uncovered) line(`  ${c.yellow('·')} ${u}`)
-    line(c.gray('  会写进文件的 uncovered，并在 nucleus rules 里标成「半」。'))
-    line(c.gray('  管一半比不管好 —— 但前提是没人误以为整条都生效了。'))
-  }
-
-  line()
-  /**
-   * 这里**直接写文件**，与 `model add` 不同。
-   *
-   * 区别在于：规则是**新文件**，没有既有注释可毁；而模型配置要改
-   * `nucleus.config.json`，那份文件里全是「这个数字为什么是这个值」的注释，
-   * JSON 序列化会把它们全部丢掉。同一个判断标准，不同的结论。
-   */
-  if (!(await confirm(`写入 ${path}？`))) return cancelled()
-  await writeFile(path, text, 'utf8')
-  line(`${ICON.ok} 已写入 ${path}`)
-  line(c.gray(`  看一眼：nucleus rules`))
-  if (dir !== DEFAULT_RULES_DIR) line(c.gray(`  注意目录不是默认的 —— 需要 rulesDir: "${dir}"`))
-  void flags
-  return 0
-}
