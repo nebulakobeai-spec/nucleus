@@ -155,19 +155,61 @@ async function describePath(
 
     // ── 模型自己说强制不了 ──
     if (p.cannotEnforce) {
-      line(`${ICON.warn} ${c.yellow('模型判断这条约束无法可靠强制')}`)
+      /**
+       * **两种「强制不了」，建议完全相反。**
+       *
+       * 实测：「执行前必须写计划，用户审核同意后再执行」被判 cannotEnforce，
+       * 理由（模型自己推的，完全正确）是 check 只能验模型自己提交的字段，
+       * 加一个 `plan_approved` 等于让它给自己签字。
+       *
+       * 而我当时给的建议是「写进 agent 的 identity」——**那是错的建议**。
+       * identity 就是提醒，正是这套设计要减少依赖的东西。这条约束不是
+       * 本质判不了，是运行时缺一个原语。把它埋进 identity 等于把一个
+       * 能修的缺口变成一句没人强制的话，而且从此没人会再想起它。
+       */
+      const kind = p.unenforceableKind ?? guessKind(p)
+      line(
+        `${ICON.warn} ${c.yellow('模型判断这条约束无法可靠强制')}` +
+          c.gray(kind === 'missing_mechanism' ? ' —— 运行时缺原语' : ' —— 本质判不了'),
+      )
       line(`  ${p.reasoning}`)
       line()
-      line(c.gray('  这是个合法结论，不是失败 —— 只有提醒的规则会被加载器拒绝，理由是'))
-      line(c.gray('  它会出现在规则清单里、看起来系统在管，实际什么都没管。'))
+
+      if (kind === 'missing_mechanism') {
+        line(c.cyan('  注意这不是「这条要求不好」——'))
+        line('  它**本可以机械判定**，只是 Nucleus 现在缺一个原语：')
+        if (p.missingMechanism) line(`    ${c.bold(p.missingMechanism)}`)
+        line()
+        line(c.gray('  已知的缺口，都在 backlog 上：'))
+        for (const g of KNOWN_GAPS) line(c.gray(`  · ${g}`))
+        line()
+        line(`  ${c.yellow('所以：不要把它写进 agent 的 identity。')}`)
+        line(c.gray('  identity 就是「提醒」，而提醒对这条要求恰好是最没用的一层 ——'))
+        line(c.gray('  把一个能修的缺口埋成一句没人强制的话，从此没人会再想起它。'))
+        line(c.gray('  现在能做的：先不加这条规则，等原语落地；'))
+        line(c.gray('  或者找出它可机械判定的那一面（往往有一小块能立刻管住）。'))
+      } else {
+        line(c.gray('  只有提醒的规则会被加载器拒绝，理由是它会出现在规则清单里、'))
+        line(c.gray('  看起来系统在管，实际什么都没管。'))
+        line()
+        line('  两条出路：')
+        line(c.gray('  · 写进 agent 的 identity —— 那里本来就是「怎么做事」的地方，'))
+        line(c.gray('    而且不占每轮的约束块预算'))
+        line(c.gray('  · 想清楚它有没有可机械判定的一面：'))
+        line(c.gray('    「回答要简洁」判不了，但「summary 不超过 N 字」可以'))
+      }
       line()
-      line('  两条出路：')
-      line(c.gray('  · 写进 agent 的 identity —— 那里本来就是「怎么做事」的地方，'))
-      line(c.gray('    而且不占每轮的约束块预算'))
-      line(c.gray('  · 想清楚它有没有可机械判定的一面：'))
-      line(c.gray('    「回答要简洁」判不了，但「summary 不超过 N 字」可以'))
-      line()
-      if (!(await confirm('还是想一问一答试试？', false))) return 1
+      /**
+       * 这里**不该顺手把人推进问答树**。
+       *
+       * 树问的是「能不能从结果里机械看出来」—— 而模型刚刚论证了不能，
+       * 而且论证得对。让人接着走一遍，只会走到一个不相干的检查上
+       * （实测就是：plan-first 最后落在 `requiredFields: [open_questions]`）。
+       * 那正是 cannotEnforce 存在的目的要防的事。
+       */
+      line(c.gray('  一问一答问的是同一个问题（能不能从结果里机械看出来），'))
+      line(c.gray('  模型刚论证了不能 —— 再走一遍多半只会落到一个不相干的检查上。'))
+      if (!(await confirm('仍然要一问一答？', false))) return 1
       return await wizardWith(n, id, path, dir, flags, description)
     }
 
@@ -220,7 +262,7 @@ async function describePath(
 
     line()
     if (!(await confirm(`写入 ${path}？`))) {
-      line(c.gray('已取消。��自己一条条定：--interactive'))
+      line(c.gray('已取消。想自己一条条定：--interactive'))
       return 1
     }
     await writeFile(path, text, 'utf8')
@@ -232,8 +274,34 @@ async function describePath(
   }
 }
 
-function tierColor(t: string): string {
-  if (t === 'boundary') return c.green('边界')
+/**
+ * 已知的原语缺口 —— 「强制不了」时要能说出**缺的是什么**。
+ *
+ * 说不出来的话，「无法可靠强制」听起来就像「你这条要求不好」，
+ * 而实际情况往往相反：要求本身完全可机械判定，是运行时还没长出那只手。
+ * 这三条都在 backlog 上，不是永久限制。
+ */
+const KNOWN_GAPS = [
+  '用户审批（ask_user / waiting_user）—— 「等人点头再继续」目前没有落点',
+  '对**运行时事实**的检查 —— 现在只能验模型提交的字段，验不了「它到底调了什么」',
+  '跨 run 的图条件 —— 「计划必须先过 Critic」这类门，没有表达它的地方',
+]
+
+/**
+ * 模型没给 unenforceableKind 时的兜底判断。
+ *
+ * 只在 reasoning 里找**它自己说出来的**那些词，不做语义推测 ——
+ * 猜错方向给出的是相反的建议，宁可落回保守的那一边（inherent，
+ * 它的建议至少不会把人引去埋一个能修的缺口）。
+ */
+export function guessKind(p: RuleProposal): 'inherent' | 'missing_mechanism' {
+  const t = p.reasoning ?? ''
+  return /跨回合|跨轮|状态|审核|审批|同意|伪造|幻觉|历史对话|状态机|无法验证用户/.test(t)
+    ? 'missing_mechanism'
+    : 'inherent'
+}
+
+function tierColor(t: string): string {  if (t === 'boundary') return c.green('边界')
   if (t === 'check') return c.cyan('检查')
   return c.yellow('提醒')
 }
@@ -358,12 +426,45 @@ async function wizardWith(
         detail: '例：「数据必须带来源」→ 每个数据点都要有 source 字段',
       },
       {
+        value: 'runtime' as const,
+        label: '要验的不是我提交的内容，而是**过程中发生了什么**',
+        detail: '例：有没有人批准过、调了哪个工具、是不是先过了某个 agent',
+      },
+      {
         value: 'no' as const,
         label: '不能 —— 需要人的判断',
         detail: '例：语气、行文风格、思路是否清晰',
       },
     ])
     if (isCheck === null) return cancelled()
+
+    /**
+     * **树也必须有这个出口。**
+     *
+     * 实测：「执行前必须写计划、用户同意后再执行」被模型正确判为强制不了，
+     * 而退回树之后，树把人一路问到了 `requiredFields: [open_questions]` ——
+     * 一个和那句要求毫无关系的检查。
+     *
+     * 树问的是「能不能从结果里机械看出来」，而它只有「能 / 不能」两个答案。
+     * 于是「能判，但要判的不是我提交的东西」这个真实答案无处可去，
+     * 人只能选「能」，然后随便挑一个字段。**那正是 cannotEnforce 要防的事**，
+     * 而我的模型路径防住了，人的路径没防住。
+     */
+    if (isCheck === 'runtime') {
+      line()
+      line(c.yellow('  这一类目前强制不了 —— 但原因是运行时缺原语，不是你这条要求不好。'))
+      line(c.gray('  check 校验的只有**模型自己提交的那份结果**，没有别的信息源。'))
+      line(c.gray('  所以「它有没有真的先问过人」这种事，现在验不了 ——'))
+      line(c.gray('  加一个 `approved: true` 字段是同一个模型自己填的，等于给自己签字。'))
+      line()
+      line(c.gray('  已知的缺口，都在 backlog 上：'))
+      for (const g of KNOWN_GAPS) line(c.gray(`  · ${g}`))
+      line()
+      line(`  ${c.yellow('不要把它写进 identity。')}`)
+      line(c.gray('  identity 就是提醒 —— 把一个能修的缺口埋成一句没人强制的话，'))
+      line(c.gray('  从此没人会再想起它。先不加，或者找出它可机械判定的那一小块。'))
+      return 1
+    }
 
     if (isCheck === 'yes') {
       const shape = await select('字段长什么样？', [
@@ -607,6 +708,19 @@ async function finish(
     line(`常驻成本 ${c.green('0')} ${c.gray('—— 纯边界 / 纯检查，不占约束块')}`)
   }
   for (const p of problems.filter((x) => !x.fatal)) line(`${ICON.warn} ${p.message}`)
+
+  /**
+   * **机器判不了「这个检查真的对应那句要求吗」。**
+   *
+   * 这句话原先只在 `--describe` 路径上说 —— 但树同样会走到不相干的检查上，
+   * 而且树上人更容易走过去：一路按回车挑一个字段就成了。
+   * 实测 plan-first 就落在了 `requiredFields: [open_questions]`。
+   */
+  if (rule.check) {
+    line()
+    line(c.yellow('机器判不了的一件事：这个检查真的对应你那句要求吗？'))
+    line(c.gray('  形式合法但不相干的检查比没有检查更糟 —— 它看起来像多了一层保障。'))
+  }
 
   line()
   /**

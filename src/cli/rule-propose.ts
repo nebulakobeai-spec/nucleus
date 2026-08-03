@@ -51,6 +51,29 @@ export interface RuleProposal {
    * 因为看起来还多了一层保障。
    */
   cannotEnforce?: boolean
+  /**
+   * 强制不了**的两种原因**，给出的建议完全相反。
+   *
+   * ── 为什么这个区分是必须的 ────────────────────────────
+   *
+   * 实测：「每次执行前必须写计划，用户审核同意后再执行」被判成 cannotEnforce，
+   * 理由（模型自己推出来的，完全正确）是——这是跨回合的状态流转，而 check
+   * 只能验模型自己提交的字段，加一个 `plan_approved` 等于让它自己给自己签字。
+   *
+   * 但那时我给的建议是「写进 agent 的 identity」，**那是错的建议**。
+   * identity 是提醒的一种，正是这套设计要减少依赖的东西。这条约束不是
+   * 「本质上判不了」，而是**运行时缺一个原语**（用户审批 / 对运行时事实的检查）。
+   *
+   *   inherent           本质判不了：语气、行文、思路是否清晰。人来判都要商量。
+   *                      → 写进 identity 是对的，它也只能在那儿。
+   *   missing_mechanism  运行时缺原语：跨回合状态、用户审批、
+   *                      「验运行时发生过什么」而不是「验提交了什么」。
+   *                      → **不要写进 identity** —— 那是把一个能修的缺口
+   *                        埋成一句没人强制的话。该报给运行时。
+   */
+  unenforceableKind?: 'inherent' | 'missing_mechanism'
+  /** missing_mechanism 时：缺的是什么原语，一句话 */
+  missingMechanism?: string
   /** 拿不准的地方 —— 有内容时向导会就这几点问你 */
   uncertain?: string[]
 }
@@ -115,9 +138,23 @@ export function ruleProposalSchema(): Record<string, unknown> {
       cannotEnforce: {
         type: 'boolean',
         description:
-          '这条约束**无法可靠强制**时置 true（纯风格、纯语气、需要人的判断）。' +
-          '**这是合法答案。** 不要为了凑齐「提醒配检查」去编一个不相干的检查 ——' +
+          '这条约束**无法可靠强制**时置 true。**这是合法答案。**' +
+          '不要为了凑齐「提醒配检查」去编一个不相干的检查 ——' +
           '那比只有提醒更糟，因为看起来还多了一层保障。',
+      },
+      unenforceableKind: {
+        type: 'string',
+        enum: ['inherent', 'missing_mechanism'],
+        description:
+          'cannotEnforce 时必填，两者给出的建议完全相反。' +
+          '`inherent`：本质判不了 —— 语气、行文、思路是否清晰，人来判都要商量。' +
+          '`missing_mechanism`：**这条要求本身是可机械判定的，只是运行时缺原语** ——' +
+          '典型是跨回合状态、需要用户审批、或者要验「运行时发生过什么」' +
+          '（调了哪个工具、有没有人批准）而不是「提交了什么」。',
+      },
+      missingMechanism: {
+        type: 'string',
+        description: 'missing_mechanism 时：缺的到底是什么原语，一句话。会被报给运行时。',
       },
       uncertain: {
         type: 'array',
@@ -175,8 +212,30 @@ export function buildRulePrompt(n: Nucleus, id: string, description: string): st
     '再问：违反了之后，能不能**只看提交的结果**就机械判出来？→ 能则 check。',
     '最后：reminder 只负责解释「为什么」，而且必须已经有 check 或 boundary。',
     '',
+    /**
+     * **这个事实必须写出来。**
+     *
+     * 实测 gemma4 自己推出了它（「模型可以伪造 plan_approved 直接跳过审核」），
+     * 那是对的 —— 但不能靠模型每次都想到。它是 check 这一层的根本限制：
+     * `validateResult(raw, spec)` 里的 `raw` 就是模型自己写的那份结果。
+     *
+     * 所以「主语是模型自己的声明」的 check 一律等于零 —— 而这类 check
+     * 恰好最容易写出来（加一个 `verified: true` 就有了「检查」），
+     * 也最容易让人以为已经管住了。
+     */
+    '## check 的根本限制 —— 判之前必须知道',
+    'check 校验的是**模型自己提交的那份结果**，没有别的信息源。',
+    '所以主语是「模型自己声称」的检查等于零：`plan_approved: true`、`verified: true`、',
+    '`reviewed_by_user: true` —— 都是同一个模型填的，它想跳过就跳过。',
+    '有效的 check 要求的是**内容本身**（数据带来源、结论带引用、字段非空），',
+    '而不是一句「我做过了」。',
+    '',
     '**如果两者都不行，置 cannotEnforce: true 并说明原因。那是合法答案** ——',
     '不要编一个不相干的 check 来凑数。',
+    '同时必须给 unenforceableKind：本质判不了（inherent），',
+    '还是这条要求本可机械判定、只是运行时缺原语（missing_mechanism，',
+    '比如需要用户审批、跨回合状态、或者要验运行时发生过什么）。',
+    '这两者的后续处理完全不同，所以不能含糊。',
     '',
     '调用 propose_rule 提交。',
   ].join('\n')

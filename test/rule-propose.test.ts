@@ -12,6 +12,7 @@ import {
   type RuleProposal,
 } from '../src/cli/rule-propose.js'
 import { parseRuleFile } from '../src/runtime/user-rules.js'
+import { guessKind } from '../src/cli/rule-new.js'
 
 /**
  * `rule new --describe` —— 让模型判层。
@@ -213,5 +214,74 @@ describe('提案 → 文件', () => {
 
   it('appliesTo 缺省时是全部', () => {
     expect(toRule('x', p({ requiredFields: ['summary'] }), 'x.md').appliesTo).toEqual(['*'])
+  })
+})
+
+/**
+ * ── 「强制不了」的两种，建议完全相反 ────────────────────────
+ *
+ * 实测触发这一组的是一条**很典型**的规则：
+ *
+ *   "每次执行任务前必须写计划，计划写完必须由用户审核后同意后再执行"
+ *
+ * gemma4 判它 cannotEnforce，理由是自己推出来的、而且完全正确：这是跨回合的
+ * 状态流转，而 check 只能验模型自己提交的字段 —— 加一个 `plan_approved`
+ * 等于让同一个模型给自己签字。
+ *
+ * 但我当时给的建议是「写进 agent 的 identity」，**那是错的**。identity 就是
+ * 提醒，正是这套设计要减少依赖的那一层。这条要求不是本质判不了，
+ * 是运行时缺原语（用户审批、对运行时事实的检查）。把它埋进 identity 等于
+ * 把一个能修的缺口变成一句没人强制的话，而且从此没人会再想起它。
+ */
+describe('强制不了的两种原因', () => {
+  it('提示词里写明 check 只能验模型自己提交的东西', () => {
+    const text = buildRulePrompt(n, 'x', 'y')
+    expect(text).toMatch(/模型自己提交的那份结果/)
+    // 那三个「自己给自己签字」的字段要点名 —— 它们最容易被写出来
+    expect(text).toMatch(/plan_approved/)
+    expect(text).toMatch(/verified: true/)
+  })
+
+  it('提示词要求区分 inherent 与 missing_mechanism', () => {
+    const text = buildRulePrompt(n, 'x', 'y')
+    expect(text).toMatch(/unenforceableKind/)
+    expect(text).toMatch(/missing_mechanism/)
+    const schema = JSON.stringify(ruleProposalSchema())
+    expect(schema).toMatch(/本质判不了/)
+    expect(schema).toMatch(/缺原语/)
+  })
+
+  it('两种都算合法结论，不阻断', () => {
+    for (const kind of ['inherent', 'missing_mechanism'] as const) {
+      const out = validateRuleProposal(
+        n,
+        p({ tier: ['reminder'], constraint: 'x', cannotEnforce: true, unenforceableKind: kind }),
+      )
+      expect(out.filter((x) => x.fatal), kind).toEqual([])
+    }
+  })
+})
+
+describe('模型没给 kind 时的兜底', () => {
+  /** gemma4 对 plan-first 的**真实原文**（截断）—— 唯一的真样本，值得钉住 */
+  const REAL = `该约束涉及的是一个跨回合的状态流转（计划 -> 用户审核 -> 执行），而非单次输出的静态格式。虽然可以增加一个 plan_approved 字段并要求必填，但模型可以通过伪造该字段（幻觉）直接跳过审核阶段。runtime check 只能验证结果中是否包含某个值，无法验证用户在历史对话中是否真的表达了"同意"。`
+
+  it('认出真实那段推理是「缺原语」而不是「本质判不了」', () => {
+    expect(guessKind({ tier: ['reminder'], reasoning: REAL })).toBe('missing_mechanism')
+  })
+
+  it('纯风格的理由判成 inherent', () => {
+    expect(
+      guessKind({ tier: ['reminder'], reasoning: '这是行文风格，读起来舒不舒服要人来看' }),
+    ).toBe('inherent')
+  })
+
+  /**
+   * 猜不出来时落回 inherent —— **不是因为它更可能对**，
+   * 而是因为猜错方向给出的是相反的建议，而 inherent 那条建议
+   * 至少不会把人引去埋一个能修的缺口。
+   */
+  it('看不出来时落回保守的那一边', () => {
+    expect(guessKind({ tier: ['reminder'], reasoning: '不好说' })).toBe('inherent')
   })
 })

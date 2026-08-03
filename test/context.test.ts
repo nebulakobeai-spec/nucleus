@@ -379,7 +379,7 @@ describe('renderSummaryMinimal', () => {
       .toMatch(/已进一步压缩/)
   })
 
-  /** 连约束都没有时返回空串，让上层直接走 drop —— 一个只有标题的摘要是��浪费 */
+  /** 连约束都没有时返回空串，让上层直接走 drop —— 一个只有标题的摘要是纯浪费 */
   it('没有要求也没有未决时返回空串', () => {
     expect(
       renderSummaryMinimal({ constraints: [], decisions: ['x'], open: [], artifacts: [], context: 'y' }),
