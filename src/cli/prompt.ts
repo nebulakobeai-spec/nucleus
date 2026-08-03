@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline'
-import { c, line } from './ui.js'
+import { c, line, visibleLength } from './ui.js'
 
 /**
  * 交互式单选 / 输入。
@@ -127,13 +127,33 @@ export async function select<T>(
   let active = choices.findIndex((x) => !x.disabled)
   let drawn = 0
 
+  /**
+   * 重画。两个坑都在这里，而且**症状是同一个**（文字往右跑）：
+   *
+   * ① **raw mode 下 `\n` 只换行不回车。** 光标停在原来的列，所以每写一行都
+   *    比上一行更靠右，画出一个楼梯。必须用 `\r\n`。
+   *    （`input.ts` 里知道这件事 —— 它一直用 `\r\x1b[2K`。这里当初忘了。）
+   *
+   * ② **要按「物理行」而不是「逻辑行」上移。** 一行中文在窄一点的终端里会折成
+   *    两行，那时 `ESC[nA` 上移得不够，擦除从中间开始，上一次的残留就留在屏幕上。
+   *    所以按可见宽度算折行数。
+   *
+   * 上移之后还要 `\r` 回到第 0 列 —— `ESC[nA` **只动行不动列**，
+   * 而 `ESC[0J` 是「从光标擦到屏幕末尾」，光标在第 20 列的话前 20 列就留着了。
+   */
+  const cols = () => (output.columns && output.columns > 20 ? output.columns : 80)
+  const physicalRows = (lines: string[]) =>
+    lines.reduce((n, l) => n + Math.max(1, Math.ceil(visibleLength(l) / cols())), 0)
+
   const draw = () => {
-    // 精确擦掉上次画的行数 —— 多擦会吃掉上面的正文
-    if (drawn > 0) output.write(`${ESC}[${drawn}A${ESC}[0J`)
-    const body = renderChoices(choices, active, { ...(opts.pageSize ? { pageSize: opts.pageSize } : {}) })
+    if (drawn > 0) output.write(`${ESC}[${drawn}A\r${ESC}[0J`)
+    const body = renderChoices(choices, active, {
+      ...(opts.pageSize ? { pageSize: opts.pageSize } : {}),
+    })
     const foot = c.gray('  ↑↓ 选择 · Enter 确认 · Ctrl-C 取消')
-    output.write([...body, foot].join('\n') + '\n')
-    drawn = body.length + 1
+    const lines = [...body, foot]
+    output.write(lines.join('\r\n') + '\r\n')
+    drawn = physicalRows(lines)
   }
 
   line(title)

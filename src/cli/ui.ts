@@ -211,6 +211,7 @@ const VALUE_FLAGS = new Set([
   'db',
   'describe',
   'dir',
+  'describe',
   'goal',
   'limit',
   'log',
@@ -222,6 +223,7 @@ const VALUE_FLAGS = new Set([
   'run',
   'scenario',
   'dir',
+  'describe',
   'base-url',
   'key-ref',
   'as',
@@ -249,6 +251,8 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   'dry-run',
   'no-probe',
   'numbered',
+  'interactive',
+  'force',
   'help',
 ])
 

@@ -14,6 +14,16 @@ import {
 import { FIELD_NAME, FIELD_NAME_HINT, RESERVED_FIELDS } from '../runtime/result-schema.js'
 import { askNumber, closePrompts, confirm, readLine, select, type Choice } from './prompt.js'
 import { c, heading, ICON, line, resolveDb, strFlag } from './ui.js'
+import { isMockOnly } from '../config.js'
+import { parseArgs } from '../runtime/tools.js'
+import {
+  buildRulePrompt,
+  renderRuleMd,
+  ruleProposalSchema,
+  toRule,
+  validateRuleProposal,
+  type RuleProposal,
+} from './rule-propose.js'
 
 /**
  * `nucleus rule new` —— 加一条规则。
@@ -55,10 +65,177 @@ export async function ruleNew(
   flags: Record<string, string | true>,
 ): Promise<number> {
   try {
+    /**
+     * **描述一句话是主路径，问答树是退路。**
+     *
+     * 第一版只有问答树（先问边界、再问检查、最后提醒）。逻辑没错但不直觉：
+     * 它把我的分类过程强加给使用者，而使用者心里想的是一句具体的要求，
+     * 不是「这属于哪一层」。
+     *
+     * 而「属于哪一层」恰好是模型擅长判的 —— 它只需要理解那句要求的含义。
+     * 所以：**说一句话 → 模型提议完整规则（含分层）→ 运行时校验 →
+     * 只有校验不过或它自己拿不准时才问你。**
+     *
+     * 退路仍然留着：`--interactive`，以及配置里只有 mock 模型时自动退回
+     * （那时问模型等于问一个假答案）。
+     */
+    const description = strFlag(flags, 'describe') ?? argv.slice(1).join(' ').trim()
+    if (description && flags['interactive'] !== true) {
+      return await describePath(argv[0] ?? '', description, flags)
+    }
     return await wizard(argv, flags)
   } finally {
     closePrompts()
   }
+}
+
+/** 描述 → 模型提议 → 校验 → 只问不确定的 */
+async function describePath(
+  id: string,
+  description: string,
+  flags: Record<string, string | true>,
+): Promise<number> {
+  if (!/^[a-z][a-z0-9.-]*$/.test(id)) {
+    line(c.red(`id 只能是小写字母、数字、点与连字符：${id || '(空)'}`))
+    return 1
+  }
+  const dir = strFlag(flags, 'dir') ?? DEFAULT_RULES_DIR
+  const path = join(resolve(dir), `${id}.md`)
+  if (existsSync(path) && flags['force'] !== true) {
+    line(c.red(`${path} 已存在（--force 覆盖）`))
+    return 1
+  }
+
+  const { config } = await loadConfig(strFlag(flags, 'config'))
+  const n = await boot({ config, ...resolveDb(flags), skipMcp: flags['mcp'] !== true })
+
+  try {
+    if (isMockOnly(n.config)) {
+      // 问一个 mock 模型等于问一个假答案 —— 退回问答树，并说明为什么
+      line(`${ICON.warn} 配置里只有 mock 模型 —— 让它判层等于拿一个假答案。`)
+      line(c.gray('  退回一问一答。配好真实模型后再用 --describe 会顺很多。'))
+      line()
+      return await wizardWith(n, id, path, dir, flags, description)
+    }
+
+    heading(`加一条规则：${c.bold(id)}`)
+    line(c.gray(`模型链 ${n.config.defaults.modelChain.join(' → ')}`))
+    line(`  ${c.gray('你的要求：')}${description}`)
+    line()
+    line(c.gray('正在判它属于哪一层…'))
+
+    const res = await n.router.chat(n.config.defaults.modelChain, {
+      messages: [
+        {
+          role: 'system',
+          content: '你在设计运行时规则。只调用 propose_rule 提交结果，不要输出别的。',
+        },
+        { role: 'user', content: buildRulePrompt(n, id, description) },
+      ],
+      tools: [
+        { name: 'propose_rule', description: '提交这条规则的设计', parameters: ruleProposalSchema() },
+      ],
+    })
+    const call = res.toolCalls.find((t) => t.name === 'propose_rule')
+    if (!call) {
+      line(`${ICON.fail} 模型没有调用 propose_rule`)
+      line(c.gray(`  它说：${res.content.slice(0, 200) || '(无输出)'}`))
+      line(c.gray('  换个模型：--model <key>，或者用 --interactive 一问一答'))
+      return 1
+    }
+    const parsed = parseArgs(call.arguments)
+    if (!parsed.ok) {
+      line(`${ICON.fail} propose_rule ${parsed.error}`)
+      return 1
+    }
+    const p = parsed.value as RuleProposal
+
+    line(`${ICON.ok} ${c.gray(`${res.modelKey} · ${res.usage.tokensIn + res.usage.tokensOut} tok`)}`)
+    line()
+
+    // ── 模型自己说强制不了 ──
+    if (p.cannotEnforce) {
+      line(`${ICON.warn} ${c.yellow('模型判断这条约束无法可靠强制')}`)
+      line(`  ${p.reasoning}`)
+      line()
+      line(c.gray('  这是个合法结论，不是失败 —— 只有提醒的规则会被加载器拒绝，理由是'))
+      line(c.gray('  它会出现在规则清单里、看起来系统在管，实际什么都没管。'))
+      line()
+      line('  两条出路：')
+      line(c.gray('  · 写进 agent 的 identity —— 那里本来就是「怎么做事」的地方，'))
+      line(c.gray('    而且不占每轮的约束块预算'))
+      line(c.gray('  · 想清楚它有没有可机械判定的一面：'))
+      line(c.gray('    「回答要简洁」判不了，但「summary 不超过 N 字」可以'))
+      line()
+      if (!(await confirm('还是想一问一答试试？', false))) return 1
+      return await wizardWith(n, id, path, dir, flags, description)
+    }
+
+    // ── 展示分层与理由 ──
+    line(`${c.bold('分层')}  ${p.tier.map(tierColor).join(' + ')}`)
+    line(`  ${c.gray(p.reasoning)}`)
+    line()
+
+    const rule = toRule(id, p, path)
+    const problems = validateRuleProposal(n, p)
+    const fatal = problems.filter((x) => x.fatal)
+
+    if (fatal.length) {
+      line(`${ICON.fail} ${c.red('提议没通过校验')}`)
+      for (const x of fatal) line(`  ${c.red(x.field)}：${x.message}`)
+      line()
+      line(c.gray('  校验是机械的 —— 模型判层可以商量，但工具名与字段路径不能。'))
+      if (!(await confirm('改成一问一答？'))) return 1
+      return await wizardWith(n, id, path, dir, flags, description)
+    }
+
+    heading('这条规则')
+    const text = renderRuleMd(rule)
+    for (const l of text.split('\n')) line(`  ${c.gray(l)}`)
+
+    line()
+    const resident = rule.gist ?? rule.constraint ?? ''
+    line(
+      resident
+        ? `常驻成本约 ${roughTokens(resident)} token/轮` +
+            c.gray(rule.gist ? '（只有索引行，正文按需加载）' : '（正文直接内联）')
+        : `常驻成本 ${c.green('0')} ${c.gray('—— 纯边界 / 纯检查，不占约束块')}`,
+    )
+    for (const x of problems.filter((y) => !y.fatal)) line(`${ICON.warn} ${x.message}`)
+
+    /**
+     * **机器判不了「这个检查真的对应那句要求吗」。**
+     *
+     * 模型可能编一个形式合法但不相干的检查来满足「提醒必须配检查」。
+     * 那比只有提醒更糟 —— 看起来还多了一层保障。所以这一条显式问出来。
+     */
+    if (rule.check) {
+      line()
+      line(c.yellow('机器判不了的一件事：这个检查真的对应你那句要求吗？'))
+      line(c.gray('  形式合法但不相干的检查比没有检查更糟 —— 它看起来像多了一层保障。'))
+    }
+    for (const u of p.uncertain ?? []) {
+      line(`${ICON.warn} ${c.yellow('模型拿不准')}：${u}`)
+    }
+
+    line()
+    if (!(await confirm(`写入 ${path}？`))) {
+      line(c.gray('已取消。��自己一条条定：--interactive'))
+      return 1
+    }
+    await writeFile(path, text, 'utf8')
+    line(`${ICON.ok} 已写入 ${path}`)
+    line(c.gray('  看一眼：nucleus rules'))
+    return 0
+  } finally {
+    await n.close()
+  }
+}
+
+function tierColor(t: string): string {
+  if (t === 'boundary') return c.green('边界')
+  if (t === 'check') return c.cyan('检查')
+  return c.yellow('提醒')
 }
 
 async function wizard(argv: string[], flags: Record<string, string | true>): Promise<number> {
@@ -88,8 +265,23 @@ async function wizard(argv: string[], flags: Record<string, string | true>): Pro
 
   const { config } = await loadConfig(strFlag(flags, 'config'))
   const n = await boot({ config, ...resolveDb(flags), skipMcp: flags['mcp'] !== true })
-
   try {
+    return await wizardWith(n, id, path, dir, flags)
+  } finally {
+    await n.close()
+  }
+}
+
+/** 问答树本体。`described` 有值时把它作为第一个问题的默认答案 */
+async function wizardWith(
+  n: Awaited<ReturnType<typeof boot>>,
+  id: string,
+  path: string,
+  dir: string,
+  flags: Record<string, string | true>,
+  described?: string,
+): Promise<number> {
+  {
     const draft: Draft = {
       id,
       gist: null,
@@ -104,7 +296,7 @@ async function wizard(argv: string[], flags: Record<string, string | true>): Pro
     line(c.gray('三层的强制方式与代价差好几个数量级，所以从最强的那层开始问。'))
     line()
 
-    const what = (await readLine('这条规则要求什么？（一句话）：')).trim()
+    const what = described ?? (await readLine('这条规则要求什么？（一句话）：')).trim()
     if (!what) return cancelled()
     line()
 
@@ -293,8 +485,6 @@ async function wizard(argv: string[], flags: Record<string, string | true>): Pro
 
     draft.appliesTo = await askAppliesTo(n.config.agents.map((a) => a.id))
     return finish(draft, n, path, dir, flags)
-  } finally {
-    await n.close()
   }
 }
 
