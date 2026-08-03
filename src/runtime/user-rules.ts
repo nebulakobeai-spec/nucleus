@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { parseFrontmatter } from '../config/agent-files.js'
+import { validateResultFields, type ResultFields } from './result-schema.js'
 
 /**
  * 用户自己写的规则 —— **一条规则同时携带三层**。
@@ -37,11 +38,25 @@ export interface RuleCheck {
   /**
    * 结果里必须有的字段。`a[].b` 表示 a 非空且每个元素的 b 都非空。
    *
-   * 这是目前唯一的「检查」形式 —— 刻意只做一种：结果契约是所有 agent 都有的
-   * 收尾动作，所以这一种覆盖面最广。将来要加（比如「产出必须过某个检查器」）
-   * 就在这里加字段，而不是让规则去引用一段代码。
+   * 结果契约是所有 agent 都有的收尾动作，所以这一种覆盖面最广。
+   * 将来要加（比如「产出必须过某个检查器」）就在这里加字段，
+   * 而不是让规则去引用一段代码。
    */
   requiredFields?: string[]
+  /**
+   * 这条规则要求结果里**有哪些新字段**。
+   *
+   * ── 为什么规则要能声明字段 ────────────────────────────
+   *
+   * 「金融数据必须带来源、抓取时间、验证状态」这类要求，落成检查就是
+   * `requiredFields: [dataPoints[].source, ...]`。但 `dataPoints` **不在核心
+   * 字段里**（核心只有 status / summary / artifacts / confidence /
+   * open_questions），所以光有 requiredFields 会引用一个未声明的字段。
+   *
+   * 把声明放在 agent 上是错的：那条要求属于**规则**，而不属于某个专家 ——
+   * 换个专家做同一件事，要求不该消失。规则自带声明，规则一删字段也一起消失。
+   */
+  resultFields?: ResultFields
 }
 
 export interface UserRule {
@@ -88,7 +103,7 @@ export interface RuleProblem {
   fatal: boolean
 }
 
-const KNOWN_KEYS = ['appliesTo', 'denyTools', 'requiredFields', 'id', 'gist']
+const KNOWN_KEYS = ['appliesTo', 'denyTools', 'requiredFields', 'resultFields', 'id', 'gist']
 
 /**
  * 正文超过这么多 token 就必须给 `gist`，正文改为按需加载。
@@ -150,7 +165,20 @@ export function parseRuleFile(path: string, text: string): { rule?: UserRule; pr
   const appliesTo = Array.isArray(data['appliesTo']) ? (data['appliesTo'] as string[]) : []
   const constraint = body.trim() || null
   const gist = typeof data['gist'] === 'string' ? data['gist'].trim() || null : null
-  const check: RuleCheck | null = requiredFields.length ? { requiredFields } : null
+  const resultFields =
+    data['resultFields'] && typeof data['resultFields'] === 'object'
+      ? (data['resultFields'] as ResultFields)
+      : undefined
+  for (const fp of validateResultFields(resultFields)) {
+    problems.push({ path, message: `resultFields.${fp.field}：${fp.message}`, fatal: true })
+  }
+  const check: RuleCheck | null =
+    requiredFields.length || resultFields
+      ? {
+          ...(requiredFields.length ? { requiredFields } : {}),
+          ...(resultFields ? { resultFields } : {}),
+        }
+      : null
 
   /**
    * 长正文没有索引行 → 拒绝。
@@ -371,6 +399,27 @@ export function constraintsForAgent(rules: UserRule[], agentId: string): string[
 /** 正文按需加载的那些规则 —— `read_rule` 的可取清单 */
 export function indexedRulesForAgent(rules: UserRule[], agentId: string): UserRule[] {
   return rulesForAgent(rules, agentId).filter((r) => presenceOf(r) === 'indexed')
+}
+
+/**
+ * 这个 agent 因规则而**声明**的结果字段（检查），与 agent 自己声明的合并。
+ *
+ * 同名字段冲突时 **agent 的声明优先** —— 它更具体（「这个专家的 findings
+ * 长这样」比「所有人的 findings 长这样」更近），而且冲突时报出来比静默取一个好。
+ */
+export function resultFieldsForAgent(
+  rules: UserRule[],
+  agentId: string,
+): { fields: ResultFields; conflicts: string[] } {
+  const fields: ResultFields = {}
+  const conflicts: string[] = []
+  for (const r of rulesForAgent(rules, agentId)) {
+    for (const [name, decl] of Object.entries(r.check?.resultFields ?? {})) {
+      if (fields[name]) conflicts.push(`${name}（${r.id} 与前一条规则都声明了）`)
+      fields[name] = decl
+    }
+  }
+  return { fields, conflicts }
 }
 
 /** 这个 agent 因规则而必填的字段（检查），与 agent 自己声明的合并 */

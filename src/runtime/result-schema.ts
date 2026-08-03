@@ -64,6 +64,16 @@ export type ResultFields = Record<string, FieldDecl>
  * 覆盖 summary 或 status 会让 announceText / 遵守率统计一起失真 ——
  * 那些代码都假定核心字段的语义固定。
  */
+/**
+ * 结果字段名的写法。**snake_case** —— 核心字段就是这个约定
+ * （`open_questions`），混用会让 schema 读起来像两个人写的。
+ *
+ * 导出成常量是为了让**输入时**就能校验：向导里现造一个正则，
+ * 与这里漂开之后就会出现「向导让我这么填，加载器又说不行」。
+ */
+export const FIELD_NAME = /^[a-z][a-z0-9_]*$/
+export const FIELD_NAME_HINT = '字段名只能是小写字母、数字与下划线（snake_case，与核心字段一致）'
+
 export const RESERVED_FIELDS = ['status', 'summary', 'artifacts', 'confidence', 'open_questions']
 
 /**
@@ -209,8 +219,8 @@ export function validateResultFields(fields: ResultFields | undefined): FieldDec
       })
       continue
     }
-    if (!/^[a-z][a-z0-9_]*$/.test(name)) {
-      problems.push({ field: name, message: `字段名只能是小写字母、数字与下划线` })
+    if (!FIELD_NAME.test(name)) {
+      problems.push({ field: name, message: FIELD_NAME_HINT })
     }
     if (!decl || typeof decl !== 'object' || !KNOWN.includes((decl as FieldDecl).type)) {
       problems.push({

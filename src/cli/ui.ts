@@ -221,6 +221,7 @@ const VALUE_FLAGS = new Set([
   'provider',
   'run',
   'scenario',
+  'dir',
   'base-url',
   'key-ref',
   'as',

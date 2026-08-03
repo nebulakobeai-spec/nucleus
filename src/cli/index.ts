@@ -15,6 +15,7 @@ import { agentTry } from './agent-try.js'
 import { artifactCat, artifactList } from './artifact.js'
 import { providersCmd, providersProbe } from './providers.js'
 import { rulesCmd } from './rules.js'
+import { ruleNew } from './rule-new.js'
 import { ScheduleStore } from '../store/schedules.js'
 import { findStuckRuns, findUnknownToolOutcomes } from '../runtime/stuck.js'
 import { convCompact, convList, convSeed, convShow, convSummary } from './conv.js'
@@ -661,7 +662,9 @@ ${c.bold('agent 与规则')}
   agent map                   能力边界矩阵：谁能用哪些工具
   agent new <id>              生成专家定义骨架（含写法说明）
   agent try <id> [任务]        只跑这一个专家：--n 重复、--compare 与旧版并排
-  rules                       规则遵守率：谁不听哪条规则
+  rules                       规则清单（边界 / 检查 / 提醒）与遵守率
+  rule new <id>               **加一条规则** —— 按强度倒着问：先边界，再检查，
+                              最后才是提醒（那层只是说一声，且每轮都花）
   conv list                   会话列表：消息数与压缩代数
   conv show <id>              摘要内容 + 压缩历史（丢了什么只有人能判）
   conv compact <id>           现在就压一次（--dry-run 只判定）
@@ -896,8 +899,11 @@ export async function main(argv: string[]): Promise<number> {
       if (rest[0] === 'probe') return providersProbe(rest.slice(1), flags)
       return providersCmd(rest, flags)
     }
-    case 'rules':
+    case 'rule':
+    case 'rules': {
+      if (rest[0] === 'new') return ruleNew(rest.slice(1), flags)
       return rulesCmd(rest, flags)
+    }
     case 'bundle':
       return bundleCmd(rest, flags)
     case 'replay':

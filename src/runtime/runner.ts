@@ -33,7 +33,7 @@ import type { RunEventSink } from './events.js'
 
 export interface AgentSpec {
   /**
-   * T1 约束原文 —— 每回合注入**末尾**约束块。
+   * 「提醒」原文 —— 每回合注入**末尾**约束块。
    *
    * 刻意不进 systemPrompt：前缀要逐字节稳定才能命中 prompt cache，
    * 而规则是会改的。放在末尾则改了也不影响前缀。
@@ -332,7 +332,7 @@ export class Runner {
       policy: '',
       history: input.history,
       /**
-       * T1 注入。`buildTail()` 与 `maxConstraintTokens` 预算一直都在，
+       * 「提醒」注入。`buildTail()` 与 `maxConstraintTokens` 预算一直都在，
        * **只是没人调** —— 第 8 处「声明了没接线」。
        */
       constraints: agent.constraints ?? [],

@@ -7,6 +7,7 @@ import {
   constraintsForAgent,
   denyToolsForAgent,
   requiredFieldsForAgent,
+  resultFieldsForAgent,
   type UserRule,
 } from './runtime/user-rules.js'
 import type { AgentSpec } from './runtime/runner.js'
@@ -17,7 +18,7 @@ import type { OAuthProviderDeclaration } from './auth/providers.js'
 /**
  * 统一配置（DESIGN.md §12）。
  *
- * T3 能力边界（工具/MCP 白名单）活在这里 —— 它的载体不是规则文本，
+ * **边界**（工具/MCP 白名单）活在这里 —— 它的载体不是规则文本，
  * 而是「给不给」，所以天然属于配置。
  *
  * **secrets 不进这里、不进 git**：只写 `apiKeyRef`（凭据引用名），
@@ -53,7 +54,7 @@ export interface NucleusConfig {
   /**
    * 用户自己写的规则（来自 `rules/*.md`）。
    *
-   * 不在 JSON 里声明 —— 与 agents 同样的理由：T1 正文是改得最勤的东西，
+   * 不在 JSON 里声明 —— 与 agents 同样的理由：提醒正文是改得最勤的东西，
    * 写在 JSON 里是转义串，diff 读不出改了什么。
    */
   rules?: UserRule[]
@@ -214,7 +215,7 @@ export interface AgentConfig {
   policy?: string
   modelChain?: string[]
   /**
-   * 授予的权限 —— T3 能力边界的**主关**。
+   * 授予的权限 —— **边界**的主关。
    *
    * 工具声明自己需要什么权限，这里授予权限。新接一个会写文件的 MCP 工具时，
    * 没有 `write` 的 agent 自动看不到它，配置一个字都不用改。
@@ -275,10 +276,10 @@ export function agentSpec(
   defaults: NucleusConfig['defaults'],
   /**
    * 用户规则。三层在这里落地：
-   *  T3 → 合并进 toolsDeny（工具根本不出现在模型看到的定义里）
-   *  T2 → 合并进 requiredFields（缺字段就退回让它重写）
-   *  T1 → **不在这里** —— 它是每回合装配 context 时注入末尾约束块的，
-   *       放进 systemPrompt 会破坏缓存前缀的逐字节稳定性
+   *  **边界** → 合并进 toolsDeny（工具根本不出现在模型看到的定义里）
+   *  **检查** → 合并进 requiredFields 与 resultFields（缺字段就退回让它重写）
+   *  **提醒** → **不在这里** —— 它是每回合装配 context 时注入末尾约束块的，
+   *             放进 systemPrompt 会破坏缓存前缀的逐字节稳定性
    */
   rules: UserRule[] = [],
 ): AgentSpec {
@@ -293,23 +294,33 @@ export function agentSpec(
   if (cfg.maxTokens !== undefined) spec.maxTokens = cfg.maxTokens
   if (cfg.toolsAllow) spec.toolsAllow = cfg.toolsAllow
 
-  // T3：规则禁掉的工具与 agent 自己的 toolsDeny 合并
+  // 边界：规则禁掉的工具与 agent 自己的 toolsDeny 合并
   const ruleDeny = denyToolsForAgent(rules, cfg.id)
   const deny = [...new Set([...(cfg.toolsDeny ?? []), ...ruleDeny])]
   if (deny.length) spec.toolsDeny = deny
 
-  // T2：规则要求的必填字段与 agent 自己声明的合并
+  /**
+   * 检查：规则要求的必填字段与**声明**都要合并进来。
+   *
+   * 声明也必须合并 —— 否则一条规则要求 `dataPoints[].source` 而 `dataPoints`
+   * 谁都没声明，校验会说「引用了未声明的字段」。而那条要求属于**规则**，
+   * 不属于某个专家：换个专家做同一件事，要求不该消失。
+   *
+   * 同名冲突时 **agent 的声明优先**（更具体），所以规则的先铺、agent 的后覆盖。
+   */
   const ruleRequired = requiredFieldsForAgent(rules, cfg.id)
   const required = [...new Set([...(cfg.requiredFields ?? []), ...ruleRequired])]
-  if (cfg.capabilities || required.length || cfg.resultFields) {
+  const ruleFields = resultFieldsForAgent(rules, cfg.id).fields
+  const fields = { ...ruleFields, ...(cfg.resultFields ?? {}) }
+  if (cfg.capabilities || required.length || Object.keys(fields).length) {
     spec.resultSpec = {
       ...(cfg.capabilities ? { capabilities: cfg.capabilities } : {}),
-      ...(cfg.resultFields ? { fields: cfg.resultFields } : {}),
+      ...(Object.keys(fields).length ? { fields } : {}),
       ...(required.length ? { requiredFields: required } : {}),
     }
   }
 
-  // T1：交给 runner 在装配时注入末尾约束块。放进 systemPrompt 会破坏缓存前缀
+  // 提醒：交给 runner 在装配时注入末尾约束块。放进 systemPrompt 会破坏缓存前缀
   const constraints = constraintsForAgent(rules, cfg.id)
   if (constraints.length) spec.constraints = constraints
 
