@@ -24,10 +24,14 @@ import { isMockOnly } from '../config.js'
 import { parseArgs } from '../runtime/tools.js'
 import {
   buildRulePrompt,
+  clarifySchema,
   renderRuleMd,
+  repairPrompt,
   ruleProposalSchema,
+  salvageJson,
   toRule,
   validateRuleProposal,
+  type ProposalProblem,
   type RuleProposal,
 } from './rule-propose.js'
 
@@ -137,35 +141,10 @@ async function describePath(
     line()
     line(c.gray('正在判它属于哪一层…'))
 
-    const res = await n.router.chat(n.config.defaults.modelChain, {
-      messages: [
-        {
-          role: 'system',
-          content: '你在设计运行时规则。只调用 propose_rule 提交结果，不要输出别的。',
-        },
-        { role: 'user', content: buildRulePrompt(n, id, description) },
-      ],
-      tools: [
-        { name: 'propose_rule', description: '提交这条规则的设计', parameters: ruleProposalSchema() },
-      ],
-    })
-    const call = res.toolCalls.find((t) => t.name === 'propose_rule')
-    if (!call) {
-      line(`${ICON.fail} 模型没有调用 propose_rule`)
-      line(c.gray(`  它说：${res.content.slice(0, 200) || '(无输出)'}`))
-      line(c.gray('  换个模型：--model <key>，或者用 --interactive 一问一答'))
-      return 1
-    }
-    const parsed = parseArgs(call.arguments)
-    if (!parsed.ok) {
-      line(`${ICON.fail} propose_rule ${parsed.error}`)
-      return 1
-    }
-    const p = parsed.value as RuleProposal
-
-    line(`${ICON.ok} ${c.gray(`${res.modelKey} · ${res.usage.tokensIn + res.usage.tokensOut} tok`)}`)
-    line()
-
+    const got = await converse(n, id, description)
+    if (!got) return 1
+    const p = got.proposal
+    const problems = got.problems
     // ── 模型自己说强制不了 ──
     if (p.cannotEnforce) {
       /**
@@ -213,17 +192,16 @@ async function describePath(
       }
       line()
       /**
-       * 这里**不该顺手把人推进问答树**。
+       * 这里**不该推荐决策树**。
        *
-       * 树问的是「能不能从结果里机械看出来」—— 而模型刚刚论证了不能，
-       * 而且论证得对。让人接着走一遍，只会走到一个不相干的检查上
-       * （实测就是：plan-first 最后落在 `requiredFields: [open_questions]`）。
-       * 那正是 cannotEnforce 存在的目的要防的事。
+       * 树问的是「能不能从结果里机械看出来」—— 模型刚论证了不能，而且论证得对。
+       * 让人再走一遍只会走到一个不相干的检查上（实测：plan-first 落在
+       * `requiredFields: [open_questions]`）。而上面已经把两条出路说清了，
+       * 不需要再问一句。
+       *
+       * `--interactive` 仍然在，但那是明确要求走树的时候用，不是兜底。
        */
-      line(c.gray('  一问一答问的是同一个问题（能不能从结果里机械看出来），'))
-      line(c.gray('  模型刚论证了不能 —— 再走一遍多半只会落到一个不相干的检查上。'))
-      if (!(await confirm('仍然要一问一答？', false))) return 1
-      return await wizardWith(n, id, path, dir, flags, description)
+      return 1
     }
 
     // ── 展示分层与理由 ──
@@ -232,17 +210,6 @@ async function describePath(
     line()
 
     const rule = toRule(id, p, path)
-    const problems = validateRuleProposal(n, p)
-    const fatal = problems.filter((x) => x.fatal)
-
-    if (fatal.length) {
-      line(`${ICON.fail} ${c.red('提议没通过校验')}`)
-      for (const x of fatal) line(`  ${c.red(x.field)}：${x.message}`)
-      line()
-      line(c.gray('  校验是机械的 —— 模型判层可以商量，但工具名与字段路径不能。'))
-      if (!(await confirm('改成一问一答？'))) return 1
-      return await wizardWith(n, id, path, dir, flags, description)
-    }
 
     heading('这条规则')
     const text = renderRuleMd(rule)
@@ -298,8 +265,135 @@ async function describePath(
 }
 
 /**
- * 已知的原语缺口 —— 「强制不了」时要能说出**缺的是什么**。
+ * 与模型来回，直到拿到一份能过校验的提案。
  *
+ * ── 为什么兜底不再是决策树 ────────────────────────────
+ *
+ * 我说过树的毛病是「把我的分类过程强加给使用者」，然后**把它留成了兜底** ——
+ * 于是模型路径一失败，人就正好掉回那个毛病里。实测反馈：
+ * 「你给我的那几个选项我甚至都不知道选什么。」
+ *
+ * 三种失败，三种正确的应对，**没有一种是决策树**：
+ *
+ * ① **模型把 JSON 写成了散文**（实测 gemma4 干过一次，内容完全正确）。
+ *    → 捞出来用。协议洁癖不该摆在结果前面。
+ *
+ * ② **校验没过**（字段名不合法、引用了未声明的字段、工具不存在）。
+ *    → 把问题回给模型重做。运行时对 agent 一直是这么做的
+ *      （`contract.rejected` 把规则原文回给它）—— 我在这里没用这套。
+ *      而这些问题**全是机械的**，模型改比人快。
+ *
+ * ③ **真的有歧义**（「用户审核」是每次都要，还是只在改生产时？）。
+ *    → 让**模型用人话问**。它问的是具体的那件事，回答它不需要理解任何分层；
+ *      而树问的是「这属于哪一层」，那是我的活。
+ *
+ * 轮数有上限：本地模型一轮约 3k tok，无限重试会把「模型答不对」
+ * 变成「命令永远不返回」。
+ */
+const MAX_ROUNDS = 4
+
+async function converse(
+  n: Awaited<ReturnType<typeof boot>>,
+  id: string,
+  description: string,
+): Promise<{ proposal: RuleProposal; problems: ProposalProblem[] } | null> {
+  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+    {
+      role: 'system',
+      content:
+        '你在设计运行时规则。拿不准的地方调用 ask_clarification 问一句；' +
+        '想清楚了调用 propose_rule 提交。不要输出纯文本。',
+    },
+    { role: 'user', content: buildRulePrompt(n, id, description) },
+  ]
+  const tools = [
+    { name: 'propose_rule', description: '提交这条规则的设计', parameters: ruleProposalSchema() },
+    {
+      name: 'ask_clarification',
+      description: '有歧义时先问使用者一句。用他的语言问，一次一个',
+      parameters: clarifySchema(),
+    },
+  ]
+
+  let spent = 0
+  for (let round = 1; round <= MAX_ROUNDS; round++) {
+    const res = await n.router.chat(n.config.defaults.modelChain, { messages, tools })
+    spent += res.usage.tokensIn + res.usage.tokensOut
+
+    // ── ③ 模型想先问一句 ──
+    const ask = res.toolCalls.find((t) => t.name === 'ask_clarification')
+    if (ask) {
+      const args = parseArgs(ask.arguments)
+      const q = (args.ok ? (args.value as { question?: string; why?: string }) : {}) ?? {}
+      if (!q.question) {
+        messages.push({ role: 'user', content: 'ask_clarification 缺 question。重来。' })
+        continue
+      }
+      line()
+      line(`${c.cyan('?')} ${q.question}`)
+      if (q.why) line(c.gray(`  （${q.why}）`))
+      const answer = (await readLine('  ')).trim()
+      if (!answer) {
+        line(c.gray('  没答 —— 让它自己定。'))
+        messages.push({ role: 'user', content: '不回答这个问题，你按最合理的假设定，并写进 uncertain。' })
+      } else {
+        messages.push({ role: 'user', content: `回答：${answer}` })
+      }
+      continue
+    }
+
+    // ── ① 提案，或者散文里的提案 ──
+    let raw: unknown = null
+    const call = res.toolCalls.find((t) => t.name === 'propose_rule')
+    if (call) {
+      const parsed = parseArgs(call.arguments)
+      if (parsed.ok) raw = parsed.value
+      else raw = salvageJson(call.arguments)
+    } else {
+      raw = salvageJson(res.content)
+      if (raw) {
+        // 说出来 —— 它没按协议来是个事实，只是不该因此把结果扔掉
+        line(c.gray('  （模型把结果写成了文本而不是工具调用，已从文本里取出）'))
+      }
+    }
+    if (!raw) {
+      if (round === MAX_ROUNDS) break
+      line(c.gray(`  第 ${round} 轮没拿到结构化结果，让它重来…`))
+      messages.push({
+        role: 'user',
+        content: '你没有调用任何工具。必须调用 propose_rule 或 ask_clarification，不要输出纯文本。',
+      })
+      continue
+    }
+
+    // ── ② 校验，不过就回给它重做 ──
+    const p = raw as RuleProposal
+    const problems = validateRuleProposal(n, p)
+    const fatal = problems.filter((x) => x.fatal)
+    if (!fatal.length) {
+      line(`${ICON.ok} ${c.gray(`${res.modelKey} · ${spent} tok · ${round} 轮`)}`)
+      line()
+      return { proposal: p, problems }
+    }
+    if (round === MAX_ROUNDS) {
+      line(`${ICON.fail} ${c.red('改了几轮还是没过校验')}`)
+      for (const x of fatal) line(`  ${c.red(x.field)}：${x.message}`)
+      break
+    }
+    line(c.gray(`  第 ${round} 轮没过校验（${fatal.map((x) => x.field).join(', ')}），回给它改…`))
+    messages.push({ role: 'assistant', content: JSON.stringify(p) })
+    messages.push({ role: 'user', content: repairPrompt(fatal) })
+  }
+
+  line()
+  line(c.gray(`  ${MAX_ROUNDS} 轮用完了，共 ${spent} tok。`))
+  line(c.gray('  换个模型试试：--model <key>。或者直接照着 examples/rules/*.md 写一个文件 ——'))
+  line(c.gray('  格式很简单，而且比一问一答快。'))
+  return null
+}
+
+/**
+ * 已知的原语缺口 —— 「强制不了」时要能说出**缺的是什么**。 *
  * 说不出来的话，「无法可靠强制」听起来就像「你这条要求不好」，
  * 而实际情况往往相反：要求本身完全可机械判定，是运行时还没长出那只手。
  * 这三条都在 backlog 上，不是永久限制。

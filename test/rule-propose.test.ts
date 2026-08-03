@@ -5,6 +5,9 @@ import { withExampleAgents } from '../src/examples/agents.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import {
   buildRulePrompt,
+  clarifySchema,
+  repairPrompt,
+  salvageJson,
   renderRuleMd,
   ruleProposalSchema,
   toRule,
@@ -373,5 +376,105 @@ describe('复合要求', () => {
   it('什么都没强制 → none', () => {
     const rule = toRule('x', p({ tier: ['reminder'], constraint: '要礼貌' }), 'x.md')
     expect(coverageOf(rule)).toBe('none')
+  })
+})
+
+/**
+ * ── 兜底不再是决策树 ──────────────────────────────────
+ *
+ * 我说过树的毛病是「把我的分类过程强加给使用者」，然后**把它留成了兜底** ——
+ * 于是模型路径一失败，人就正好掉回那个毛病里。实测反馈：
+ * 「你给我的那几个选项我甚至都不知道选什么。」
+ *
+ * 三种失败，三种应对，没有一种是决策树。
+ */
+describe('模型把 JSON 写成散文', () => {
+  /**
+   * 这段是 gemma4:31b **真实的**输出（截断）。当时我的处理是
+   * 「模型没有调用 propose_rule，换个模型」—— 3335 tok 和一个正确答案一起扔掉。
+   */
+  const REAL = `\`\`\`json
+{
+  "appliesTo": ["*"],
+  "tier": ["check", "reminder"],
+  "resultFields": {
+    "execution_plan": {
+      "type": "string",
+      "description": "任务执行前的详细步骤计划"
+    }
+  },
+  "requiredFields": ["execution_plan"],
+  "reasoning": "写计划能从结果里看出来"
+}
+\`\`\``
+
+  it('从 ```json 围栏里捞出来', () => {
+    const v = salvageJson(REAL) as Record<string, unknown>
+    expect(v).not.toBeNull()
+    expect(v['tier']).toEqual(['check', 'reminder'])
+    expect(v['requiredFields']).toEqual(['execution_plan'])
+  })
+
+  it('前后带闲话的裸 JSON 也能捞', () => {
+    const v = salvageJson('我想了一下，答案是：\n{"tier":["check"],"reasoning":"x"}\n希望有帮助。')
+    expect((v as Record<string, unknown>)['tier']).toEqual(['check'])
+  })
+
+  it('没有 JSON → null（而不是硬凑一个）', () => {
+    expect(salvageJson('这条规则我判不了，你自己想想吧。')).toBeNull()
+  })
+
+  /** 半截的对象宁可退回重试，也不要拿着往下走 */
+  it('残缺的 JSON → null', () => {
+    expect(salvageJson('{"tier":["check",')).toBeNull()
+  })
+
+  it('数组不算 —— 提案必须是对象', () => {
+    expect(salvageJson('[1,2,3]')).toBeNull()
+  })
+
+  it('多个围栏时取第一个能解析成对象的', () => {
+    const v = salvageJson('```\nnot json\n```\n```json\n{"tier":["boundary"]}\n```')
+    expect((v as Record<string, unknown>)['tier']).toEqual(['boundary'])
+  })
+})
+
+describe('校验不过 → 回给模型重做', () => {
+  /**
+   * 运行时对 agent 一直是这么做的（`contract.rejected` 把规则原文回给它）。
+   * 而我在这个向导里没用这套 —— 校验一失败就把人丢进决策树，
+   * 而那些问题**全是机械的**（字段名不合法、引用了未声明的字段），
+   * 模型改比人快，也比人清楚自己刚才想写什么。
+   */
+  it('把每条问题原样列给模型，并要求交完整提案', () => {
+    const text = repairPrompt([
+      { field: 'requiredFields', message: '引用了未声明的字段「plan」', fatal: true },
+    ])
+    expect(text).toMatch(/引用了未声明的字段/)
+    expect(text).toMatch(/机械判定的，不是意见/)
+    // 补丁式回复会让状态难以对齐 —— 要整份
+    expect(text).toMatch(/完整的提案（不是补丁）/)
+  })
+})
+
+describe('澄清由模型来问', () => {
+  /**
+   * 树的问题不是「交互」，是**谁的语言**。
+   *
+   * 树问「这条约束是不是『不许用某些工具』？」—— 那是我的分类法，
+   * 要先理解三层才能回答。模型问「你说的『用户审核』是每次都要，
+   * 还是只在改生产环境时？」—— 回答它不需要理解任何分层。
+   */
+  it('明确要求用使用者的语言问，且不许问「你想要哪一层」', () => {
+    const schema = JSON.stringify(clarifySchema())
+    expect(schema).toMatch(/使用者的语言/)
+    expect(schema).toMatch(/不要提 boundary\/check\/reminder/)
+    expect(schema).toMatch(/一次只问一个/)
+    // 「你想要哪一层」正是树的毛病，不能让模型把它复制一遍
+    expect(schema).toMatch(/不要问「你想要哪一层」/)
+  })
+
+  it('question 必填 —— 没问题就不该调这个工具', () => {
+    expect((clarifySchema() as { required: string[] }).required).toEqual(['question'])
   })
 })

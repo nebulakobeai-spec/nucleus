@@ -292,6 +292,42 @@ export interface ProposalProblem {
 }
 
 /**
+ * 模型可以选择**先问一句**，而不是硬猜。
+ *
+ * ── 为什么这个工具比一棵决策树好 ──────────────────────────
+ *
+ * 树的问题不是「交互」，是**谁的语言**。树问的是
+ * 「这条约束是不是『不许用某些工具』？」—— 那是我的分类法，要先理解
+ * 边界/检查/提醒三层才能回答。实测反馈是「你给我的那几个选项我甚至都不知道
+ * 选什么」，而那正是我一开始批评树的那句话（把我的分类过程强加给使用者）。
+ *
+ * 而模型问的是**具体的那一件事**：「你说的『用户审核』是每次都要，
+ * 还是只在改动生产环境时？」—— 那个问题不需要理解任何分层就能回答。
+ *
+ * 所以澄清照旧是对话，但**问题由理解那句要求的人（模型）来提**，
+ * 不是从一张固定菜单里挑。
+ */
+export function clarifySchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    properties: {
+      question: {
+        type: 'string',
+        description:
+          '要问的那一件事，用**使用者的语言**问，不要提 boundary/check/reminder 这些词。' +
+          '一次只问一个。问具体的歧义（「每次都要，还是只在某种情况下？」），' +
+          '不要问「你想要哪一层」—— 那是你的活。',
+      },
+      why: {
+        type: 'string',
+        description: '为什么这一点影响规则的写法。一句话。让人知道值不值得回答。',
+      },
+    },
+    required: ['question'],
+  }
+}
+
+/**
  * 拿真注册表校验模型的产出。
  *
  * 这一步是「LLM 生成」与「黑盒」的分界线。能机械判的一律机械判：
@@ -424,8 +460,64 @@ export function validateRuleProposal(
   return out
 }
 
-/** 提案 → 规则（写文件前的预览与校验用） */
-export function toRule(id: string, p: RuleProposal, path: string): UserRule {
+/**
+ * 从散文里把 JSON 对象捞出来。
+ *
+ * ── 为什么需要这个 ────────────────────────────────────
+ *
+ * 实测 gemma4:31b 有一次把结果写成了 ```json 围栏里的文本，**没有**调用工具。
+ * 内容是对的、完整的，而我当时的处理是「模型没有调用 propose_rule，
+ * 换个模型」—— 3335 tok 和一个正确答案一起扔掉。
+ *
+ * 本地模型不稳定地走 tool call 是常态，不是异常。把答案摊在眼前还说
+ * 「你没按格式来」，是把协议洁癖摆在结果前面。
+ *
+ * 捞的时候**只认能解析成对象的**，解析不了就返回 null —— 宁可退回重试，
+ * 也不要拿一个半截的对象往下走。
+ */
+export function salvageJson(text: string): unknown | null {
+  const tries: string[] = []
+  // ① ```json … ``` 或 ``` … ```
+  for (const m of text.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)) tries.push(m[1]!)
+  // ② 第一个 `{` 到最后一个 `}` —— 模型常在 JSON 前后各写一句话
+  const a = text.indexOf('{')
+  const b = text.lastIndexOf('}')
+  if (a >= 0 && b > a) tries.push(text.slice(a, b + 1))
+
+  for (const t of tries) {
+    try {
+      const v = JSON.parse(t.trim())
+      if (v && typeof v === 'object' && !Array.isArray(v)) return v
+    } catch {
+      // 下一个候选
+    }
+  }
+  return null
+}
+
+/**
+ * 把校验问题写成给**模型**看的一段话。
+ *
+ * ── 为什么是回给模型，而不是退回问答树 ────────────────────
+ *
+ * 运行时对 agent 一直是这么做的：结果不合契约就把规则原文回给它让它重做
+ * （`contract.rejected`）。而我在这个向导里没用这套 —— 校验一失败就把人
+ * 丢进决策树，而那棵树问的问题是**用我的分类法提的**
+ * （「这条约束是不是不许用某个工具？」），要先理解三层才能回答。
+ *
+ * 而这些问题**恰好全是机械的**（字段名不合法、引用了未声明的字段、
+ * 工具不存在）—— 模型改这些比人快，也比人清楚自己刚才想写什么。
+ */
+export function repairPrompt(problems: ProposalProblem[]): string {
+  return [
+    '你的提案没通过运行时校验。下面每一条都是机械判定的，不是意见：',
+    ...problems.map((p) => `- ${p.field}：${p.message}`),
+    '',
+    '照着改，然后重新调用 propose_rule 提交完整的提案（不是补丁）。',
+  ].join('\n')
+}
+
+/** 提案 → 规则（写文件前的预览与校验用） */export function toRule(id: string, p: RuleProposal, path: string): UserRule {
   const resultFields = Object.keys(p.resultFields ?? {}).length ? p.resultFields : undefined
   const requiredFields = p.requiredFields?.length ? p.requiredFields : undefined
   return {
