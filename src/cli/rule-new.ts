@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { boot } from '../boot.js'
@@ -12,6 +12,7 @@ import {
   type UserRule,
 } from '../runtime/user-rules.js'
 import { resultSchemaTokens } from '../runtime/result-schema.js'
+import { changed, diffLines, renderDiff } from './diff.js'
 import { closePrompts, confirm, readLine } from './prompt.js'
 import { c, heading, ICON, line, resolveDb, strFlag } from './ui.js'
 import { isMockOnly } from '../config.js'
@@ -97,10 +98,23 @@ async function describePath(
   }
   const dir = strFlag(flags, 'dir') ?? DEFAULT_RULES_DIR
   const path = join(resolve(dir), `${id}.md`)
-  if (existsSync(path) && flags['force'] !== true) {
-    line(c.red(`${path} 已存在（--force 覆盖）`))
-    return 1
-  }
+
+  /**
+   * **已存在不是错误，是「你想改它」。**
+   *
+   * 原先这里只有两条路：拦下来，或者加 `--force` 直接盖掉 ——
+   * 不给差异、不留备份。而那个文件很可能被手改过（调过措辞、
+   * 收窄过 appliesTo、加过一句注释），全部无声消失。
+   *
+   * 我在 `model add` 上用过同一条判断标准，却得出了相反的结论：那里不敢写
+   * JSON 是因为「文件里全是注释，序列化会丢掉」。规则文件**第一次**创建时
+   * 确实没有既有内容可毁 —— 但第二次就有了，而我把第一次的结论用到了第二次。
+   *
+   * 现在：把现有内容读出来喂给模型，你说要改什么，它改。写之前给差异。
+   * `--force` 退化成「别管现在写的什么，从头再来」，而那也仍然要看差异。
+   */
+  const existing = existsSync(path) ? await readFile(path, 'utf8') : null
+  const fresh = flags['force'] === true
 
   const { config } = await loadConfig(strFlag(flags, 'config'))
   const n = await boot({ config, ...resolveDb(flags), skipMcp: flags['mcp'] !== true })
@@ -125,11 +139,20 @@ async function describePath(
       return 1
     }
 
-    heading(`加一条规则：${c.bold(id)}`)
+    const revising = existing !== null && !fresh
+    heading(`${revising ? '改一条规则' : '加一条规则'}：${c.bold(id)}`)
     line(c.gray(`模型链 ${n.config.defaults.modelChain.join(' → ')}`))
-    line(`  ${c.gray('你的要求：')}${description}`)
+    if (revising) {
+      line(c.gray(`  这条已经有了 —— ${path}`))
+      line(c.gray('  下面这句会当成「要改成什么」，而不是从头写一条：'))
+    }
+    line(`  ${c.gray(revising ? '你说的：' : '你的要求：')}${description}`)
+    if (existing !== null && fresh) {
+      line(`  ${ICON.warn} ${c.yellow('--force：不管现在写的什么，从头再来')}`)
+      line(c.gray('    写之前仍然会给你看差异。'))
+    }
     line()
-    line(c.gray('正在判它属于哪一层…'))
+    line(c.gray(revising ? '正在看现在这条，然后改…' : '正在判它属于哪一层…'))
 
     /**
      * **提案 → 你看 → 不满意就说一句 → 它改。**
@@ -142,7 +165,7 @@ async function describePath(
      * 花的 token 你自己看得见（每轮都报）。真正需要上限的是模型
      * 自己反复重试那一段（MAX_ROUNDS），那你按不了刹车。
      */
-    const session = newSession(n, id, description)
+    const session = newSession(n, id, description, revising ? existing : null)
     for (;;) {
     const got = await session.next()
     if (!got) return 1
@@ -292,9 +315,30 @@ async function describePath(
      * 那几个 agent 生效」。那一句话说给模型比走一遍分类树快得多，
      * 也不需要你知道 boundary/check/reminder 是什么。
      */
-    if (await confirm(`写入 ${path}？`)) {
+    /**
+     * **盖别人的文件之前给差异。** 没有差异的「确认覆盖」等于让人闭眼签字：
+     * 手改过的措辞、收窄过的 appliesTo，从提示里一个字都看不出来。
+     */
+    if (existing !== null) {
+      const ops = diffLines(existing, text)
+      if (!changed(ops)) {
+        line(c.gray('  和现在的文件一模一样 —— 不用写。'))
+        line()
+        line(c.gray('  想改什么？说一句（回车＝退出）：'))
+        const again = (await readLine('  ')).trim()
+        if (!again) return 0
+        session.tell(again)
+        line()
+        continue
+      }
+      line()
+      heading('会怎么改')
+      for (const l of renderDiff(ops)) line(l)
+      line()
+    }
+    if (await confirm(`${existing !== null ? '覆盖' : '写入'} ${path}？`)) {
       await writeFile(path, text, 'utf8')
-      line(`${ICON.ok} 已写入 ${path}`)
+      line(`${ICON.ok} 已${existing !== null ? '更新' : '写入'} ${path}`)
       line(c.gray('  看一眼：nucleus rules'))
       return 0
     }
@@ -355,6 +399,13 @@ function newSession(
   n: Awaited<ReturnType<typeof boot>>,
   id: string,
   description: string,
+  /**
+   * 现在这条规则的原文（改的时候有值）。
+   *
+   * 喂给模型而不是让它从头写 —— 否则「把提醒那段删掉」这种要求它无从下手，
+   * 而且会把你手改过的部分一起丢掉。
+   */
+  existing: string | null = null,
 ): Session {
   const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
     {
@@ -363,7 +414,7 @@ function newSession(
         '你在设计运行时规则。拿不准的地方调用 ask_clarification 问一句；' +
         '想清楚了调用 propose_rule 提交。不要输出纯文本。',
     },
-    { role: 'user', content: buildRulePrompt(n, id, description) },
+    { role: 'user', content: buildRulePrompt(n, id, description, existing) },
   ]
   const tools = [
     { name: 'propose_rule', description: '提交这条规则的设计', parameters: ruleProposalSchema() },

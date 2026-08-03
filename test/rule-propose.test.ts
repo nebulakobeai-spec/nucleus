@@ -478,3 +478,52 @@ describe('澄清由模型来问', () => {
     expect((clarifySchema() as { required: string[] }).required).toEqual(['question'])
   })
 })
+
+/**
+ * ── 改一条已有的规则 ─────────────────────────────────
+ *
+ * `rule new <已存在的 id>` 原先只有两条路：拦下来，或者 `--force` 盖掉
+ * （不给差异、不留备份）。而重跑同一个 id 时想要的通常是**改**。
+ *
+ * 我在 `model add` 上用过同一条判断标准却得出了相反结论：那里不敢写 JSON
+ * 是因为「文件里全是注释，序列化会丢掉」。规则文件**第一次**创建时确实
+ * 没有既有内容可毁 —— 但第二次就有了，而我把第一次的结论用到了第二次。
+ */
+describe('改已有规则', () => {
+  const CURRENT = [
+    '---',
+    'gist: 执行任务前必读 —— 必须提交执行计划',
+    "appliesTo: ['*']",
+    'requiredFields: [plan]',
+    '---',
+    '',
+    '在执行任何实质性任务前必须制定详细计划。',
+  ].join('\n')
+
+  it('把原文给模型，并明确要求「改，不是重写」', () => {
+    const text = buildRulePrompt(n, 'plan-first', '把 plan 改成步骤列表', CURRENT)
+    expect(text).toMatch(/你在\*\*修改\*\*一条已有的规则/)
+    expect(text).toMatch(/这条规则现在长这样/)
+    expect(text).toMatch(/requiredFields: \[plan\]/)
+    expect(text).toMatch(/使用者想改的/)
+  })
+
+  /**
+   * 最要紧的一句。没有它，模型会把没提到的部分**重新生成一遍** ——
+   * 而那些部分很可能正是手改过的。
+   */
+  it('明确说没提到的部分原样保留', () => {
+    const text = buildRulePrompt(n, 'x', 'y', CURRENT)
+    expect(text).toMatch(/使用者没提到的部分原样保留/)
+    expect(text).toMatch(/手改过/)
+    // 但提交仍然要整份 —— 补丁式回复没法对齐
+    expect(text).toMatch(/完整的提案（不是补丁）/)
+  })
+
+  it('不传原文时还是「新建」那套话，不提修改', () => {
+    const text = buildRulePrompt(n, 'x', 'y')
+    expect(text).toMatch(/你在为一个多 agent 编排运行时设计一条规则/)
+    expect(text).not.toMatch(/这条规则现在长这样/)
+    expect(text).toMatch(/## 使用者的要求/)
+  })
+})

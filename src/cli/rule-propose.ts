@@ -199,16 +199,42 @@ export function ruleProposalSchema(): Record<string, unknown> {
  * 以及**三层各自的代价**。代价是最容易漏又最关键的一项 ——
  * 不写清楚，模型会像人一样默认选最省事的那层（提醒）。
  */
-export function buildRulePrompt(n: Nucleus, id: string, description: string): string {
+export function buildRulePrompt(
+  n: Nucleus,
+  id: string,
+  description: string,
+  /**
+   * 现在这条规则的原文（改的时候有值）。
+   *
+   * ── 为什么要给它，而不是重新生成一份 ──────────────────
+   *
+   * `rule new <已存在的 id>` 原先只有两条路：拦下来，或者 `--force` 盖掉。
+   * 而重跑同一个 id 时想要的通常是**改**，不是重造 —— 「把提醒那段删掉」
+   * 这种要求，模型看不到原文就无从下手，还会把你手改过的部分一起丢掉。
+   */
+  existing: string | null = null,
+): string {
   const tools = [...n.tools.all()]
     .map((t) => `- ${t.name}：${t.description.split('\n')[0]}`)
     .join('\n')
   const agents = n.config.agents.map((a) => `- ${a.id}${a.whenToUse ? `：${a.whenToUse}` : ''}`).join('\n')
 
   return [
-    '你在为一个多 agent 编排运行时设计一条规则。',
+    existing
+      ? '你在**修改**一条已有的规则。下面是它现在的原文，以及使用者想改的地方。'
+      : '你在为一个多 agent 编排运行时设计一条规则。',
     '',
-    '## 使用者的要求',
+    ...(existing
+      ? [
+          '## 这条规则现在长这样',
+          existing.trim(),
+          '',
+          '**改，不是重写。** 使用者没提到的部分原样保留 —— 那些可能是他手改过的。',
+          '仍然要提交完整的提案（不是补丁）。',
+          '',
+          '## 使用者想改的',
+        ]
+      : ['## 使用者的要求']),
     description,
     '',
     `## 规则 id`,
