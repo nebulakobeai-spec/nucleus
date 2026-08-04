@@ -35,6 +35,40 @@ import { redactText } from '../auth/credentials.js'
  * 只是日志会分散在两个地方。启动时把 workerId 打出来，而不是拦住第二个。
  */
 
+/**
+ * 常驻进程要用的三个路径。
+ *
+ * ── 「相对路径 + cwd 不确定的进程」咬了三次 ──────────────────
+ *
+ * launchd 启动的进程 **cwd 是 `/`**，而这三处的默认值都是相对的：
+ *
+ *   rulesDir  规则静默消失，`rule add` 写到一个没人看的目录
+ *   logDir    日志写到 `/logs`，没权限，于是静默为空
+ *   dataDir   pglite 库建到 `/.nucleus-data`，服务起不来
+ *
+ * 三次都不报错，只是东西不在你以为的地方。所以相对路径一律按**配置文件所在
+ * 目录**解析 —— 配置里的路径描述的是项目结构，cwd 只是进程恰好站在哪。
+ *
+ * 拆成纯函数是因为**这个判断本身就是 bug 的所在**，而它埋在一个跑起来就不退出
+ * 的命令里 —— 那种代码只能靠手动开一次服务来验，也就是实际上没人验。
+ *
+ * `--log-dir` 例外：命令行上当场给的路径按 cwd 解析才符合直觉。
+ */
+export function servePaths(
+  db: { databaseUrl: string | null; dataDir: string },
+  configPath: string | null,
+  opts: { logDir: string | null; cwd: string },
+): { databaseUrl: string | null; dataDir: string; logDir: string } {
+  const base = configPath ? dirname(configPath) : opts.cwd
+  const abs = (p: string, from: string) => (isAbsolute(p) ? p : resolve(from, p))
+  return {
+    databaseUrl: db.databaseUrl,
+    dataDir: abs(db.dataDir, base),
+    // 当场给的按 cwd；没给的落在配置文件旁边
+    logDir: opts.logDir ? abs(opts.logDir, opts.cwd) : join(base, 'logs'),
+  }
+}
+
 /** 连接串里的密码不该进日志 —— 常驻进程的输出往往被重定向到文件 */
 function redactUrl(url: string): string {
   return redactText(url.replace(/\/\/([^:@/]+):[^@]*@/, '//$1:***@'))
@@ -65,34 +99,13 @@ async function dumpTranscripts(
 export async function serve(flags: Record<string, string | true>): Promise<number> {
   const { config, path: configPath } = await loadConfig(strFlag(flags, 'config'))
 
-  /**
-   * **数据目录也必须是绝对路径。**
-   *
-   * `resolveDb` 的默认值是相对的（`.nucleus-data/pglite`），交互式用没问题 ——
-   * 而 launchd 下 cwd 是 `/`，那会变成 `/.nucleus-data/pglite`：没权限，
-   * 于是服务起不来或者在根目录建一个库。和 rulesDir、logDir 是同一个教训，
-   * 这是第三次了 —— 「相对路径 + 一个 cwd 不确定的进程」这个组合每次都咬人。
-   *
-   * 相对路径按**配置文件所在目录**解析 —— 与 rulesDir 同一套规则。
-   */
-  const raw = resolveDb(flags)
-  const db = {
-    ...raw,
-    dataDir: isAbsolute(raw.dataDir)
-      ? raw.dataDir
-      : resolve(configPath ? dirname(configPath) : process.cwd(), raw.dataDir),
-  }
-
-  /**
-   * 日志目录：`--log-dir` > 配置文件所在目录下的 `logs/`。
-   *
-   * 同上：launchd 下相对路径会写到 `/logs`（大概率没权限，于是日志静默为空）。
-   */
-  const logDir = strFlag(flags, 'log-dir')
-    ? resolve(strFlag(flags, 'log-dir')!)
-    : join(configPath ? dirname(configPath) : process.cwd(), 'logs')
+  const paths = servePaths(resolveDb(flags), configPath, {
+    logDir: strFlag(flags, 'log-dir') ?? null,
+    cwd: process.cwd(),
+  })
+  const db = { databaseUrl: paths.databaseUrl, dataDir: paths.dataDir }
   const log = new FileLog({
-    dir: logDir,
+    dir: paths.logDir,
     keepDays: Number(strFlag(flags, 'log-keep-days') ?? 14),
     maxBytesPerDay: Number(strFlag(flags, 'log-max-mb') ?? 32) * 1024 * 1024,
   })
