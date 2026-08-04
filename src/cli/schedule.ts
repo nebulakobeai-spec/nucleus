@@ -36,7 +36,7 @@ import { c, heading, ICON, line, strFlag, table, resolveDb } from './ui.js'
  * 用 UTC 显示是个陷阱：你设了「上海 8:30」，回显 `00:30Z`，第一反应是算错了。
  * 时区名跟在后面，所以也不会误以为是本机时间。
  */
-function fmt(d: Date | null, tz = 'UTC'): string {
+export function fmt(d: Date | null, tz = 'UTC'): string {
   if (!d) return '—'
   const w = wallClock(d, tz)
   const p2 = (n: number) => String(n).padStart(2, '0')
@@ -44,7 +44,7 @@ function fmt(d: Date | null, tz = 'UTC'): string {
 }
 
 /** 距离现在多久，给人一个量级感 */
-function relative(d: Date | null, now: number): string {
+export function relative(d: Date | null, now: number): string {
   if (!d) return ''
   const ms = d.getTime() - now
   const abs = Math.abs(ms)
@@ -342,7 +342,7 @@ export async function scheduleHistory(
  * `outcome: 'fired'` 只说明**触发**成功 —— run 可能随后就失败了。
  * 对着一个 failed run 打绿勾，和「系统会自动重试」那句假话是同一类错误。
  */
-function outcomeMark(x: FireRecord): string {
+export function outcomeMark(x: FireRecord): string {
   if (x.outcome === 'error') return ICON.fail
   if (x.outcome === 'reentrant') return ICON.warn
   if (x.outcome === 'duplicate') return c.gray('=')
@@ -351,7 +351,7 @@ function outcomeMark(x: FireRecord): string {
   return c.gray('·')
 }
 
-function outcomeText(x: FireRecord): string {
+export function outcomeText(x: FireRecord): string {
   switch (x.outcome) {
     case 'reentrant':
       return '跳过（上次还在跑）'
@@ -374,7 +374,7 @@ function outcomeText(x: FireRecord): string {
 }
 
 /** 计划时刻与实际触发的差 —— 延迟多久 / 提前多久 */
-function delta(planned: Date, fired: Date): string {
+export function delta(planned: Date, fired: Date): string {
   const ms = fired.getTime() - planned.getTime()
   if (Math.abs(ms) < 60_000) return c.gray('准时')
   const m = Math.round(Math.abs(ms) / 60_000)

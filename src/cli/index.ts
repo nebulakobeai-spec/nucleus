@@ -650,7 +650,7 @@ async function verify(flags: Record<string, string | true>): Promise<number> {
 
 // ── 入口 ─────────────────────────────────────────────────
 
-const HELP = `${c.bold('nucleus')} — 多 agent 编排运行时
+export const HELP = `${c.bold('nucleus')} — 多 agent 编排运行时
 
 ${c.bold('对话与诊断')}
   chat                交互式 REPL，连续对话（推荐）
@@ -664,8 +664,6 @@ ${c.bold('agent 与规则')}
   agent map                   能力边界矩阵：谁能用哪些工具
   agent new <id>              生成专家定义骨架（含写法说明）
   agent try <id> [任务]        只跑这一个专家：--n 重复、--compare 与旧版并排
-  serve                       **常驻进程** —— 定时任务到点执行、重试自己推进
-  serve --install             生成 launchd 配置（开机自启）；不自动 load
   rules                       规则清单（边界 / 检查 / 提醒）与遵守率
   rule add  <id> "<要求>"      **加一条** —— 说一句话，模型判它属于哪一层
   rule edit <id> "<改什么>"    **改一条** —— 没提到的原样保留，写之前给差异
@@ -676,6 +674,8 @@ ${c.bold('agent 与规则')}
   conv show <id>              摘要内容 + 压缩历史（丢了什么只有人能判）
   conv compact <id>           现在就压一次（--dry-run 只判定）
   conv seed --turns 15        造一段合成历史用来测 compact（埋好已知约束）
+  serve                       **常驻进程** —— 定时任务到点执行、重试自己推进
+  serve --install             生成 launchd 配置（开机自启）；不自动 load
   schedule list               定时任务：下次什么时候跑
   schedule add <名称>          加一个：--cron "30 8 * * *" --agent <id> --goal "…"
   schedule history <名称>      每次触发的结果，含被跳过的那些与原因
@@ -686,7 +686,7 @@ ${c.bold('agent 与规则')}
   model add <provider> <id>   加模型。**provider 与模型分开** —— 同一个模型
                               可以跑在 anthropic / openrouter / ollama 上
   model set <key> --context-window <n>   改窗口（会显示预算与压缩触发点的变化）
-  artifact list [run]         产出清单
+  artifacts [run]             产出清单（artifact 同效）
   artifact cat <路径>         读产出内容
 
 ${c.bold('凭据')}

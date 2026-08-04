@@ -597,7 +597,16 @@ async function runWizard(flags: Record<string, string | true>): Promise<number> 
   return 0
 }
 
-function stripMeta(t: (typeof MODEL_PROVIDERS)[string]): ProviderConfig {
+/**
+ * 模板 → 可写进配置的 ProviderConfig。
+ *
+ * 模板里带着**只给向导用**的字段（note / modelIdHint / auth / listModels）——
+ * 它们不是配置的一部分，写进 `nucleus.config.json` 会变成一堆运行时不认识的键。
+ *
+ * 这里也是「模板里绝不能有凭据」那条约束的落点：将来若有人往模板里加了
+ * 一个 apiKey 字段，这个函数是唯一会把它复制进用户配置的地方。
+ */
+export function stripMeta(t: (typeof MODEL_PROVIDERS)[string]): ProviderConfig {
   const { note: _n, modelIdHint: _h, auth: _a, listModels: _l, ...rest } = t
   return rest
 }

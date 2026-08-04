@@ -394,7 +394,7 @@ async function printAdherence(n: Nucleus, days: number, agentId?: string): Promi
   }
 }
 
-function scopeLabel(s: string): string {
+export function scopeLabel(s: string): string {
   switch (s) {
     case 'capability':
       return '能力边界'
@@ -407,7 +407,7 @@ function scopeLabel(s: string): string {
   }
 }
 
-function rateColor(rate: number): string {
+export function rateColor(rate: number): string {
   const pct = `${(rate * 100).toFixed(1)}%`
   if (rate >= 0.9) return c.green(pct)
   if (rate >= 0.6) return c.yellow(pct)
@@ -419,7 +419,7 @@ function rateColor(rate: number): string {
  * **颜色即代价**：
  * 边界绿（零成本、不可违反）、检查青（一次重写）、提醒黄（每轮都花，而且只是提示）。
  */
-function tierLabel(t: RuleTier): string {
+export function tierLabel(t: RuleTier): string {
   const s = TIER_LABEL[t]
   if (t === 'boundary') return c.green(s)
   if (t === 'check') return c.cyan(s)

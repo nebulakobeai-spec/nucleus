@@ -182,7 +182,7 @@ export async function convShow(
  * minMessages: 8），真跑却说「单条消息过大」（用的是 minMessages: 2 +
  * triggerRatio: 0）。同一个情况两个互相矛盾的原因，两个都没说对。
  */
-function manualPolicy(flags: Record<string, string | true>): CompactPolicy {
+export function manualPolicy(flags: Record<string, string | true>): CompactPolicy {
   const keep = strFlag(flags, 'keep')
   return {
     // 命令的语义是「现在压」，不是「够了就压」
