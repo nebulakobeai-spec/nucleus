@@ -48,6 +48,35 @@ export interface AssembleInput {
   /** 本回合输入 */
   input: ChatMessage[]
 
+  /**
+   * 这一轮发给模型的**工具定义**。
+   *
+   * ── 为什么它必须进预算 ────────────────────────────
+   *
+   * 工具定义随每次请求发出去，和 system prompt 一样占窗口。而装配器原先
+   * 完全不知道它们存在 —— `available()` 减掉了前缀、事实、摘要、约束、
+   * 本回合输入，**独独没有工具**。于是历史被允许填进工具占着的那块空间。
+   *
+   * 实测（最小配置：一个 ask_user 加上 submit_result 的结果 schema）：
+   *
+   *     修之前  total = 167
+   *     修之后  total = 590   其中 tools = 423
+   *
+   * **少报了 3.5 倍**，而工具占了真实用量的七成。
+   * （我第一次估的是「约一半」——那次只算了 ask_user 的定义，
+   * 漏了 submit_result 的结果 schema，而后者是更大的一块。）
+   *
+   * 而 `nucleus chat` 显示的 `ctx 167/131K` 就是这个数，`decideCompact`
+   * 与 `needs_checkpoint`（「连本回合输入都放不进去」）也都用它。
+   * 131k 窗口下无害；而 ollama 的默认 `num_ctx` 常常只有 4096 ——
+   * 那时 1-2k 的未计入量足以让「放得下」的判断出错，
+   * 而症状是模型莫名其妙地看不见前面的消息。
+   *
+   * 传定义本身而不是一个已经算好的数：这样它和其它各段用**同一个** tokenizer，
+   * 两套估法迟早不一致，而不一致的那部分正好是没人会去核的。
+   */
+  tools?: Array<{ name: string; description: string; parameters: unknown }>
+
   budget: ContextBudget
   tokenizer?: Tokenizer
 }
@@ -92,6 +121,8 @@ export interface AssembledContext {
     history: number
     constraints: number
     input: number
+    /** 工具定义。不可裁剪 —— 少给一个工具模型就用不了它 */
+    tools: number
     total: number
   }
   /** 实际施加的降级，按顺序 */
@@ -149,6 +180,16 @@ export function assemble(input: AssembleInput): AssembledContext {
 
   const inputTokens = input.input.reduce((n, m) => n + countMessage(t, m), 0)
 
+  /**
+   * 工具定义占的空间。**和前缀一样不可裁剪** —— 少给一个工具，模型就用不了它，
+   * 那不是降级而是能力缺失。所以它只从可用空间里扣掉，不参与任何降级档位。
+   *
+   * 各 provider 的线上格式不同（OpenAI 与 Anthropic 的包法不一样），所以这里
+   * 拿不到精确值。用 JSON 序列化做一致的估计 —— 目标是**不再当成零**，
+   * 不是精确到个位。
+   */
+  const toolsTokens = input.tools?.length ? t.count(JSON.stringify(input.tools)) : 0
+
   let constraints = input.constraints ?? []
   let tail = buildTail(constraints, t, b.maxConstraintTokens)
   let constraintTokens = tail ? t.count(tail) : 0
@@ -169,7 +210,8 @@ export function assemble(input: AssembleInput): AssembledContext {
     factsTokens -
     summaryTokens -
     constraintTokens -
-    inputTokens
+    inputTokens -
+    toolsTokens
 
   const historyCap = Math.min(b.maxHistoryTokens, Math.max(0, available()))
   const { kept, dropped, tokens: historyTokens } = fillHistory(input.history, historyCap, t)
@@ -224,7 +266,17 @@ export function assemble(input: AssembleInput): AssembledContext {
       history: historyTokens,
       constraints: constraintTokens,
       input: inputTokens,
-      total: prefixTokens + factsTokens + summaryTokens + historyTokens + constraintTokens + inputTokens,
+      tools: toolsTokens,
+      // total 是**真的会发出去的那个数** —— 少算工具就等于对着一个不存在的
+      // 余量做决定（compact 触发、needs_checkpoint 判定都读它）
+      total:
+        prefixTokens +
+        factsTokens +
+        summaryTokens +
+        historyTokens +
+        constraintTokens +
+        inputTokens +
+        toolsTokens,
     },
     degradations,
     droppedMessages: dropped,

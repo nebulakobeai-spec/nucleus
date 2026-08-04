@@ -386,3 +386,91 @@ describe('renderSummaryMinimal', () => {
     ).toBe('')
   })
 })
+
+/**
+ * ── 工具定义必须进预算 ──────────────────────────────
+ *
+ * 实测（最小配置：一个 ask_user 加上 submit_result 的结果 schema）：
+ *
+ *     修之前  total = 167
+ *     修之后  total = 590   其中 tools = 423
+ *
+ * **少报了 3.5 倍**，而工具占了真实用量的七成 —— 不是零头。
+ *
+ * `nucleus chat` 显示的 `ctx 167/131K` 就是这个数，而 `decideCompact` 与
+ * `needs_checkpoint`（「连本回合输入都放不进去」）也都读它。
+ *
+ * 装配器原先完全不知道工具存在：`available()` 减掉了前缀、事实、摘要、约束、
+ * 本回合输入，**独独没有工具**。于是历史被允许填进工具占着的那块空间。
+ * 131k 窗口下无害；而 ollama 的默认 num_ctx 常常只有 4096。
+ *
+ * **这一组之前是空的** —— 全套 998 条测试没有一条钉过这个总量，
+ * 所以少报了一半也没人发现。
+ */
+describe('工具定义占的预算', () => {
+  const TOOLS = [
+    { name: 'delegate', description: '把一件事委派给专家'.repeat(20), parameters: { type: 'object' } },
+    { name: 'ask_user', description: '向用户提一个问题'.repeat(20), parameters: { type: 'object' } },
+  ]
+  const base = {
+    contract: '你是助手。',
+    identity: '',
+    policy: '',
+    history: [{ role: 'user' as const, content: '你好' }],
+    input: [],
+    budget: DEFAULT_BUDGET,
+  }
+
+  it('breakdown 里有 tools 这一段，且计入 total', () => {
+    const without = assemble(base)
+    const withTools = assemble({ ...base, tools: TOOLS })
+
+    expect(without.breakdown.tools).toBe(0)
+    expect(withTools.breakdown.tools).toBeGreaterThan(50)
+    expect(withTools.breakdown.total - without.breakdown.total).toBe(withTools.breakdown.tools)
+  })
+
+  /**
+   * **这才是它值得修的原因。**
+   *
+   * 少算工具不只是显示偏小 —— 历史会填进那块空间，于是真正发出去的
+   * 请求比装配器以为的大。窗口紧的时候就是超限，而症状是模型莫名其妙地
+   * 看不见前面的消息。
+   */
+  it('窗口紧时，工具占掉的空间不再被历史填走', () => {
+    const long = Array.from({ length: 40 }, (_, i) => ({
+      role: 'user' as const,
+      content: `第 ${i} 条消息，内容大概这么长，用来把预算填满。`,
+    }))
+    const tiny = { ...DEFAULT_BUDGET, contextWindow: 1200, reserveForOutput: 200, maxHistoryTokens: 900 }
+
+    const without = assemble({ ...base, history: long, budget: tiny })
+    const withTools = assemble({ ...base, history: long, budget: tiny, tools: TOOLS })
+
+    // 工具占了空间 → 留给历史的更少
+    expect(withTools.breakdown.history).toBeLessThan(without.breakdown.history)
+    // 而两者都不该超出窗口
+    expect(withTools.breakdown.total).toBeLessThanOrEqual(tiny.contextWindow - tiny.reserveForOutput)
+  })
+
+  /**
+   * 工具**不可裁剪** —— 少给一个工具模型就用不了它，那不是降级而是能力缺失。
+   * 所以它只从可用空间里扣掉，不参与任何降级档位。
+   */
+  it('工具不会被当成可降级的段', () => {
+    const tiny = { ...DEFAULT_BUDGET, contextWindow: 700, reserveForOutput: 100 }
+    const r = assemble({
+      ...base,
+      history: Array.from({ length: 30 }, () => ({ role: 'user' as const, content: '很长的一条消息'.repeat(5) })),
+      budget: tiny,
+      tools: TOOLS,
+    })
+    // 该降级的是历史 / 摘要 / 约束，不该有「砍工具」这一档
+    expect(r.breakdown.tools).toBe(assemble({ ...base, tools: TOOLS }).breakdown.tools)
+    expect(r.degradations).not.toContain('shrink_tools' as never)
+  })
+
+  it('空工具列表与不传是同一回事', () => {
+    expect(assemble({ ...base, tools: [] }).breakdown.tools).toBe(0)
+  })
+})

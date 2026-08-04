@@ -342,6 +342,11 @@ export class Runner {
       // 只剩要求的那一版：整个丢掉摘要会连用户约束一起丢
       summaryMinimal: input.summaryMinimal ?? null,
       input: input.input,
+      /**
+       * 工具定义进预算。`wire` 就在上面几行 —— 它一直在手边，而装配器
+       * 从来不知道它存在，于是历史被允许填进工具占着的那块空间。
+       */
+      tools: wire,
       budget,
     })
 
