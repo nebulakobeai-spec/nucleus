@@ -197,7 +197,21 @@ export function renderEvent(e: RunEvent, indent: string): string | null {
       )
 
     case 'wake.armed':
-      return br + c.gray(`挂起，等 ${q['waitOn']} 个专家 —— 本轮 attempt 到此结束`)
+      /**
+       * 两种挂起原因，两句话。
+       *
+       * 原先只有「等 N 个专家」，而 user wake 没有 `waitOn` ——
+       * 实测打出来是「挂起，等 **undefined** 个专家」。
+       * 一个占位符没填的字符串，比不打这一行更糟：它让人以为派了专家。
+       */
+      return (
+        br +
+        c.gray(
+          q['kind'] === 'user'
+            ? '挂起，等你回答 —— 本轮 attempt 到此结束'
+            : `挂起，等 ${q['waitOn']} 个专家 —— 本轮 attempt 到此结束`,
+        )
+      )
 
     default:
       return null
@@ -257,12 +271,29 @@ export async function runTurn(n: Nucleus, conversationId: string, text: string):
         if (i.status === 'succeeded' || i.status === 'waiting_children') return
         // waiting_retry 不是失败 —— 猫不该哭，也不该说「需要你处理」
         const retrying = i.status === 'waiting_retry'
+        /**
+         * **恢复性提示不能只看错误码。**
+         *
+         * `recoveryOf('contract.postcondition_failed')` 是 `automatic`，
+         * 于是这一行原先对着一个**终态 failed** 的 run 打出
+         * 「系统会自动重试」—— 而重试预算已经用完了，不会再有下一次。
+         *
+         * 这和「对着 failed run 打绿勾」是同一类错，我在 history / doctor
+         * 里修过一次，这里漏了：判据必须是**实际排没排重试**（waiting_retry），
+         * 而错误码只说明「这类错原则上可自动恢复」。
+         *
+         * 终态时改为不提恢复性 —— 状态本身（红色 failed）已经说明了结果，
+         * 加一句假的承诺只会让人等一个不会发生的重试。
+         */
         pet.mood(retrying ? 'wait' : 'sad')
+        const tail = retrying
+          ? ` ${c.cyan('已排重试')}`
+          : i.status === 'waiting_user'
+            ? ` ${c.cyan('等你回答')}`
+            : ''
         pet.say(
           `${indentOf(i.runId)}  ${c.gray(ICON.branch)} ${statusColor(i.status)}` +
-            (i.errorCode
-              ? ` ${c.gray(i.errorCode)} ${retrying ? c.cyan('已排重试') : recoveryHint(recoveryOf(i.errorCode))}`
-              : ''),
+            (i.errorCode ? ` ${c.gray(i.errorCode)}${tail}` : tail),
         )
       },
     }))
@@ -351,9 +382,18 @@ export function printTurn(r: TurnResult, opts: { runCount?: number } = {}): void
     if (r.hint) line(c.gray(`  ${r.hint}`))
     line(c.gray('  这一轮没有回复，但任务没有丢 —— worker 到点会自己继续'))
   } else {
+    /**
+     * **终态时不提恢复性。**
+     *
+     * `recoveryOf('contract.postcondition_failed')` 是 `automatic`，于是这里
+     * 原先对着一个终态 failed 的 run 打「系统会自动重试」—— 而重试预算已经
+     * 用完，不会再有下一次。错误码说的是「这类错原则上可自动恢复」，
+     * 不是「这一次会重试」。
+     */
+    const terminal = ['failed', 'cancelled'].includes(r.status)
     line(
       `${ICON.warn} 未产生回复；run ${statusColor(r.status)} ${c.gray(r.errorCode ?? '')} ` +
-        recoveryHint(recoveryOf(r.errorCode)),
+        (terminal ? c.gray('（已用完重试预算，不会再试）') : recoveryHint(recoveryOf(r.errorCode))),
     )
     // 错误里带了可操作提示就显示出来 —— 只报错误码等于让人自己猜
     if (r.hint) line(c.gray(`  ${r.hint}`))

@@ -330,3 +330,89 @@ describe('会话锁', () => {
     expect((await n.runs.getRun(runId))!.status).toBe('succeeded')
   })
 })
+
+/**
+ * ── 问完必须真的停下 ────────────────────────────────
+ *
+ * 实测（gemma4:31b，真实模型）：
+ *
+ *     ⎿ ask_user ✓ 5ms
+ *     ⎿ ollama:gemma4:31b · 706 tok      ← 又调了一次
+ *     ⎿ ollama:gemma4:31b · 1.3k tok     ← 又一次
+ *     ⎿ waiting_user contract.postcondition_failed
+ *
+ * 我第一版只在工具返回值里写了一句「**这一轮到此结束** —— 不要再调用其它工具，
+ * 也不要 submit_result」。模型照样往下跑，最后以契约失败收尾。
+ *
+ * **那正是这个项目要修的第一个毛病，犯在我自己的代码里**：机制就在手边
+ * （`delegate` 一直用着 `suspend: true`），而我写了一句劝告。
+ * 提醒是三层里最弱的一层 —— 对模型如此，对我自己写的工具也一样。
+ */
+describe('问完就停', () => {
+  it('ask_user 之后不再调模型 —— 哪怕脚本里还排着别的动作', async () => {
+    n = await boot({
+      config: cfg(),
+      deps: { clock: new FakeClock(), ids: new FakeIds() },
+      mock: {
+        orchestrator: [
+          { tool: { name: 'ask_user', args: { question: '哪一种？' } } },
+          // 脚本里还有两个回合。suspend 生效的话它们**这一轮**不会被消费
+          { text: '我再想想' },
+          { submit: { status: 'partial', summary: '信息不足', artifacts: [] } },
+        ],
+      },
+    })
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    const { runId } = await ask(n, conv.id, '做点什么')
+
+    // 这一轮只应该有一次模型调用
+    const calls = await n.db.query<{ n: number }>(
+      `select count(*)::int n from run_events
+        where run_id = $1 and kind = 'llm.call.finished'`,
+      [runId],
+    )
+    expect(calls.rows[0]!.n, '问完之后又调了模型').toBe(1)
+
+    const run = await n.runs.getRun(runId)
+    expect(run!.status).toBe('waiting_user')
+    // 而且没有留下错误码 —— 提问不是失败
+    expect(run!.errorCode).toBeNull()
+  })
+
+  /**
+   * **挂起优先于提交。**
+   *
+   * 一次回复里既问又交是会发生的。原先 `submitted` 先判，于是那份
+   * **在答案还没来之前**得出的结果会被写进 `runs.result`，
+   * 而 bundle 与将来的前端都会读它。
+   */
+  it('同一次回复里既问又交 → 结果不落库，等答案回来再说', async () => {
+    n = await boot({
+      config: cfg(),
+      deps: { clock: new FakeClock(), ids: new FakeIds() },
+      mock: {
+        orchestrator: [
+          {
+            tools: [
+              { name: 'ask_user', args: { question: '哪一种？' } },
+              { name: 'submit_result', args: { status: 'ok', summary: '先交了', artifacts: [] } },
+            ],
+          },
+          { submit: { status: 'ok', summary: '按你说的做完了', artifacts: [] } },
+        ],
+      },
+    })
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    const { runId } = await ask(n, conv.id, '做点什么')
+
+    const run = await n.runs.getRun(runId)
+    expect(run!.status).toBe('waiting_user')
+    expect(run!.result, '答案还没来就落了结果').toBeNull()
+
+    // 答完之后才有结果
+    await ask(n, conv.id, 'Markdown')
+    const done = await n.runs.getRun(runId)
+    expect(done!.status).toBe('succeeded')
+    expect((done!.result as { summary: string }).summary).toBe('按你说的做完了')
+  })
+})

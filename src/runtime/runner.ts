@@ -609,6 +609,21 @@ export class Runner {
         })
       }
 
+      /**
+       * **挂起优先于提交。**
+       *
+       * 一次回复里既 `ask_user`（或 `delegate`）又 `submit_result` 是会发生的。
+       * 原先 `submitted` 先判，于是那个结果会被写进 `runs.result` ——
+       * 而它是**在答案还没来、专家还没干完之前**得出的。worker 随后仍会把 run
+       * 挂起（它自己会查待答提问与未完成子 run），所以状态是对的，
+       * 但库里留下一份过早的结果，而 bundle 与将来的前端都会读它。
+       *
+       * 挂起优先意味着：等它带着答案／专家结果回来时再提交一次。
+       */
+      if (suspended) {
+        return { status: 'succeeded', suspended: true, ...acc }
+      }
+
       if (submitted) {
         return {
           status: submitted.status === 'failed' ? 'failed' : 'succeeded',
@@ -616,12 +631,6 @@ export class Runner {
           ...(submitted.status === 'failed' ? { errorCode: 'contract.postcondition_failed' } : {}),
           ...acc,
         }
-      }
-
-      // 工具声明本轮到此为止（如委派）—— 编排者不该空转等待，
-      // 它的下一次 attempt 由 wake 触发。
-      if (suspended) {
-        return { status: 'succeeded', suspended: true, ...acc }
       }
 
       stepsSinceProgress = madeProgress ? 0 : stepsSinceProgress + 1

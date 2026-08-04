@@ -457,9 +457,22 @@ export function askUserTool(store: RunStore, conversations: ConversationAppender
       })
       return {
         ok: true,
+        /**
+         * **`suspend` 才是让本轮停下的东西，不是下面那句话。**
+         *
+         * 我第一版只返回了那段文本（「这一轮到此结束，不要再调用其它工具」）——
+         * 而实测 gemma4 照样接着调了两次模型，最后以
+         * `contract.postcondition_failed` 收尾。
+         *
+         * 那正是这个项目要修的第一个毛病，被我犯在自己的代码里：
+         * **机制就在手边（delegate 一直用着 `suspend: true`），而我写了一句劝告。**
+         * 提醒是三层里最弱的一层 —— 对模型如此，对我自己写的工具也一样。
+         *
+         * 文本留着，但它现在只是解释「为什么停了」，不再负责让它停。
+         */
+        suspend: true,
         content:
-          '已经问了用户。**这一轮到此结束** —— 不要再调用其它工具，也不要 submit_result。' +
-          '用户回答之后你会带着答案重新开始。',
+          '已经问了用户。这一轮到此结束 —— 用户回答之后你会带着答案重新开始。',
       }
     },
   }
