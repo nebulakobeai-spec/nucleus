@@ -106,6 +106,8 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
     .filter((a) => a.id !== config.defaults.entryAgent)
     .map((a) => ({ id: a.id, whenToUse: a.whenToUse }))
   registerBuiltins(tools, {
+    // ask_user 要能把问题写给用户 —— 没有这个入口就不注册那个工具
+    conversations,
     store: runs,
     delegateTargets,
     delegateLimits: {
@@ -215,13 +217,97 @@ export async function ask(
   conversationId: string,
   content: string,
   hooks: Parameters<Worker['drain']>[1] = {},
-): Promise<{ runId: string; loops: number }> {
-  await n.conversations.append({ conversationId, role: 'user', content })
+): Promise<{ runId: string; loops: number; answered: boolean }> {
   const conv = await n.conversations.get(conversationId)
   if (!conv) throw new Error(`会话 ${conversationId} 不存在`)
 
+  /**
+   * **有 run 在等回答时，这条消息就是回答，不是新任务。**
+   *
+   * ── 为什么必须先判这一步 ──────────────────────────
+   *
+   * 不判的话，编排者问「你说的 X 指的是 A 还是 B？」而你回「A」——
+   * 系统会**把「A」当成一个新任务开一个新 run**，同时原来那个 run 永远停在
+   * waiting_user。你会看到一个莫名其妙的回答，而真正在等的那件事再也不动。
+   *
+   * 让系统去猜「这句是答案还是新任务」是不行的：猜错的代价是把回答喂给错误的
+   * run，而那不可逆。所以规则是死的 —— **有提问在等，你的下一句就是答案**。
+   * 想开新任务用 `/new` 另起会话。
+   */
+  const question = await n.runs.questionAwaitingAnswer(conversationId)
+  if (question) {
+    await n.conversations.append({ conversationId, role: 'user', content })
+    const fired = await n.runs.answerQuestion(question.id)
+    if (fired) {
+      try {
+        const loops = await n.worker.drain(100, hooks)
+        return { runId: fired.runId, loops, answered: true }
+      } finally {
+        // 与上面同一个判据：又问了一句就继续持锁，否则放掉
+        const after = await n.runs.getRun(fired.runId)
+        if (after?.status !== 'waiting_user') {
+          await n.conversations.release(conversationId, fired.runId)
+        }
+      }
+    }
+    // 条件更新没抢到 —— 另一条消息刚刚点了火。那一次 drain 会处理这句话
+    return { runId: question.parentRunId, loops: 0, answered: true }
+  }
+
+  await n.conversations.append({ conversationId, role: 'user', content })
   const run = await n.runs.createRun({ agentId: conv.agentId, conversationId })
-  await n.runs.enqueueAttempt(run.id)
-  const loops = await n.worker.drain(100, hooks)
-  return { runId: run.id, loops }
+
+  /**
+   * **会话锁。** 同一个会话同时只允许一个活跃 run。
+   *
+   * ── 为什么现在才接上 ────────────────────────────
+   *
+   * `conversations.acquire()` 用条件更新做好了 CAS，而**只有它自己的测试在调用**
+   * ——「声明了但没接线」的一个实例（backlog 记为「第 9 处」）。
+   * 今天没出问题只是因为 CLI 与 REPL 都是串行的：一旦有并发入口
+   * （或者两个终端同时对同一个会话说话），就会两个 run 抢一个会话，
+   * 各自往里追加消息，而**双方看到的历史都是错的** —— 交错之后谁也说不清
+   * 哪句回应哪句。
+   *
+   * 抢不到时把刚建的 run 取消掉再抛。不取消的话会留下一个永远 pending 的 run，
+   * 而它在 `nucleus runs` 里看起来像一个卡住的任务。
+   */
+  try {
+    await n.conversations.acquire(conversationId, run.id)
+  } catch (e) {
+    await n.runs.cancel(run.id, 'conversation.busy')
+    throw e
+  }
+
+  try {
+    await n.runs.enqueueAttempt(run.id)
+    const loops = await n.worker.drain(100, hooks)
+    return { runId: run.id, loops, answered: false }
+  } finally {
+    /**
+     * **放锁的判据是「还等不等用户说话」，不是「有没有结束」。**
+     *
+     * 我第一版写的是「只在终态才放」，看起来更严格 —— 而它造成一个死锁：
+     *
+     *   provider 全挂 → run 进 waiting_retry（持锁）
+     *   → 重试需要一次 drain
+     *   → CLI 的 drain 只在下一条命令时发生
+     *   → 下一条命令被锁拒绝
+     *
+     * 会话从此谁也用不了，而它显示的状态是「有正在执行的 run」——
+     * 一句正确的话指向一个不可能自行解开的局。测试里 5 次连续 ask 就撞上了。
+     *
+     * 所以锁只守两件事：
+     *  ① **并发入口** —— 两个终端同时对同一会话说话（CAS 在 acquire 里挡住）
+     *  ② **待答提问的窗口** —— 你的下一句是那个回答，不能被当成新任务
+     *
+     * 它**不**守重试窗口。代价是：重试期间发新消息会开一个并行的 run，
+     * 两者的结果会交错追加。那比死锁好，而且真正的修法是让重试由长驻 worker
+     * 推进（那时 ask 返回后重试自己会走完），不是靠加长锁的持有时间。
+     */
+    const after = await n.runs.getRun(run.id)
+    if (after?.status !== 'waiting_user') {
+      await n.conversations.release(conversationId, run.id)
+    }
+  }
 }

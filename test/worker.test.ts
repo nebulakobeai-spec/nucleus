@@ -147,15 +147,28 @@ describe('委派 → 挂起 → 唤醒', () => {
 })
 
 describe('worker 的能力边界', () => {
-  it('编排者只有 delegate —— 物理上无法自己动手', async () => {
+  /**
+   * 判据是「不能自己动手」，不是「只有一个工具」。
+   *
+   * 原先写的是 `toEqual(['delegate'])` —— 而 `user` 权限（「直接向用户提问」）
+   * 一直声明着、只是没有工具用它。`ask_user` 接上之后这条测试红了，
+   * 而它**该红**：编排者现在多了一个能力。
+   *
+   * 把判据改成「授予了哪些权限」+「不该有的一个都没有」，而不是一个会随
+   * 工具增减而变的清单 —— 后者每加一个工具都要改，改的时候没人会停下来想
+   * 「这个工具该不该给编排者」，而那恰恰是唯一值得想的问题。
+   */
+  it('编排者不能自己动手 —— 只能委派与提问', async () => {
     const spec = n.config.agents.find((a) => a.id === 'orchestrator')!
     // 授予的是**权限**而不是工具名单：没有 read/write/execute，
     // 所以任何需要它们的工具（包括以后新接的 MCP 工具）都自动不可见
     expect(spec.permissions).toEqual(['delegate', 'user'])
 
     const visible = n.tools.forAgent(spec.permissions!).map((t) => t.name)
-    expect(visible).toEqual(['delegate'])
-    expect(visible).not.toContain('write_file')
+    expect(visible.toSorted()).toEqual(['ask_user', 'delegate'])
+    for (const forbidden of ['write_file', 'read_file', 'write_report']) {
+      expect(visible, `编排者不该看得见 ${forbidden}`).not.toContain(forbidden)
+    }
   })
 
   it('未知 agent 的 run 落终态而非悬挂，且错误指向配置而不是代码', async () => {

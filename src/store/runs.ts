@@ -9,6 +9,8 @@ import {
   type WakeRecord,
   isTerminalAttempt,
   runStatusForAttempt,
+  TERMINAL_RUN_SQL,
+  TERMINAL_RUN_STATUSES,
 } from '../domain.js'
 
 // ── 行 → 领域对象 ───────────────────────────────────────
@@ -78,6 +80,7 @@ const toWake = (r: any): WakeRecord => ({
   firedAttemptId: r.fired_attempt_id,
   createdAt: r.created_at,
   firedAt: r.fired_at,
+  question: r.question ?? null,
 })
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -395,7 +398,7 @@ export class RunStore {
       )
 
       const runStatus = input.runStatusOverride ?? runStatusForAttempt(input.status)
-      const isTerminalRunStatus = ['succeeded', 'failed', 'cancelled'].includes(runStatus)
+      const isTerminalRunStatus = (TERMINAL_RUN_STATUSES as readonly string[]).includes(runStatus)
       await q.query(
         `update runs
             set status = $1,
@@ -477,6 +480,150 @@ export class RunStore {
   // ── Wake ──────────────────────────────────────────────
 
   /**
+   * 取消一个 run —— 落 terminal `cancelled`，写下原因。
+   *
+   * 第一个真实需要它的地方是会话锁抢占失败：run 已经建了但拿不到锁。
+   * 不取消的话会留下一个永远 pending 的 run，而它在 `nucleus runs` 里
+   * 看起来像一个卡住的任务 —— 实际上没有任何东西会去推进它。
+   *
+   * **`cancel_requested_at` 在 `run_attempts` 上，不在 `runs` 上。**
+   * 我第一版写进了 `runs`，pglite 直接报「列不存在」而 `tsc` 毫无反应 ——
+   * 这类错只有跑到那一行才会暴露。（那一列本身也没有任何地方写，
+   * 是另一处没接线的东西，但它属于 attempt 级取消，不是这里的事。）
+   */
+  async cancel(runId: string, reason: string): Promise<void> {
+    const now = this.deps.clock.nowIso()
+    await this.db.tx(async (q) => {
+      await q.query(
+        `update runs
+            set status = 'cancelled', error_code = $2, ended_at = $3
+          where id = $1 and status not in ${TERMINAL_RUN_SQL}`,
+        [runId, reason, now],
+      )
+      // 队列里可能已经有一次待跑的 attempt —— 不清掉的话它照样会被领走
+      await q.query(`delete from run_queue where run_id = $1`, [runId])
+    })
+  }
+
+  /**
+   * 把一个已经「结束」的 run 改回等待态，并**清掉 ended_at**。
+   *
+   * ── 为什么要专门清 ended_at ────────────────────────
+   *
+   * 顺序是：runner 先 `finishAttempt`（attempt succeeded → run succeeded →
+   * 因为是终态所以写了 `ended_at`），worker 之后才发现「还得等」并改状态。
+   * 原先 `armWake` 只 `update runs set status='waiting_children'` ——
+   * 于是**一个还在等的 run 带着结束时间**，而 bundle 会把它显示出来。
+   *
+   * 不是大 bug，但它让「这个 run 什么时候结束的」这个字段在等待期间说假话，
+   * 而诊断包里的时间线正是用来回答「卡在哪一步」的。
+   */
+  async suspend(
+    runId: string,
+    status: 'waiting_children' | 'waiting_user',
+    q: Queryable = this.db,
+  ): Promise<void> {
+    await q.query(`update runs set status = $1, ended_at = null where id = $2`, [status, runId])
+  }
+
+  /**
+   * 记下一个提问，等用户回答。
+   *
+   * ── 与 armWake 的三点不同 ──────────────────────────
+   *
+   * ① **没有 waitOnRunIds** —— 等的不是 run，是人。`armWake` 会拒绝空数组
+   *    （那道检查是为了挡住 fire-and-forget 委派），所以这里单独一个方法，
+   *    而不是给它加一个「除了 kind='user' 时」的例外。
+   * ② **不在这里改 run 状态。** 工具是在 attempt **执行中**调用的，
+   *    此刻把 run 改成 waiting_user 会与 attempt 的生命周期打架 ——
+   *    与 delegate 完全同一个理由：工具只建行，挂起由 worker 在 attempt
+   *    收尾时做（见 worker 的 #suspendIfWaiting）。
+   * ③ **不会立刻点火。** 子 run 可能在 arm 之前就跑完了，所以 armWake 有那道
+   *    竞态兜底；而人不会「在被问之前就回答」。
+   *
+   * 一个 run 只能有一条待答的提问 —— 由部分唯一索引挡在数据库层
+   * （见 0007）。同一个 attempt 里连问两次会撞唯一索引而不是静默多插一行，
+   * 后者的下场是第二条永远等不到、run 卡死在 waiting_user。
+   */
+  async armUserWake(input: {
+    runId: string
+    agentId: string
+    conversationId: string | null
+    question: string
+  }): Promise<WakeRecord> {
+    const now = this.deps.clock.nowIso()
+    const w = await this.db.query(
+      `insert into wake_records
+         (id, kind, parent_run_id, parent_conversation_id, parent_agent_id,
+          wait_on_run_ids, pending_count, resume_payload, status, fire_at, created_at, question)
+       values ($1,'user',$2,$3,$4,'{}'::uuid[],0,'{}'::jsonb,'waiting',null,$5,$6)
+       returning *`,
+      [this.deps.ids.uuid(), input.runId, input.conversationId, input.agentId, now, input.question],
+    )
+    return toWake(w.rows[0])
+  }
+
+  /** 这个 run 有没有待答的提问 —— worker 收尾时据此决定要不要挂起 */
+  async pendingQuestion(runId: string): Promise<WakeRecord | null> {
+    const r = await this.db.query(
+      `select * from wake_records
+        where parent_run_id = $1 and kind = 'user' and status = 'waiting'
+        limit 1`,
+      [runId],
+    )
+    return r.rows[0] ? toWake(r.rows[0]) : null
+  }
+
+  /**
+   * 这个**会话**里有没有 run 在等用户回答。
+   *
+   * 按会话查而不是按 run 查，因为用户那一侧只知道自己在哪个会话里说话 ——
+   * 「我这句话是在回答谁」得由系统认出来。
+   */
+  async questionAwaitingAnswer(conversationId: string): Promise<WakeRecord | null> {
+    const r = await this.db.query(
+      `select w.* from wake_records w
+         join runs r on r.id = w.parent_run_id
+        where w.parent_conversation_id = $1
+          and w.kind = 'user' and w.status = 'waiting'
+          and r.status = 'waiting_user'
+        order by w.created_at
+        limit 1`,
+      [conversationId],
+    )
+    return r.rows[0] ? toWake(r.rows[0]) : null
+  }
+
+  /**
+   * 用户答了 —— 点火，给那个 run 排一次新 attempt。
+   *
+   * **条件更新**：`status = 'waiting'` 写在 where 里。两条消息几乎同时到达时
+   * 只有一条能点火，另一条拿到 null —— 而「先查后写」会给同一个提问排两次
+   * attempt，那个 run 会把同一句回答处理两遍。
+   */
+  async answerQuestion(wakeId: string): Promise<{ attemptId: string; runId: string } | null> {
+    return this.db.tx(async (q) => {
+      const now = this.deps.clock.nowIso()
+      const r = await q.query<{ parent_run_id: string }>(
+        `update wake_records set status = 'fired', fired_at = $1
+          where id = $2 and kind = 'user' and status = 'waiting'
+          returning parent_run_id`,
+        [now, wakeId],
+      )
+      const runId = r.rows[0]?.parent_run_id
+      if (!runId) return null
+      // 优先级 1：用户在等，别排在批量任务后面
+      const attempt = await this.enqueueAttempt(runId, { priority: 1 }, q)
+      await q.query(`update wake_records set fired_attempt_id = $1 where id = $2`, [
+        attempt.id,
+        wakeId,
+      ])
+      await q.query(`update runs set status = 'running' where id = $1`, [runId])
+      return { attemptId: attempt.id, runId }
+    })
+  }
+
+  /**
    * 挂起 parent 等待子 run。
    *
    * parent 的当前 attempt 会正常终结（succeeded），逻辑 run 转 waiting_children。
@@ -498,7 +645,7 @@ export class RunStore {
       // 只统计尚未终态的子 run：可能在 arm 之前就已经跑完了
       const pending = await q.query<{ n: string }>(
         `select count(*)::int as n from runs
-          where id = any($1::uuid[]) and status not in ('succeeded','failed','cancelled')`,
+          where id = any($1::uuid[]) and status not in ${TERMINAL_RUN_SQL}`,
         [input.waitOnRunIds],
       )
       const pendingCount = Number(pending.rows[0]?.n ?? 0)
@@ -523,9 +670,7 @@ export class RunStore {
           now,
         ],
       )
-      await q.query(`update runs set status = 'waiting_children' where id = $1`, [
-        input.parentRunId,
-      ])
+      await this.suspend(input.parentRunId, 'waiting_children', q)
 
       const wake = toWake(w.rows[0])
 

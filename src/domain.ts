@@ -35,6 +35,18 @@ export type RunStatus =
   | 'running'
   | 'waiting_children'
   | 'waiting_retry'
+  /**
+   * 编排者问了一句，等用户回答。
+   *
+   * 与 `needs_human_confirmation` 是两回事：那个是**副作用未知时的死胡同**
+   * （某个工具可能已经改了外部世界，不敢自动重试）。这个是**正常的对话回合** ——
+   * 混成一个状态会让「系统坏了」和「系统在等你说话」长得一样，
+   * 而这两件事该给的提示完全相反。
+   *
+   * 与 waiting_children 同构：attempt 正常终结，不占进程不占 context。
+   * 等人回答可能要几小时。
+   */
+  | 'waiting_user'
   | 'succeeded'
   | 'failed'
   | 'needs_human_confirmation'
@@ -170,7 +182,11 @@ export interface ToolInvocation {
   errorCode: string | null
 }
 
-export type WakeKind = 'children_done' | 'approval' | 'retry_timer'
+/**
+ * `user`：等用户回答一个提问。**没有 waitOnRunIds** —— 等的不是 run，是人。
+ * 由用户的下一条消息点火（见 boot.ts 的 ask）。
+ */
+export type WakeKind = 'children_done' | 'approval' | 'retry_timer' | 'user'
 export type WakeStatus = 'waiting' | 'fired' | 'superseded'
 
 export interface WakeRecord {
@@ -187,6 +203,8 @@ export interface WakeRecord {
   firedAttemptId: string | null
   createdAt: Date
   firedAt: Date | null
+  /** `user` wake 的提问原文；其它 kind 为 null */
+  question: string | null
 }
 
 export interface RunEvent {

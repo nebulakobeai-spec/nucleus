@@ -329,6 +329,142 @@ export function readRuleTool(rules: UserRule[]): ToolDefinition {
   }
 }
 
+/**
+ * 会话追加口 —— `ask_user` 只需要这一个动作。
+ *
+ * 用结构类型而不是 import ConversationStore：builtin-tools 已经只依赖
+ * RunStore，再拉进一个具体的 store 类会让工具层和存储层缠在一起，
+ * 而这里要的其实只是「能把一句话写给用户」。
+ */
+export interface ConversationAppender {
+  append(input: {
+    conversationId: string
+    // 只需要 assistant —— 这个工具就是「agent 对用户说话」
+    role: 'assistant'
+    content: string
+    runId?: string | null
+    meta?: Record<string, unknown>
+  }): Promise<unknown>
+}
+
+/**
+ * `ask_user` —— 编排者反问用户。
+ *
+ * ── 为什么之前没有这个工具 ────────────────────────────
+ *
+ * `user` 权限（「直接向用户提问」）从一开始就声明了，而**没有任何工具用它** ——
+ * 又一处「声明了但没接线」。后果是需求含糊时编排者只能猜，而猜错要跑完整条
+ * 委派链才看得出来。
+ *
+ * ── 与 delegate 同构 ────────────────────────────────
+ *
+ * 工具只做两件事：把问题写进会话、记一条 waiting 的 wake。
+ * **run 状态不在这里改** —— 工具是在 attempt 执行中调用的，此刻改状态会与
+ * attempt 的生命周期打架。挂起由 worker 在收尾时做（`#suspendIfWaiting`），
+ * 和「委派了子 run 就挂起等它们」走同一条路径。
+ *
+ * 于是 attempt 正常终结、逻辑 run 转 `waiting_user`、**不占进程不占 context**。
+ * 等人回答可能要几小时，让一个进程挂着等是不可接受的。
+ *
+ * ── 只有对外入口能用 ────────────────────────────────
+ *
+ * `requires: ['user']`，而默认只有 entryAgent 有这个权限。子 run 没有
+ * conversation（只有 root run 有对外身份），所以专家问出来的话根本没有
+ * 收件人 —— 那种调用要在这里挡掉，而不是让它静默消失。
+ */
+export function askUserTool(store: RunStore, conversations: ConversationAppender): ToolDefinition {
+  return {
+    name: 'ask_user',
+    description:
+      '向用户提一个问题，等他回答之后再继续。\n' +
+      '**需求含糊时先问，别猜** —— 猜错要等整条委派链跑完才看得出来。\n' +
+      '一次只问一件事；问完这一轮就结束，用户回答后你会带着答案继续。',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: {
+          type: 'string',
+          description:
+            '要问的那一件事，用用户的语言问。问具体的歧义（「你说的 X 指的是 A 还是 B？」），' +
+            '不要问「你想怎么做」—— 那是把你的活推回去。',
+        },
+        why: {
+          type: 'string',
+          description: '为什么这一点影响你接下来怎么做。一句话，让用户知道值不值得回答。',
+        },
+      },
+      required: ['question'],
+    },
+    requires: ['user'],
+    // 幂等：同一个问题重复问一次不会改变外部世界（唯一索引会挡住第二条记录）
+    sideEffect: 'idempotent',
+    precondition: async (args, ctx) => {
+      const q = String((args as { question?: unknown }).question ?? '').trim()
+      if (!q) {
+        return {
+          ok: false,
+          content: 'question 不能为空。没有要问的就不要调这个工具。',
+          errorCode: 'tool.denied',
+        }
+      }
+      const run = await store.getRun(ctx.runId)
+      if (!run?.conversationId) {
+        /**
+         * 子 run 没有 conversation —— 问出来没有收件人。
+         *
+         * 挡在这里而不是让它静默成功：一个「问了但没人看见」的提问会让
+         * run 永远停在 waiting_user，而日志里看起来一切正常。
+         */
+        return {
+          ok: false,
+          content:
+            '你不是对外入口，问出来的话没有收件人（只有 root run 关联会话）。\n' +
+            '需求不清时把它写进 open_questions 交回上级，由它决定要不要问用户。',
+          errorCode: 'tool.denied',
+        }
+      }
+      if (await store.pendingQuestion(ctx.runId)) {
+        // 一个 run 只能有一条待答的提问；用户的下一句只能回答一个
+        return {
+          ok: false,
+          content: '你已经有一个问题在等回答了。一次只问一件事。',
+          errorCode: 'tool.denied',
+        }
+      }
+      return null
+    },
+    execute: async (args, ctx) => {
+      const a = args as { question?: string; why?: string }
+      const question = String(a.question ?? '').trim()
+      const why = a.why?.trim()
+      const run = await store.getRun(ctx.runId)
+      const conversationId = run!.conversationId!
+
+      // 先写会话：这条 assistant 消息是用户真正看到的东西
+      await conversations.append({
+        conversationId,
+        role: 'assistant',
+        content: why ? `${question}
+（${why}）` : question,
+        runId: ctx.runId,
+        meta: { askUser: true },
+      })
+      await store.armUserWake({
+        runId: ctx.runId,
+        agentId: ctx.agentId,
+        conversationId,
+        question,
+      })
+      return {
+        ok: true,
+        content:
+          '已经问了用户。**这一轮到此结束** —— 不要再调用其它工具，也不要 submit_result。' +
+          '用户回答之后你会带着答案重新开始。',
+      }
+    },
+  }
+}
+
 export function registerBuiltins(
   registry: ToolRegistry,
   opts: {
@@ -337,6 +473,8 @@ export function registerBuiltins(
     delegateLimits: DelegateLimits
     /** 正文按需加载的规则。为空时**不注册** read_rule —— 宣告一个空能力没有意义 */
     indexedRules?: UserRule[]
+    /** 会话追加口 —— ask_user 要用它把问题写给用户。没有就不注册那个工具 */
+    conversations?: ConversationAppender
   },
 ): void {
   registry.register(readFileTool)
@@ -350,6 +488,8 @@ export function registerBuiltins(
   // 而全新安装还没定义专家时，编排者直接作答才是正确行为 ——
   // 给它一个必然失败的工具等于宣告一个不存在的能力（和当初那个假
   // web_search 同一个错）。
+  // 只有拿到会话入口时才注册 —— 没有它这个工具无处投递
+  if (opts.conversations) registry.register(askUserTool(opts.store, opts.conversations))
   if (opts.delegateTargets.length > 0) {
     registry.register(delegateTool(opts.store, opts.delegateTargets, opts.delegateLimits))
   }

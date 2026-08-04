@@ -328,6 +328,18 @@ export function printTurn(r: TurnResult, opts: { runCount?: number } = {}): void
       line()
       line(`  ${c.gray('产出')} ${r.artifacts.join(', ')}`)
     }
+    /**
+     * **提问就是这一轮的回复** —— 它以 assistant 消息落库，所以上面那段
+     * 已经把问题打出来了。缺的只是「这一轮在等你」这个标记。
+     *
+     * 没有它的话，一个提问看起来和一个已经答完的回复一模一样 ——
+     * 而你不会知道系统正停在那里等一句话。
+     */
+    if (r.status === 'waiting_user') {
+      line()
+      line(`${ICON.info} ${c.cyan('它在等你回答')} ${c.gray('—— 你的下一句就是答案')}`)
+      line(c.gray('  想改做别的：/new 另起会话（这个提问会一直留在这里等）'))
+    }
   } else if (r.status === 'waiting_retry') {
     // **恢复性提示必须跟着实际行为**，不能只看错误码。
     // all_exhausted 的 recovery 是 needs_user，但 run 已经排好了重试 ——

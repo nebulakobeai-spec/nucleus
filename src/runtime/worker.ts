@@ -230,7 +230,25 @@ export class Worker {
 
       // 本次 attempt 里派生出了尚未完成的子 run → 挂起等待。
       // 没有这一步，委派就是 fire-and-forget：编排者不会拿到专家的结果。
-      const armed = await this.#armWakeIfPending(run.id, run.agentId, run.conversationId, attempt.id)
+      /**
+       * 挂起的两种原因，**提问优先**。
+       *
+       * 一个 attempt 里既委派了又问了用户时，该等的是人 —— 因为回答很可能
+       * 改变要不要用那些子 run 的结果。反过来（先等子 run）会让提问一直没人
+       * 看见，而用户那边只看到系统在忙。
+       */
+      const question = await this.#store.pendingQuestion(run.id)
+      const armed = question
+        ? true
+        : await this.#armWakeIfPending(run.id, run.agentId, run.conversationId, attempt.id)
+      if (question) {
+        // runner 刚把 run 写成 succeeded（并设了 ended_at）—— 改回等待态
+        await this.#store.suspend(run.id, 'waiting_user')
+        await this.events.emit(attempt.id, run.id, 'wake.armed', {
+          kind: 'user',
+          question: question.question,
+        })
+      }
 
       // root run 的结果回写会话 —— 只有它有对外身份；
       // 但等待子 run 期间不回写，否则用户会看到半成品。
@@ -251,7 +269,13 @@ export class Worker {
       }
 
       await this.events.emit(attempt.id, run.id, 'attempt.finished', {
-        status: armed ? 'waiting_children' : out.willRetry ? 'waiting_retry' : out.status,
+        status: question
+          ? 'waiting_user'
+          : armed
+            ? 'waiting_children'
+            : out.willRetry
+              ? 'waiting_retry'
+              : out.status,
         errorCode: out.errorCode ?? null,
         tokens: out.tokensIn + out.tokensOut,
         costUsd: out.costUsd,
@@ -259,7 +283,15 @@ export class Worker {
       hooks.onAttemptEnd?.({
         runId: run.id,
         attemptId: attempt.id,
-        status: armed ? 'waiting_children' : out.willRetry ? 'waiting_retry' : out.status,
+        // 与上面 attempt.finished 同一个判断 —— 两处写不一样的话，
+        // 终端显示的状态和落库的状态会不同，而那种不一致最难查
+        status: question
+          ? 'waiting_user'
+          : armed
+            ? 'waiting_children'
+            : out.willRetry
+              ? 'waiting_retry'
+              : out.status,
         ...(out.errorCode ? { errorCode: out.errorCode } : {}),
       })
     } catch (e) {

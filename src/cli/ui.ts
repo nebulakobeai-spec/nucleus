@@ -65,6 +65,17 @@ export function statusColor(status: string): string {
       return c.cyan(status)
     case 'waiting_children':
     case 'waiting_retry':
+      return c.yellow(status)
+    /**
+     * `waiting_user` 用青色，和「在跑」同一类，**不是黄色**。
+     *
+     * 黄色是「有点不对劲，可能要你处理」。而等你回答一句话是**正常的对话回合**，
+     * 不是异常。needs_human_confirmation 才是黄的 —— 那个是副作用未知时的
+     * 死胡同，真的需要人去看。把两者染成同一个色，就等于让「系统在等你说话」
+     * 和「系统卡住了」长得一样。
+     */
+    case 'waiting_user':
+      return c.cyan(status)
     case 'needs_human_confirmation':
       return c.yellow(status)
     default:
