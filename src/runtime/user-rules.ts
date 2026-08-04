@@ -426,7 +426,7 @@ export function validateRules(
     const { conflicts } = resultFieldsForAgent(rules, agentId)
     for (const cf of conflicts) {
       // 两条 `*` 规则冲突时每个 agent 都会算出一次 —— 同一件事只报一遍
-      const key = `${cf.field} ${cf.rules.map((r) => r.id).join(' ')}`
+      const key = `${cf.field} ${cf.rules.map((r) => r.id).join(' ')}`
       if (reported.has(key)) continue
       reported.add(key)
       out.push({

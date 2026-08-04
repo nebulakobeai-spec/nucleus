@@ -15,6 +15,7 @@ import { artifactCat, artifactList } from './artifact.js'
 import { providersCmd, providersProbe } from './providers.js'
 import { rulesCmd } from './rules.js'
 import { ruleNew } from './rule-new.js'
+import { ruleRm } from './rule-rm.js'
 import { ScheduleStore } from '../store/schedules.js'
 import { findStuckRuns, findUnknownToolOutcomes } from '../runtime/stuck.js'
 import { convCompact, convList, convSeed, convShow, convSummary } from './conv.js'
@@ -662,7 +663,9 @@ ${c.bold('agent 与规则')}
   agent new <id>              生成专家定义骨架（含写法说明）
   agent try <id> [任务]        只跑这一个专家：--n 重复、--compare 与旧版并排
   rules                       规则清单（边界 / 检查 / 提醒）与遵守率
-  rule new <id> "<要求>"       **加一条规则** —— 说一句话，模型判它属于哪一层
+  rule add  <id> "<要求>"      **加一条** —— 说一句话，模型判它属于哪一层
+  rule edit <id> "<改什么>"    **改一条** —— 没提到的原样保留，写之前给差异
+  rule rm   <id>               **删一条** —— 先说清它在管什么、谁依赖它
                               （边界 / 检查 / 提醒），运行时校验，只问不确定的
                               加 --interactive 改成一问一答
   conv list                   会话列表：消息数与压缩代数
@@ -901,7 +904,18 @@ export async function main(argv: string[]): Promise<number> {
     }
     case 'rule':
     case 'rules': {
-      if (rest[0] === 'new') return ruleNew(rest.slice(1), flags)
+      /**
+       * 三种操作，三个词。**「覆盖」不是一种操作** —— 它只是「更新但先把现有的
+       * 扔了」，所以 `--force` 删掉了。
+       *
+       * `new` 留成 add 的别名：文档和历史提交里到处是 `rule new`，
+       * 换名字不该让旧命令变成「未知子命令」。
+       */
+      if (rest[0] === 'add' || rest[0] === 'new') return ruleNew(rest.slice(1), flags, 'add')
+      if (rest[0] === 'edit') return ruleNew(rest.slice(1), flags, 'edit')
+      if (rest[0] === 'rm' || rest[0] === 'remove' || rest[0] === 'delete') {
+        return ruleRm(rest.slice(1), flags)
+      }
       return rulesCmd(rest, flags)
     }
     case 'bundle':

@@ -57,30 +57,59 @@ import {
  * 那一条会显式说出来，因为形式合法但不相干的检查比没有检查更糟。
  */
 
+/**
+ * 三种操作，三个命令。
+ *
+ * ── 为什么不是一个命令自动判断 ──────────────────────────
+ *
+ * 规则只有**增加、更新、删除**三种操作 ——「覆盖」不是其中一种，
+ * 它只是「更新但先把现有的扔了」，而那从来不是想要的。所以 `--force` 删掉了。
+ *
+ * 那为什么 add 和 edit 不合成一个、看文件在不在自动判断？因为**命令名就是你的
+ * 意图**，而意图和现实不符本身是个值得报出来的信号：
+ *
+ *   `rule add <已存在>`  你以为是新的，其实有了 —— 也许忘了，也许撞名了
+ *   `rule edit <不存在>` 你以为在改，其实没这条 —— 也许打错了 id
+ *
+ * 两种都只差一句话就能纠正（错误信息里直接给出该敲的命令），
+ * 而自动判断会把「撞名了」变成「悄悄改了别人那条」。
+ */
 export async function ruleNew(
   argv: string[],
   flags: Record<string, string | true>,
+  /** 使用者敲的是 add 还是 edit —— 决定「文件在不在」算不算错 */
+  intent: 'add' | 'edit' = 'add',
 ): Promise<number> {
   try {
     const id = (argv[0] ?? '').trim()
     const description = strFlag(flags, 'describe') ?? argv.slice(1).join(' ').trim()
     if (!id || !description) {
-      line(c.red('用法：nucleus rule new <规则 id> "你的要求"'))
-      line(c.gray('  id 会成为文件名：rules/<id>.md。小写字母、数字、点、连字符'))
-      line()
-      line('  例：')
-      line(c.gray('    nucleus rule new cite-sources "结论必须标明来源"'))
-      line(c.gray('    nucleus rule new no-writes "不许写文件"'))
-      line()
-      line('  要求怎么写都行 —— 模型来判它落在哪一层：')
-      for (const t of ['boundary', 'check', 'reminder'] as const) {
-        line(c.gray(`    ${TIER_WHAT[t]}`))
+      line(c.red(`用法：nucleus rule ${intent} <规则 id> "${intent === 'add' ? '你的要求' : '要改成什么'}"`))
+      if (intent === 'add') {
+        line(c.gray('  id 会成为文件名：rules/<id>.md。小写字母、数字、点、连字符'))
+        line()
+        line('  例：')
+        line(c.gray('    nucleus rule add cite-sources "结论必须标明来源"'))
+        line(c.gray('    nucleus rule add no-writes "不许写文件"'))
+        line()
+        line('  要求怎么写都行 —— 模型来判它落在哪一层：')
+        for (const t of ['boundary', 'check', 'reminder'] as const) {
+          line(c.gray(`    ${TIER_WHAT[t]}`))
+        }
+      } else {
+        line()
+        line('  例：')
+        line(c.gray('    nucleus rule edit plan-first "plan 要是步骤列表，不是一个字符串"'))
+        line(c.gray('    nucleus rule edit cite-sources "只对 researcher 生效"'))
+        line(c.gray('    nucleus rule edit workspace-paths "提醒那段太长了，删掉"'))
+        line()
+        line(c.gray('  没提到的部分原样保留 —— 手改过的地方不会被冲掉。'))
       }
       line()
-      line(c.gray('  --interactive  别急着接受第一份提案，每一版都让我过一眼'))
+      line(c.gray('  加/改/删：nucleus rule add | edit | rm'))
       return 1
     }
-    return await describePath(id, description, flags)
+    return await describePath(id, description, flags, intent)
   } finally {
     closePrompts()
   }
@@ -91,32 +120,53 @@ async function describePath(
   id: string,
   description: string,
   flags: Record<string, string | true>,
+  intent: 'add' | 'edit',
 ): Promise<number> {
   if (!/^[a-z][a-z0-9.-]*$/.test(id)) {
     line(c.red(`id 只能是小写字母、数字、点与连字符：${id || '(空)'}`))
     return 1
   }
-  const dir = strFlag(flags, 'dir') ?? DEFAULT_RULES_DIR
+  /**
+   * 目录的来源顺序：`--dir` > 配置的 `rulesDir` > 默认 `rules/`。
+   *
+   * 原先漏了中间那一层 —— 配置里写了 `rulesDir: "/somewhere/rules"`，
+   * `rule add` 照样往 `./rules/` 写。于是新规则**落在加载器根本不看的地方**，
+   * 而且写完还提示「看一眼 nucleus rules」，那里什么都不会出现。
+   *
+   * 所以配置要在这一步之前读 —— 它不需要 boot，很便宜。
+   */
+  const { config } = await loadConfig(strFlag(flags, 'config'))
+  const dir = strFlag(flags, 'dir') ?? config.rulesDir ?? DEFAULT_RULES_DIR
   const path = join(resolve(dir), `${id}.md`)
 
   /**
-   * **已存在不是错误，是「你想改它」。**
+   * **意图与现实不符 → 报出来，别猜。**
    *
-   * 原先这里只有两条路：拦下来，或者加 `--force` 直接盖掉 ——
-   * 不给差异、不留备份。而那个文件很可能被手改过（调过措辞、
-   * 收窄过 appliesTo、加过一句注释），全部无声消失。
-   *
-   * 我在 `model add` 上用过同一条判断标准，却得出了相反的结论：那里不敢写
-   * JSON 是因为「文件里全是注释，序列化会丢掉」。规则文件**第一次**创建时
-   * 确实没有既有内容可毁 —— 但第二次就有了，而我把第一次的结论用到了第二次。
-   *
-   * 现在：把现有内容读出来喂给模型，你说要改什么，它改。写之前给差异。
-   * `--force` 退化成「别管现在写的什么，从头再来」，而那也仍然要看差异。
+   * `--force` 删掉了：规则只有增加、更新、删除三种操作，「覆盖」不是其中一种 ——
+   * 它只是「更新但先把现有的扔了」，而那从来不是想要的。想改就 edit（会读现有
+   * 内容、没提到的原样保留、写之前给差异），不想要了就 rm。
    */
   const existing = existsSync(path) ? await readFile(path, 'utf8') : null
-  const fresh = flags['force'] === true
+  if (intent === 'add' && existing !== null) {
+    line(c.red(`${id} 已经有了 —— ${path}`))
+    line()
+    line('  想改它：')
+    line(c.cyan(`    nucleus rule edit ${id} "${description}"`))
+    line(c.gray('    会读现有内容，你没提到的部分原样保留，写之前给你看差异'))
+    line()
+    line('  不想要了：')
+    line(c.cyan(`    nucleus rule rm ${id}`))
+    return 1
+  }
+  if (intent === 'edit' && existing === null) {
+    line(c.red(`没有 ${id} 这条规则 —— ${path} 不存在`))
+    line()
+    line('  想新建：')
+    line(c.cyan(`    nucleus rule add ${id} "${description}"`))
+    line(c.gray('  看有哪些：nucleus rules'))
+    return 1
+  }
 
-  const { config } = await loadConfig(strFlag(flags, 'config'))
   const n = await boot({ config, ...resolveDb(flags), skipMcp: flags['mcp'] !== true })
 
   try {
@@ -139,7 +189,7 @@ async function describePath(
       return 1
     }
 
-    const revising = existing !== null && !fresh
+    const revising = intent === 'edit'
     heading(`${revising ? '改一条规则' : '加一条规则'}：${c.bold(id)}`)
     line(c.gray(`模型链 ${n.config.defaults.modelChain.join(' → ')}`))
     if (revising) {
@@ -147,10 +197,6 @@ async function describePath(
       line(c.gray('  下面这句会当成「要改成什么」，而不是从头写一条：'))
     }
     line(`  ${c.gray(revising ? '你说的：' : '你的要求：')}${description}`)
-    if (existing !== null && fresh) {
-      line(`  ${ICON.warn} ${c.yellow('--force：不管现在写的什么，从头再来')}`)
-      line(c.gray('    写之前仍然会给你看差异。'))
-    }
     line()
     line(c.gray(revising ? '正在看现在这条，然后改…' : '正在判它属于哪一层…'))
 

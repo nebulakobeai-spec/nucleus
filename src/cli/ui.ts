@@ -252,7 +252,6 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   'no-probe',
   'numbered',
   'interactive',
-  'force',
   'help',
 ])
 
