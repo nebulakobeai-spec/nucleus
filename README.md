@@ -525,6 +525,10 @@ tier 2 的 fixture 由真实模型产生，不是手写的 —— 手写 stub �
   **复合要求会被拆开**，没管住的分句写进文件并在清单里标出来
 - **反问用户**：`ask_user` / `waiting_user` —— attempt 正常终结、run 挂起、
   **不占进程不占 context**，你的下一句就是答案 · 会话锁（同会话串行）
+- **编排者能改配置**：`create_rule` / `create_agent` / `configure_model` ——
+  直接说「加一条规则」「我需要一个看财报的专家」即可。要 `configure` 权限，
+  默认只有入口 agent 有。**它能提权**（造一个带 execute 的专家再委派给它），
+  这是刻意接受的，代价用可见性补
 - **常驻**：`nucleus serve` 让定时任务真的到点执行、重试自己推进 ·
   `--install` 生成 launchd 配置（开机自启）· 运行日志落盘进仓库，
   凭据**写盘前**就抹掉

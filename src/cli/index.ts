@@ -182,6 +182,8 @@ async function open(flags: Record<string, string | true>): Promise<Nucleus> {
     config,
     databaseUrl: dbUrl,
     dataDir: dbUrl ? null : (dataDir ?? '.nucleus-data/pglite'),
+    // 改配置的工具靠它知道往哪写 —— 相对路径按配置文件所在目录解析
+    configPath,
     ...(useMock ? { mock: demoScript(config) } : {}),
   })
 }

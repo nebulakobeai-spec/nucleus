@@ -12,6 +12,9 @@ import { RunStore } from './store/runs.js'
 import { ConversationStore } from './store/conversations.js'
 import { ToolRegistry } from './runtime/tools.js'
 import { registerBuiltins } from './runtime/builtin-tools.js'
+import { dirname, resolve } from 'node:path'
+import { DEFAULT_RULES_DIR } from './runtime/user-rules.js'
+import { DEFAULT_AGENTS_DIR } from './config/agent-files.js'
 import { presenceOf } from './runtime/user-rules.js'
 import { Runner } from './runtime/runner.js'
 import { Worker, type WorkerOptions } from './runtime/worker.js'
@@ -69,6 +72,16 @@ export interface BootOptions {
   onMcpEvent?: (e: { serverId: string; kind: string; detail?: unknown }) => void
   /** 覆盖 worker 选项（测试用：把压缩阈值调低，否则要灌几十轮才触发） */
   worker?: Partial<WorkerOptions>
+  /**
+   * 配置文件的路径（`loadConfig` 返回的那个）。
+   *
+   * 给了它，`create_rule` / `create_agent` / `configure_model` 才知道往哪写 ——
+   * 相对路径按它所在目录解析，与 rulesDir / logDir / dataDir 同一套规则。
+   *
+   * 不给也能跑：写规则与专家会落在 cwd 下的默认目录，而 `configure_model`
+   * 会说「找不到配置文件」并让人先建一个 —— 那比往一个猜的位置写要好。
+   */
+  configPath?: string | null
 }
 
 export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
@@ -108,6 +121,26 @@ export async function boot(opts: BootOptions = {}): Promise<Nucleus> {
   registerBuiltins(tools, {
     // ask_user 要能把问题写给用户 —— 没有这个入口就不注册那个工具
     conversations,
+    /**
+     * 改配置的三个工具。
+     *
+     * 路径按**配置文件所在目录**解析 —— 与 rulesDir / logDir / dataDir 同一套
+     * 规则（那条「相对路径 + cwd 不确定的进程」已经咬过三次）。
+     *
+     * 没有配置文件时仍然注册：写规则与专家只要目录，`configure_model`
+     * 自己会说「找不到配置文件」并让人先建一个。
+     */
+    configPaths: {
+      rulesDir: opts.configPath
+        ? resolve(dirname(opts.configPath), config.rulesDir ?? DEFAULT_RULES_DIR)
+        : resolve(config.rulesDir ?? DEFAULT_RULES_DIR),
+      agentsDir: opts.configPath
+        ? resolve(dirname(opts.configPath), config.agentsDir ?? DEFAULT_AGENTS_DIR)
+        : resolve(config.agentsDir ?? DEFAULT_AGENTS_DIR),
+      configPath: opts.configPath ?? null,
+    },
+    // 工具校验要拿**当前**配置，不是 boot 时的快照 —— 期间可能已经加过 agent
+    currentConfig: () => config,
     store: runs,
     delegateTargets,
     delegateLimits: {

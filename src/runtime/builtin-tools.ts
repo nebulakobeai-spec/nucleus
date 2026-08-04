@@ -2,6 +2,31 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { envelopeJsonSchema, validateEnvelope } from './envelope.js'
 import { RULE } from './rules.js'
 import type { UserRule } from './user-rules.js'
+import type { NucleusConfig } from '../config.js'
+import {
+  configureModelTool,
+  createAgentTool,
+  createRuleTool,
+  type ConfigPaths,
+} from './config-tools.js'
+import { renderAgentMd } from '../cli/agent-propose.js'
+
+/**
+ * 复用 `agent-propose` 的渲染器 —— **不写第二份**。
+ *
+ * 两份渲染同一种文件的代码必然漂：加一个 frontmatter 键时要改两处，
+ * 漏掉一处的症状是「工具生成的 agent 少了一半信息」，而且不报错。
+ * （rule 那边就踩过一次，我把树自己那份删了。）
+ */
+function renderAgentMdFor(id: string, p: Record<string, unknown>): string {
+  return renderAgentMd(id, {
+    identity: String(p['identity'] ?? ''),
+    whenToUse: String(p['whenToUse'] ?? ''),
+    permissions: (p['permissions'] as string[]) ?? [],
+    ...(p['requiredFields'] ? { requiredFields: p['requiredFields'] as string[] } : {}),
+    ...(p['resultFields'] ? { resultFields: p['resultFields'] as never } : {}),
+  } as never)
+}
 import { dirname, isAbsolute, join, normalize, relative } from 'node:path'
 import type { RunStore } from '../store/runs.js'
 import { toolError, type ToolDefinition, type ToolRegistry } from './tools.js'
@@ -488,6 +513,13 @@ export function registerBuiltins(
     indexedRules?: UserRule[]
     /** 会话追加口 —— ask_user 要用它把问题写给用户。没有就不注册那个工具 */
     conversations?: ConversationAppender
+    /**
+     * 改配置的三个工具往哪写。没给就不注册它们 ——
+     * 给一个必然写错位置的工具，比不给更糟。
+     */
+    configPaths?: ConfigPaths
+    /** 校验要拿**当前**配置，不是 boot 时的快照 —— 期间可能已经加过 agent */
+    currentConfig?: () => NucleusConfig
   },
 ): void {
   registry.register(readFileTool)
@@ -503,6 +535,15 @@ export function registerBuiltins(
   // web_search 同一个错）。
   // 只有拿到会话入口时才注册 —— 没有它这个工具无处投递
   if (opts.conversations) registry.register(askUserTool(opts.store, opts.conversations))
+  /**
+   * 改配置的三个工具。都要 `configure` 权限，而默认只有入口 agent 有 ——
+   * 所以专家看不到它们（工具不出现在它看到的定义里，那是边界层）。
+   */
+  if (opts.configPaths && opts.currentConfig) {
+    registry.register(createRuleTool(opts.configPaths, opts.currentConfig))
+    registry.register(createAgentTool(opts.configPaths, opts.currentConfig, renderAgentMdFor))
+    registry.register(configureModelTool(opts.configPaths))
+  }
   if (opts.delegateTargets.length > 0) {
     registry.register(delegateTool(opts.store, opts.delegateTargets, opts.delegateLimits))
   }

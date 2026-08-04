@@ -112,6 +112,7 @@ export async function serve(flags: Record<string, string | true>): Promise<numbe
 
   const n = await boot({
     config,
+    configPath,
     ...db,
     // 常驻进程要连 MCP —— 这是它和一次性 CLI 命令最大的区别：
     // 那些 stdio 子进程的生命周期跟着它，连一次用很久，而不是每条命令连一遍

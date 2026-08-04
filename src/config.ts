@@ -464,8 +464,15 @@ export const defaultConfig: NucleusConfig = {
       identity: `你是编排者，用户的唯一入口。
 理解需求 → 拆解 → 委派给专家 → 整合结果。
 你自己不执行具体工作，一律委派。`,
-      // 只有 delegate 与 user：物理上无法自己读写或执行
-      permissions: ['delegate', 'user'],
+      /**
+       * 只有 delegate / user / configure —— 物理上无法自己读写或执行。
+       *
+       * `configure` 让它能帮你加规则、加专家、加模型。**这一项能提权**：
+       * 它可以造一个带 execute 权限的专家再委派给它。使用者明确选择了
+       * 「全部自动，不要批准」，所以代价用可见性补 —— 每次写入都在对话里
+       * 显示完整内容、全量进日志、并给出回退命令。
+       */
+      permissions: ['delegate', 'user', 'configure'],
     },
   ],
   defaults: {

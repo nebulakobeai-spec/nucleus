@@ -158,17 +158,41 @@ describe('worker 的能力边界', () => {
    * 工具增减而变的清单 —— 后者每加一个工具都要改，改的时候没人会停下来想
    * 「这个工具该不该给编排者」，而那恰恰是唯一值得想的问题。
    */
-  it('编排者不能自己动手 —— 只能委派与提问', async () => {
+  it('编排者不能自己动手 —— 只能委派、提问、改配置', async () => {
     const spec = n.config.agents.find((a) => a.id === 'orchestrator')!
     // 授予的是**权限**而不是工具名单：没有 read/write/execute，
     // 所以任何需要它们的工具（包括以后新接的 MCP 工具）都自动不可见
-    expect(spec.permissions).toEqual(['delegate', 'user'])
+    expect(spec.permissions).toEqual(['delegate', 'user', 'configure'])
 
     const visible = n.tools.forAgent(spec.permissions!).map((t) => t.name)
-    expect(visible.toSorted()).toEqual(['ask_user', 'delegate'])
+    // 判据是「不能自己动手」，不是一个会随工具增减而变的清单
     for (const forbidden of ['write_file', 'read_file', 'write_report']) {
       expect(visible, `编排者不该看得见 ${forbidden}`).not.toContain(forbidden)
     }
+    expect(visible).toContain('delegate')
+    expect(visible).toContain('ask_user')
+  })
+
+  /**
+   * ── `configure` 能提权，这件事要写下来 ────────────────────
+   *
+   * 编排者自己没有 `write` / `execute`。但有了 `configure` 它可以造一个带那些
+   * 权限的专家、然后委派给它 —— **那等于给自己发了那些权限**。
+   *
+   * 使用者明确选择了「全部自动，不要批准」，所以运行时不拦。而一个被刻意接受的
+   * 缺口必须**有测试写着它成立**，否则将来有人读到「编排者不能自己动手」
+   * 会以为那是个封闭的保证。
+   */
+  it('configure 是一条提权路径 —— 刻意接受，不是遗漏', () => {
+    const spec = n.config.agents.find((a) => a.id === 'orchestrator')!
+    expect(spec.permissions).toContain('configure')
+
+    const visible = n.tools.forAgent(spec.permissions!).map((t) => t.name)
+    // 它能造 agent，而造出来的 agent 可以有它自己没有的权限
+    expect(visible).toContain('create_agent')
+    // 代价用可见性补：写入的完整内容会回到对话里，并全量进 logs/
+    const tool = n.tools.get('create_agent')!
+    expect(tool.requires).toEqual(['configure'])
   })
 
   it('未知 agent 的 run 落终态而非悬挂，且错误指向配置而不是代码', async () => {
