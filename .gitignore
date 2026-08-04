@@ -4,6 +4,12 @@ dist/
 .env.*
 !.env.example
 *.log
+# 常驻进程的运行日志**要进仓库** —— 那是「另一台机器上出了什么事」的唯一渠道。
+# 凭据在写盘前就被 redactText 抹掉（不是提交前），因为 git 一旦收下就永久留在
+# 历史里，即使后来删掉。已知形态（sk-*、xai-*、Bearer、JSON 里的 api_key）不会漏，
+# **没见过的格式认不出来** —— 开源之前必须自己过一遍。
+!logs/
+!logs/**
 .DS_Store
 coverage/
 diagnostics/

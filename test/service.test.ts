@@ -15,6 +15,7 @@ const base: PlistInput = {
   cli: '/Users/x/nucleus/dist/cli/index.js',
   configPath: '/Users/x/nucleus/nucleus.config.json',
   databaseUrl: null,
+  dataDir: '/Users/x/nucleus/.nucleus-data/pglite',
   logDir: '/Users/x/Library/Logs/nucleus',
   passEnv: PASS_ENV,
   env: { NUCLEUS_CONFIG: '/Users/x/nucleus/nucleus.config.json', PATH: '/usr/bin', HOME: '/Users/x' },
@@ -53,9 +54,23 @@ describe('plist 的形状', () => {
     expect(renderPlist(base)).toMatch(/<key>RunAtLoad<\/key>\s*<true\/>/)
   })
 
-  it('给了 db 就写进参数，没给就不写', () => {
-    expect(renderPlist({ ...base, databaseUrl: 'postgres://h/db' })).toMatch(/--db/)
+  it('给了 db 就写进参数，没给就写 --data', () => {
+    const pg = renderPlist({ ...base, databaseUrl: 'postgres://h/db' })
+    expect(pg).toMatch(/--db/)
+    expect(pg, '用 postgres 时不该再传 pglite 目录').not.toMatch(/--data/)
     expect(renderPlist(base)).not.toMatch(/--db/)
+  })
+
+  /**
+   * **launchd 下 cwd 是 `/`。**
+   *
+   * `resolveDb` 默认的 `.nucleus-data/pglite` 是相对路径 —— 交互式用没问题，
+   * 而在 launchd 下会变成 `/.nucleus-data/pglite`：没权限，于是服务起不来
+   * 或者在根目录建一个库。这是同一个教训的第三次（rulesDir、logDir、dataDir）。
+   */
+  it('pglite 目录写成绝对路径', () => {
+    expect(renderPlist(base)).toMatch(/<string>--data<\/string>/)
+    expect(renderPlist(base)).toMatch(/<string>\/Users\/x\/nucleus\/\.nucleus-data\/pglite<\/string>/)
   })
 })
 

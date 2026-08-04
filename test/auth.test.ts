@@ -52,6 +52,40 @@ describe('脱敏', () => {
     expect(safe).toContain('Bearer ')
   })
 
+  /**
+   * ── 「字段名 : 值」形态，引号可以是转义的 ────────────────
+   *
+   * 原先只认裸的双引号 `"api_key":"..."`。而**日志里最常见的形态不是它** ——
+   * 一段 JSON 被当成字符串写进外层 JSON 时，引号会被转义：
+   *
+   *     {"body":"{\"api_key\":\"super-secret-value\"}"}
+   *
+   * 那正是「把请求体记进日志」的样子。给落盘日志写测试时才发现这一版整个
+   * 没被抹掉 —— 而那个功能的全部意义就是「日志能交给别人看」。
+   */
+  it('转义引号、单引号、query、env 形态都认', () => {
+    const cases = [
+      JSON.stringify({ body: '{"api_key":"AAAAAAAAAAAA"}' }),
+      "{'api_key': 'AAAAAAAAAAAA'}",
+      'https://api.example.com/v1?api_key=AAAAAAAAAAAA&q=1',
+      'MY_TOKEN=AAAAAAAAAAAA',
+      '{"refresh_token":"AAAAAAAAAAAA"}',
+      'authorization: AAAAAAAAAAAA',
+    ]
+    for (const raw of cases) {
+      expect(redactText(raw), raw).not.toContain('AAAAAAAAAAAA')
+    }
+  })
+
+  /**
+   * **不能把正常内容也抹掉。** 日志的价值在于内容 ——
+   * 一个过度脱敏的日志和没有日志差不多。
+   */
+  it('普通字段不受影响', () => {
+    const raw = '{"goal":"查一下 2026 年的显卡价格","confidence":0.85,"status":"ok"}'
+    expect(redactText(raw)).toBe(raw)
+  })
+
   it('不误伤普通文本', () => {
     const text = '这是一段正常的说明，提到了 bearer token 的概念但没有实际值。'
     expect(redactText(text)).toBe(text)

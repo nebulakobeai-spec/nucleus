@@ -3,6 +3,9 @@ import { loadConfig } from '../config-file.js'
 import { isMockOnly } from '../config.js'
 import { describeCron } from '../runtime/cron.js'
 import { ScheduleStore } from '../store/schedules.js'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { FileLog } from '../runtime/file-log.js'
+import { TeeEventSink } from '../runtime/events.js'
 import { c, heading, ICON, line, resolveDb, strFlag } from './ui.js'
 import { redactText } from '../auth/credentials.js'
 
@@ -37,17 +40,70 @@ function redactUrl(url: string): string {
   return redactText(url.replace(/\/\/([^:@/]+):[^@]*@/, '//$1:***@'))
 }
 
+/**
+ * 把一个 run 的完整 transcript 写进日志。
+ *
+ * 过 `redactText`（FileLog 里做）。transcript 含完整的 prompt 与模型回复 ——
+ * 那是「模型为什么那么做」唯一的证据，也是这份日志里唯一真的会包含
+ * 对话内容的地方。
+ */
+async function dumpTranscripts(
+  n: Awaited<ReturnType<typeof boot>>,
+  runId: string,
+  log: FileLog,
+): Promise<void> {
+  const r = await n.db.query<Record<string, unknown>>(
+    `select t.*, a.attempt_no from transcripts t
+       join run_attempts a on a.id = t.run_attempt_id
+      where a.run_id = $1 order by t.id`,
+    [runId],
+  )
+  if (r.rows.length === 0) return
+  log.write('transcripts', { run: runId, count: r.rows.length, rows: r.rows })
+}
+
 export async function serve(flags: Record<string, string | true>): Promise<number> {
   const { config, path: configPath } = await loadConfig(strFlag(flags, 'config'))
+
+  /**
+   * **数据目录也必须是绝对路径。**
+   *
+   * `resolveDb` 的默认值是相对的（`.nucleus-data/pglite`），交互式用没问题 ——
+   * 而 launchd 下 cwd 是 `/`，那会变成 `/.nucleus-data/pglite`：没权限，
+   * 于是服务起不来或者在根目录建一个库。和 rulesDir、logDir 是同一个教训，
+   * 这是第三次了 —— 「相对路径 + 一个 cwd 不确定的进程」这个组合每次都咬人。
+   *
+   * 相对路径按**配置文件所在目录**解析 —— 与 rulesDir 同一套规则。
+   */
+  const raw = resolveDb(flags)
+  const db = {
+    ...raw,
+    dataDir: isAbsolute(raw.dataDir)
+      ? raw.dataDir
+      : resolve(configPath ? dirname(configPath) : process.cwd(), raw.dataDir),
+  }
+
+  /**
+   * 日志目录：`--log-dir` > 配置文件所在目录下的 `logs/`。
+   *
+   * 同上：launchd 下相对路径会写到 `/logs`（大概率没权限，于是日志静默为空）。
+   */
+  const logDir = strFlag(flags, 'log-dir')
+    ? resolve(strFlag(flags, 'log-dir')!)
+    : join(configPath ? dirname(configPath) : process.cwd(), 'logs')
+  const log = new FileLog({
+    dir: logDir,
+    keepDays: Number(strFlag(flags, 'log-keep-days') ?? 14),
+    maxBytesPerDay: Number(strFlag(flags, 'log-max-mb') ?? 32) * 1024 * 1024,
+  })
+
   const n = await boot({
     config,
-    ...resolveDb(flags),
+    ...db,
     // 常驻进程要连 MCP —— 这是它和一次性 CLI 命令最大的区别：
     // 那些 stdio 子进程的生命周期跟着它，连一次用很久，而不是每条命令连一遍
     skipMcp: flags['no-mcp'] === true,
   })
-
-  const db = resolveDb(flags)
 
   try {
     heading('nucleus serve')
@@ -55,6 +111,7 @@ export async function serve(flags: Record<string, string | true>): Promise<numbe
     line(`${c.gray('配置')}    ${configPath ?? c.yellow('（内置默认，没找到配置文件）')}`)
     line(`${c.gray('模型链')}  ${n.config.defaults.modelChain.join(' → ')}`)
     line(`${c.gray('数据库')}  ${db.databaseUrl ? redactUrl(db.databaseUrl) : `pglite ${db.dataDir}`}`)
+    line(`${c.gray('日志')}    ${log.path}`)
 
     /**
      * **pglite 撑不住常驻进程。**
@@ -139,6 +196,33 @@ export async function serve(flags: Record<string, string | true>): Promise<numbe
     process.on('SIGINT', () => stop('SIGINT'))
     process.on('SIGTERM', () => stop('SIGTERM'))
 
+    /**
+     * **全量事件流写进日志文件。**
+     *
+     * `TeeEventSink.subscribe()` 本来就是为「除了落库还想看一眼」准备的接入点
+     * （CLI 的过程树就用它），所以这里只是再订一份写文件，不改任何现有路径。
+     *
+     * 凭据在**写盘前**就被 `redactText` 抹掉 —— 不是提交前抹。一旦落到磁盘，
+     * 它就可能被别的东西带走（编辑器备份、一次手滑的 `git add -A`），
+     * 而 git 一旦收下就永久留在历史里。
+     */
+    const tee = n.events instanceof TeeEventSink ? n.events : null
+    if (tee) {
+      tee.subscribe((e) => {
+        log.write(e.kind, { run: e.runId, attempt: e.attemptId, payload: e.payload })
+      })
+    } else {
+      line(`${ICON.warn} ${c.yellow('事件流拿不到订阅口，日志里只会有 attempt 收尾与定时触发')}`)
+    }
+
+    log.write('serve.started', {
+      worker: n.config.runtime.workerId,
+      configPath,
+      db: db.databaseUrl ? 'postgres' : `pglite ${db.dataDir}`,
+      models: n.config.defaults.modelChain,
+      schedules: enabled.map((s) => ({ name: s.name, cron: s.cron, tz: s.timezone })),
+    })
+
     let lastIdleLog = 0
     await n.worker.run({
       onScheduleFire: (info) => {
@@ -154,6 +238,21 @@ export async function serve(flags: Record<string, string | true>): Promise<numbe
           `${ICON.branch} ${c.gray(i.runId.slice(0, 8))} ${i.status}` +
             (i.errorCode ? ` ${c.gray(i.errorCode)}` : ''),
         )
+        /**
+         * **失败时把那个 run 的 transcript 也写进日志。**
+         *
+         * 事件流能回答「发生了什么」，回答不了「模型当时看到了什么」——
+         * 而后者往往才是失败的原因（历史被裁掉了、约束块被砍半了、
+         * 工具描述里有歧义）。
+         *
+         * 只在失败时写：成功的 run 也 dump 会让仓库无限膨胀，而 git 历史是永久的。
+         * `void` 是刻意的 —— 日志写不出来不该拖住 worker 循环。
+         */
+        if (i.status === 'failed' && !i.errorCode?.startsWith('provider.')) {
+          void dumpTranscripts(n, i.runId, log).catch(() => {
+            /* 日志失败不影响运行 */
+          })
+        }
       },
       onIdle: () => {
         /**

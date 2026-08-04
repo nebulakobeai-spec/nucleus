@@ -287,5 +287,24 @@ export function redactText(text: string): string {
     .replace(/\b(xai-[A-Za-z0-9_-]{8,})/g, (m) => redact(m))
     .replace(/\b([A-Fa-f0-9]{32}\.[A-Za-z0-9]{16})\b/g, (m) => redact(m)) // z.ai 形态
     .replace(/(Bearer\s+)([A-Za-z0-9._-]{12,})/gi, (_, p: string, s: string) => p + redact(s))
-    .replace(/("(?:api_?key|token|secret|password)"\s*:\s*")([^"]{6,})(")/gi, (_, a: string, s: string, b: string) => a + redact(s) + b)
+    /**
+     * 「字段名 : 值」形态。**引号可以是转义的、也可以是单引号。**
+     *
+     * 原先只认裸的双引号 `"api_key":"..."`。而日志里最常见的形态恰恰不是它 ——
+     * 一段 JSON 被当成字符串写进外层 JSON 时，引号会被转义：
+     *
+     *     {"body":"{\"api_key\":\"super-secret-value\"}"}   ← 原先漏掉
+     *
+     * 而这正是「把请求体记进日志」的样子。实测就是这么发现的：
+     * 给落盘日志写测试时，转义那一版整个没被抹掉。
+     *
+     * 单引号也认：Python 的 dict repr、JS 的对象字面量都长那样。
+     */
+    .replace(
+      // `(?!Bearer|Basic|Token)`：认证方案那个词本身要留着 —— 它上面那条规则
+      // 已经把 Bearer 后面的值抹了，这里再匹配会把「Bearer」四个字也吃掉，
+      // 而那句话正是「这是个什么头」的唯一线索
+      /(\\?["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization)\\?["']?\s*[:=]\s*\\?["']?)(?!(?:Bearer|Basic|Token)\b)([A-Za-z0-9._~+/=-]{6,})/gi,
+      (_, a: string, sec: string) => a + redact(sec),
+    )
 }

@@ -45,6 +45,8 @@ export interface PlistInput {
   cli: string
   configPath: string | null
   databaseUrl: string | null
+  /** pglite 数据目录（绝对）。用真 postgres 时为 null */
+  dataDir: string | null
   logDir: string
   /** 要透传的环境变量名 —— launchd 不读 shell 配置，缺一个都会静默变成 run 失败 */
   passEnv: string[]
@@ -59,6 +61,8 @@ export function renderPlist(input: PlistInput): string {
   const args = [input.node, input.cli, 'serve']
   if (input.configPath) args.push('--config', input.configPath)
   if (input.databaseUrl) args.push('--db', input.databaseUrl)
+  // pglite 的数据目录也要绝对 —— launchd 下 cwd 是 `/`，相对路径会指向根目录
+  else if (input.dataDir) args.push('--data', input.dataDir)
 
   const envEntries = input.passEnv
     .filter((k) => input.env[k] !== undefined)
@@ -143,6 +147,16 @@ export async function installService(flags: Record<string, string | true>): Prom
     return 1
   }
 
+  /**
+   * launchd 的 stdout/stderr 与 nucleus 自己的结构化日志是**两回事**：
+   *
+   *  · launchd 的两个文件收的是启动报告与崩溃栈 —— 进程起不来时唯一的线索，
+   *    所以它们必须在仓库**外面**（起不来的时候仓库里什么都不会有）
+   *  · `logs/*.jsonl` 是运行时事件流，由 serve 自己写进仓库，用来交给别人看
+   *
+   * 混成一个的话，一次「配置写错了导致起不来」的崩溃栈会被提交进仓库，
+   * 而崩溃栈里常常带着完整的环境与路径。
+   */
   const logDir = strFlag(flags, 'log-dir') ?? join(homedir(), 'Library', 'Logs', 'nucleus')
   const plistPath = join(homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`)
 
@@ -165,6 +179,7 @@ export async function installService(flags: Record<string, string | true>): Prom
     cli,
     configPath: abs,
     databaseUrl: strFlag(flags, 'db') ?? process.env['NUCLEUS_DATABASE_URL'] ?? null,
+    dataDir: abs ? join(dirname(abs), '.nucleus-data', 'pglite') : null,
     logDir,
     passEnv: PASS_ENV,
     env: process.env,
@@ -176,7 +191,8 @@ export async function installService(flags: Record<string, string | true>): Prom
 
   heading('已生成 launchd 配置')
   line(`${c.gray('plist')}  ${plistPath}`)
-  line(`${c.gray('日志')}   ${join(logDir, 'serve.log')}`)
+  line(`${c.gray('启动/崩溃')} ${join(logDir, 'serve.log')} ${c.gray('（仓库外 —— 起不来时唯一的线索）')}`)
+  line(`${c.gray('事件流')}   ${abs ? join(dirname(abs), 'logs') : '（要 --config 才知道写哪）'} ${c.gray('（进仓库，交给别人看）')}`)
   line(`${c.gray('配置')}   ${abs ?? c.yellow('（没有 —— 服务会回落到内置默认，只有 mock 模型）')}`)
   line()
 

@@ -239,6 +239,8 @@ const VALUE_FLAGS = new Set([
   'max-tokens',
   'since',
   'log-dir',
+  'log-keep-days',
+  'log-max-mb',
   'timezone',
   'tz',
   'value',
