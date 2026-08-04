@@ -802,7 +802,70 @@ worker 之后才发现「还得等」。原先 `armWake` 只改 status 不清 `e
 
 ---
 
-## E. cron ✅ 已完成
+## E. cron ✅ 已完成（**曾经是假的完成 —— 见 E0**）
+
+### E0. 常驻进程 `nucleus serve` ✅ 已完成
+
+**cron 之前标着「已完成」而实际上跑不起来。**
+
+`Worker.run()`（长驻循环）一直在 `worker.ts` 里，**零调用者** —— 连测试都没有。
+而 `tick()` 里已经会触发到点的计划。也就是说整套机制是通的，只差有人调 `run()`。
+
+在此之前唯一驱动 worker 的地方是 `ask()` 里的 `drain()` —— **你打一句话才推进
+一次**。所以「每天 9:00 跑一次调研」这条计划，只在你恰好 9:00 在打字时才会发生。
+当初的端到端验证是在一条 CLI 命令里跑的，那条命令自己 drain 了，所以看起来是通的。
+
+实测（`nucleus serve` 跑着，没有任何别的命令）：
+
+    ✓ 定时触发 every-min run 498c25d6
+    ⎿ 498c25d6 failed config.no_real_model
+
+`schedule history` 也确认了那次触发落库。（run 失败是对的 —— 那份配置只有 mock。）
+
+#### 一句原本是假的建议
+
+`schedule add` 之后打印的是「要有 worker 在跑才会执行 —— **开一个 nucleus chat
+放着即可**」。空闲的 chat 不推进任何东西。所以那句建议会让人加完计划、开着一个
+chat、然后奇怪为什么什么都没发生 —— 而它看起来像已经照做了。
+
+#### pglite 撑不住常驻进程
+
+pglite 自己的 README：**「PGlite is single user/connection.」** 它是 postgres 的
+单用户模式编译成 WASM，而且**没有锁文件** —— 两个进程开同一个目录不会报错，
+行为未定义。
+
+实测就撞上了：serve 在跑时另开一条 `schedule history`，同一条命令里统计说
+「2 次跑失败」而表里只列出 1 行 —— 两次查询看到了不同的快照。
+
+**「大部分能用」是这里最坏的失败模式。** serve 启动时会显著警告，并给出两条路：
+用真 postgres，或者接受「serve 跑着时不碰别的 nucleus 命令」。
+
+#### `--install`：launchd 开机自启
+
+生成 plist 但**不自动 load** —— 装一个开机自启的常驻进程是对机器的持久改动，
+而这条命令跑在一个「加个规则」都很随意的 CLI 里。写文件可逆且能先打开看一眼。
+
+plist 里三项都是想清楚的：
+
+- `KeepAlive.SuccessfulExit: false` —— 只在**异常**退出时拉起。写 `KeepAlive: true`
+  的话你 Ctrl-C 停掉它会被立刻拉回来，而你以为自己停掉了。
+- 日志有落点 —— 不给的话进 `/dev/null`，「有没有在跑」只能靠猜。
+- `EnvironmentVariables` —— **launchd 不读 `~/.zshrc`**。不显式传的话服务会起来、
+  连不上模型、然后每个 run 都失败，而错误指向 provider 不指向环境变量。
+
+`PASS_ENV` 是**白名单**，有一条测试禁止里面出现任何像密钥的名字：plist 是明文且
+躺在 `~/Library/LaunchAgents/`，而这台机器的 shell 里就有 `OPENAI_API_KEY`
+和一个 JWT。凭据该走 keychain，不该顺路复制进 launchd 配置。
+
+#### 还没做：远程对话
+
+使用者的原话是「以后我会远程跟他进行对话和布置任务」。那需要 HTTP API ——
+而 `api: { bind, port }` 在配置里**声明了、没有任何实现**（又一处没接线）。
+
+而且它和上面 pglite 那条是同一个问题的两面：只要 CLI 自己开库，
+就必须是真 postgres；改成「只有 daemon 碰库，CLI 是客户端」则两个问题一起解决。
+那是下一步。
+
 
 18. ~~**`schedules` 表 + worker tick 里的 `#fireDueSchedules()`**~~ ✅ 已完成
 

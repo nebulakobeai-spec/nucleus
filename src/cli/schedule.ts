@@ -20,9 +20,14 @@ import { c, heading, ICON, line, strFlag, table, resolveDb } from './ui.js'
  *     除了那张表以外毫无痕迹 —— 只能靠「没看到产出」发现，太晚
  *  3. **为什么没跑？** 跳过的原因（重入 / 已触发过 / 出错）写在同一行
  *
- * 定时任务的执行不需要额外进程：worker tick 里就地触发。所以只要有一个
- * `nucleus chat` 或长驻 worker 在跑，计划就会到点执行。**这条必须说清楚**
- * —— 否则你会加了计划然后奇怪为什么什么都没发生。
+ * 定时任务的执行不需要**单独的调度进程**：worker tick 里就地触发。
+ * 但**必须有 worker 在跑** —— 那就是 `nucleus serve`。
+ *
+ * 这里原先写的是「只要有一个 `nucleus chat` 或长驻 worker 在跑」，而
+ * ① 空闲的 chat 不推进任何东西（只有 `ask()` 里的 `drain()` 驱动 worker，
+ *    也就是你打一句话才推进一次）；② 「长驻 worker」当时**不存在**。
+ * 于是这个功能标着完成而实际不可能发生：一条「每天 9:00」的计划，
+ * 只在你恰好 9:00 在打字时才会跑。
  */
 
 /**
@@ -194,7 +199,16 @@ function printOne(s: Schedule): void {
   else line(c.gray('  停机期间错过的不补（--catch-up 可开）'))
   line()
   // 最常见的困惑：加了但什么都没发生
-  line(c.gray('要有 worker 在跑才会执行 —— 开一个 nucleus chat 放着即可。'))
+  /**
+   * 这里原先写的是「开一个 `nucleus chat` 放着即可」——**那是假的**。
+   *
+   * 空闲的 chat 不会推进任何东西：唯一驱动 worker 的地方是 `ask()` 里的
+   * `drain()`，也就是**你打一句话才推进一次**。所以那句建议会让人加完计划、
+   * 开着一个 chat、然后奇怪为什么什么都没发生 ——
+   * 而它看起来像已经照做了。
+   */
+  line(c.gray('要有 worker 在跑才会执行：'))
+  line(`  ${c.cyan('nucleus serve')} ${c.gray('—— 常驻进程，到点自己跑')}`)
   // 接下来的两次，让人自己确认表达式的意思对不对
   const preview: string[] = []
   let cursor = s.nextFireAt

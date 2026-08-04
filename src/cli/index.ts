@@ -16,6 +16,8 @@ import { providersCmd, providersProbe } from './providers.js'
 import { rulesCmd } from './rules.js'
 import { ruleNew } from './rule-new.js'
 import { ruleRm } from './rule-rm.js'
+import { serve } from './serve.js'
+import { installService } from './service.js'
 import { ScheduleStore } from '../store/schedules.js'
 import { findStuckRuns, findUnknownToolOutcomes } from '../runtime/stuck.js'
 import { convCompact, convList, convSeed, convShow, convSummary } from './conv.js'
@@ -356,7 +358,7 @@ async function doctor(flags: Record<string, string | true>): Promise<number> {
             `${enabled.length}/${scheds.length} 启用` +
             (next ? ` · 最近一次 ${next.toISOString().slice(0, 16).replace('T', ' ')}Z` : '') +
             // 最常见的困惑：加了计划但什么都没发生
-            ' · 需要有 worker 在跑才会执行',
+            ' · 需要 nucleus serve 在跑才会执行',
         })
       }
     } catch {
@@ -662,6 +664,8 @@ ${c.bold('agent 与规则')}
   agent map                   能力边界矩阵：谁能用哪些工具
   agent new <id>              生成专家定义骨架（含写法说明）
   agent try <id> [任务]        只跑这一个专家：--n 重复、--compare 与旧版并排
+  serve                       **常驻进程** —— 定时任务到点执行、重试自己推进
+  serve --install             生成 launchd 配置（开机自启）；不自动 load
   rules                       规则清单（边界 / 检查 / 提醒）与遵守率
   rule add  <id> "<要求>"      **加一条** —— 说一句话，模型判它属于哪一层
   rule edit <id> "<改什么>"    **改一条** —— 没提到的原样保留，写之前给差异
@@ -902,6 +906,11 @@ export async function main(argv: string[]): Promise<number> {
       if (rest[0] === 'probe') return providersProbe(rest.slice(1), flags)
       return providersCmd(rest, flags)
     }
+    case 'serve':
+      // --install 生成 launchd plist 而不是真的跑起来
+      if (flags['install'] === true) return installService(flags)
+      return serve(flags)
+
     case 'rule':
     case 'rules': {
       /**
