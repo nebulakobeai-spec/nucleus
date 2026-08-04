@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname, isAbsolute, resolve } from 'node:path'
 import { defaultConfig, type NucleusConfig } from './config.js'
 import { resolveModels } from './providers/registry.js'
 import { DEFAULT_RULES_DIR, loadRuleFiles, validateRules } from './runtime/user-rules.js'
@@ -104,7 +104,7 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   }
   config.models = resolved.models
 
-  const merged = mergeAgentFiles(config, agentsDir(config))
+  const merged = mergeAgentFiles(config, agentsDir(config, path))
 
   /**
    * `rules/*.md` —— 用户自己写的规则，一条同时携带三层。
@@ -114,7 +114,7 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
    * 校验放在这里而不是运行时：引用不存在的 agent / 工具**不会报错**，
    * 只会让规则静默失效 —— 而一条看起来存在、实际不生效的规则比没有更糟。
    */
-  const loadedRules = loadRuleFiles(rulesDir(merged.config))
+  const loadedRules = loadRuleFiles(rulesDir(merged.config, path))
   const ruleProblems = [
     ...loadedRules.problems,
     ...validateRules(loadedRules.rules, {
@@ -143,12 +143,47 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   }
 }
 
-function rulesDir(cfg: NucleusConfig): string {
-  return process.env['NUCLEUS_RULES_DIR'] ?? cfg.rulesDir ?? DEFAULT_RULES_DIR
+/**
+ * `rules/` 与 `agents/` 在哪。
+ *
+ * ── 相对路径要按**配置文件所在目录**解析，不是 cwd ─────────────
+ *
+ * 配置文件是靠向上搜索（或 `NUCLEUS_CONFIG`）找到的，可能离 cwd 很远。
+ * 而里面的 `rulesDir: "rules"` 原先按 cwd 解析 —— 于是：
+ *
+ *     cd /tmp/elsewhere && nucleus rules      # 「还没有你自己写的规则」
+ *
+ * 项目里明明有 18 条。**规则静默消失，什么都不报。** 更糟的是
+ * `rule add` 会在 `/tmp/elsewhere/rules/` 写出一个谁都不会去看的文件，
+ * 然后提示「看一眼 nucleus rules」。
+ *
+ * 按配置文件解析是通行做法（tsconfig、eslint 都是这样），理由也一样：
+ * 配置里的路径描述的是**项目结构**，而 cwd 只是你恰好站在哪。
+ *
+ * 环境变量与 `--dir` 不套这条 —— 那两个是**当场**给的，
+ * 按 cwd 解析才符合直觉（`--dir ./tmp-rules` 就该是当前目录下那个）。
+ */
+export function resolveConfigDir(
+  dir: string,
+  configPath: string | null,
+  /** 来自环境变量或命令行的话按 cwd —— 它们是当场给的 */
+  fromCwd = false,
+): string {
+  if (isAbsolute(dir)) return dir
+  if (fromCwd || !configPath) return resolve(dir)
+  return resolve(dirname(configPath), dir)
 }
 
-function agentsDir(cfg: NucleusConfig): string {
-  return process.env['NUCLEUS_AGENTS_DIR'] ?? cfg.agentsDir ?? DEFAULT_AGENTS_DIR
+function rulesDir(cfg: NucleusConfig, configPath: string | null = null): string {
+  const env = process.env['NUCLEUS_RULES_DIR']
+  if (env) return resolveConfigDir(env, configPath, true)
+  return resolveConfigDir(cfg.rulesDir ?? DEFAULT_RULES_DIR, configPath)
+}
+
+function agentsDir(cfg: NucleusConfig, configPath: string | null = null): string {
+  const env = process.env['NUCLEUS_AGENTS_DIR']
+  if (env) return resolveConfigDir(env, configPath, true)
+  return resolveConfigDir(cfg.agentsDir ?? DEFAULT_AGENTS_DIR, configPath)
 }
 
 /**

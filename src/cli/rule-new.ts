@@ -1,8 +1,8 @@
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { boot } from '../boot.js'
-import { loadConfig } from '../config-file.js'
+import { loadConfig, resolveConfigDir } from '../config-file.js'
 import {
   coverageOf,
   DEFAULT_RULES_DIR,
@@ -56,6 +56,26 @@ import {
  * 每轮成本多少。判不了的只有一件 —— **这个检查真的对应你那句要求吗** ——
  * 那一条会显式说出来，因为形式合法但不相干的检查比没有检查更糟。
  */
+
+/**
+ * 写规则文件 —— **先建目录**。
+ *
+ * ── 为什么这是个真 bug 而不是小事 ──────────────────────
+ *
+ * 原先直接 `writeFile`。而 `rules/` 是**按需才有**的目录（仓库里没有它，
+ * 只有 `examples/rules/`）—— 所以第一条规则的写入必然 ENOENT。
+ *
+ * 也就是说：向导一路问完、判层、校验、给你看完整内容、你按了 Y，
+ * **最后一步炸掉**。而炸的原因和规则本身毫无关系。
+ * 实测就是这么丢的：`nucleus rules` 说「还没有你自己写的规则」，
+ * 而使用者记得自己按过 Y。
+ *
+ * `recursive: true` 顺带处理 `--dir some/nested/path`。
+ */
+export async function writeRuleFile(path: string, text: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, text, 'utf8')
+}
 
 /**
  * 三种操作，三个命令。
@@ -135,9 +155,10 @@ async function describePath(
    *
    * 所以配置要在这一步之前读 —— 它不需要 boot，很便宜。
    */
-  const { config } = await loadConfig(strFlag(flags, 'config'))
-  const dir = strFlag(flags, 'dir') ?? config.rulesDir ?? DEFAULT_RULES_DIR
-  const path = join(resolve(dir), `${id}.md`)
+  const { config, path: configPath } = await loadConfig(strFlag(flags, 'config'))
+  const cliDir = strFlag(flags, 'dir')
+  const dir = resolveConfigDir(cliDir ?? config.rulesDir ?? DEFAULT_RULES_DIR, configPath, Boolean(cliDir))
+  const path = join(dir, `${id}.md`)
 
   /**
    * **意图与现实不符 → 报出来，别猜。**
@@ -183,7 +204,7 @@ async function describePath(
       line()
       line('  两条路：')
       line(c.gray('  · 配一个真实模型（nucleus model config），然后重跑这条命令'))
-      line(c.gray(`  · 直接写文件 —— ${join(resolve(dir), `${id}.md`)}`))
+      line(c.gray(`  · 直接写文件 —— ${path}`))
       line(c.gray('    照着 examples/rules/*.md，frontmatter 加一段正文就行'))
       line(c.gray('    写完 nucleus rules 会告诉你它落在哪几层、每轮花多少'))
       return 1
@@ -383,7 +404,7 @@ async function describePath(
       line()
     }
     if (await confirm(`${existing !== null ? '覆盖' : '写入'} ${path}？`)) {
-      await writeFile(path, text, 'utf8')
+      await writeRuleFile(path, text)
       line(`${ICON.ok} 已${existing !== null ? '更新' : '写入'} ${path}`)
       line(c.gray('  看一眼：nucleus rules'))
       return 0

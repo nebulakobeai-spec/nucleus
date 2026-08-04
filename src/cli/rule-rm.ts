@@ -1,8 +1,8 @@
 import { unlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { boot } from '../boot.js'
-import { loadConfig } from '../config-file.js'
+import { loadConfig, resolveConfigDir } from '../config-file.js'
 import {
   coverageOf,
   DEFAULT_RULES_DIR,
@@ -51,9 +51,10 @@ export async function ruleRm(
 
   // 与 rule add 同一套来源顺序：--dir > 配置的 rulesDir > 默认。
   // 漏掉中间一层的后果是「删不掉」——它去删的是另一个目录里不存在的文件。
-  const { config } = await loadConfig(strFlag(flags, 'config'))
-  const dir = strFlag(flags, 'dir') ?? config.rulesDir ?? DEFAULT_RULES_DIR
-  const path = join(resolve(dir), `${id}.md`)
+  const { config, path: configPath } = await loadConfig(strFlag(flags, 'config'))
+  const cliDir = strFlag(flags, 'dir')
+  const dir = resolveConfigDir(cliDir ?? config.rulesDir ?? DEFAULT_RULES_DIR, configPath, Boolean(cliDir))
+  const path = join(dir, `${id}.md`)
   if (!existsSync(path)) {
     line(c.red(`没有这条规则：${path}`))
     line(c.gray('  看有哪些：nucleus rules'))
