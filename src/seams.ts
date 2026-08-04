@@ -132,7 +132,3 @@ export interface Deps {
 }
 
 export const systemDeps: Deps = { clock: systemClock, ids: systemIds }
-
-export function testDeps(overrides: Partial<Deps> = {}): Deps {
-  return { clock: new FakeClock(), ids: new FakeIds(), ...overrides }
-}

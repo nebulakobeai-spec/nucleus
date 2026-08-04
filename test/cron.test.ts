@@ -6,7 +6,6 @@ import {
   matches,
   nextFireAt,
   parseCron,
-  plannedBetween,
   prevFireAt,
   wallClock,
 } from '../src/runtime/cron.js'
@@ -141,40 +140,6 @@ describe('nextFireAt', () => {
   })
 })
 
-describe('plannedBetween（停机补偿）', () => {
-  it('列出区间内所有**计划**时刻', () => {
-    const list = plannedBetween(
-      '0 * * * *',
-      'UTC',
-      utc('2026-08-01T00:00:00Z'),
-      utc('2026-08-01T03:00:00Z'),
-      10,
-    )
-    expect(list.map((d) => d.toISOString())).toEqual([
-      '2026-08-01T01:00:00.000Z',
-      '2026-08-01T02:00:00.000Z',
-      '2026-08-01T03:00:00.000Z',
-    ])
-  })
-
-  it('受 max 约束 —— 关机一个月不该炸出 720 个 run', () => {
-    const list = plannedBetween(
-      '0 * * * *',
-      'UTC',
-      utc('2026-07-01T00:00:00Z'),
-      utc('2026-08-01T00:00:00Z'),
-      3,
-    )
-    expect(list).toHaveLength(3)
-  })
-
-  it('区间内没有计划点就返回空', () => {
-    expect(
-      plannedBetween('0 0 1 1 *', 'UTC', utc('2026-08-01T00:00:00Z'), utc('2026-08-02T00:00:00Z'), 5),
-    ).toEqual([])
-  })
-})
-
 describe('describeCron', () => {
   /**
    * 这个函数存在的唯一理由是「读一遍确认表达式对不对」。
@@ -244,17 +209,23 @@ describe('latestPlanned（补偿取最近的 N 个）', () => {
    * 这是 plannedBetween 做不到的事：正向生成受 max 卡在前端，
    * 拿到的是最早的 N 个。补跑日报你要昨天那份，不是三天前那份。
    */
+  /**
+   * **这条是 latestPlanned 存在的全部理由。**
+   *
+   * 补跑要的是「最近的 N 个」，而正向生成（从 from 往后逐个算、够 N 个就停）
+   * 拿到的是**开头**的 N 个 —— 上例会得到 02:00 与 03:00，也就是停机期间
+   * 最早的两次，而不是最该补的最近两次。停机越久，错得越远。
+   *
+   * 第一版就是正向生成的（`plannedBetween`），发现之后写了反向的
+   * `prevFireAt` / `latestPlanned`。`plannedBetween` 已删 —— 它只剩这条测试
+   * 在用，而「为了一条测试留着生产代码」正是要清掉的形状。
+   */
   it('取区间末尾的 N 个，不是开头的 N 个', () => {
     const from = utc('2026-08-01T01:00:00Z')
     const to = utc('2026-08-01T06:30:00Z')
     expect(latestPlanned('0 * * * *', 'UTC', from, to, 2).map((d) => d.toISOString())).toEqual([
       '2026-08-01T05:00:00.000Z',
       '2026-08-01T06:00:00.000Z',
-    ])
-    // 对比：正向生成拿到的是开头两个
-    expect(plannedBetween('0 * * * *', 'UTC', from, to, 2).map((d) => d.toISOString())).toEqual([
-      '2026-08-01T02:00:00.000Z',
-      '2026-08-01T03:00:00.000Z',
     ])
   })
 

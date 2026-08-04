@@ -108,10 +108,6 @@ export const PERMISSION_SPECS: readonly PermissionSpec[] = [
 
 const BY_ID = new Map(PERMISSION_SPECS.map((p) => [p.id, p]))
 
-export function permissionSpec(id: string): PermissionSpec | null {
-  return BY_ID.get(id as Permission) ?? null
-}
-
 export function isPermission(s: string): s is Permission {
   return BY_ID.has(s as Permission)
 }

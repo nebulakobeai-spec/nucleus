@@ -1,4 +1,5 @@
 import { NucleusError } from '../errors.js'
+import { TERMINAL_RUN_SQL } from '../domain.js'
 import type { Db } from '../db/types.js'
 import type { Deps } from '../seams.js'
 import { RunStore, StaleFenceError } from '../store/runs.js'
@@ -330,7 +331,7 @@ export class Worker {
     const pending = await this.db.query<{ id: string }>(
       `select id from runs
         where parent_run_id = $1
-          and status not in ('succeeded','failed','cancelled')`,
+          and status not in ${TERMINAL_RUN_SQL}`,
       [runId],
     )
     if (pending.rowCount === 0) return false
@@ -465,7 +466,7 @@ export class Worker {
       error_code: string | null
     }>(
       `select agent_id, status, result, error_code from runs
-        where parent_run_id = $1 and status in ('succeeded','failed','cancelled')
+        where parent_run_id = $1 and status in ${TERMINAL_RUN_SQL}
         order by created_at`,
       [runId],
     )

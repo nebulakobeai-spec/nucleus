@@ -47,14 +47,6 @@ export interface ConversationSummary {
   context: string
 }
 
-export const EMPTY_SUMMARY: ConversationSummary = {
-  constraints: [],
-  decisions: [],
-  open: [],
-  artifacts: [],
-  context: '',
-}
-
 /** 给模型的产出 schema。用 function calling 而不是让它吐 markdown —— 好校验。 */
 export function summarySchema(): Record<string, unknown> {
   return {

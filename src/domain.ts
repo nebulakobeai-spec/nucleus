@@ -46,9 +46,21 @@ export const TERMINAL_RUN_STATUSES = [
   'cancelled',
 ] as const satisfies readonly RunStatus[]
 
-export function isTerminalRun(s: RunStatus): boolean {
-  return (TERMINAL_RUN_STATUSES as readonly string[]).includes(s)
-}
+/**
+ * 终态清单的 SQL 形式：`('succeeded','failed','cancelled')`。
+ *
+ * ── 为什么要有这个 ────────────────────────────────────
+ *
+ * 这份清单原先被**硬编码在 5 处 SQL 里**（stuck.ts、reconciler.ts、
+ * worker.ts ×2、以及子 run 汇总），而 `TERMINAL_RUN_STATUSES` 本身
+ * 除了声明之外没有任何地方引用 —— 一个「声明了但没接线」的常量。
+ *
+ * 加一个终态时要找齐那 5 处，而**漏一处不会报错**：那个 run 会被永远
+ * 当成「还在跑」（或者反过来，被当成已结束而不再推进）。
+ *
+ * 拼进 SQL 是安全的：值来自这个 as const 数组，不是外部输入。
+ */
+export const TERMINAL_RUN_SQL = `(${TERMINAL_RUN_STATUSES.map((s) => `'${s}'`).join(',')})`
 
 /**
  * attempt 终态 → 逻辑 run 状态的默认映射。

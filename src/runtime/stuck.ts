@@ -1,4 +1,5 @@
 import type { Db } from '../db/types.js'
+import { TERMINAL_RUN_SQL } from '../domain.js'
 
 /**
  * 「有 run 挂住了吗」。
@@ -37,7 +38,7 @@ export interface StuckRun {
   lastErrorCode: string | null
 }
 
-const TERMINAL = `('succeeded','failed','cancelled')`
+
 
 /**
  * 找出挂住的 run。
@@ -64,7 +65,7 @@ export async function findStuckRuns(db: Db, rootRunId?: string): Promise<StuckRu
             (select a.error_code from run_attempts a
               where a.run_id = r.id order by a.attempt_no desc limit 1) as last_error_code
        from runs r
-      where r.status not in ${TERMINAL}
+      where r.status not in ${TERMINAL_RUN_SQL}
         ${scope}
         -- 队列里有它（available_at 在未来也算 —— 那是已排好的重试）。
         -- run_queue 的键是 (run_id, attempt_no)，没有 run_attempt_id 这一列
@@ -74,7 +75,7 @@ export async function findStuckRuns(db: Db, rootRunId?: string): Promise<StuckRu
         -- 或者它在等还活着的子 run
         and not exists (
           select 1 from runs c
-           where c.parent_run_id = r.id and c.status not in ${TERMINAL}
+           where c.parent_run_id = r.id and c.status not in ${TERMINAL_RUN_SQL}
         )
       order by r.created_at`,
     params,
@@ -113,7 +114,7 @@ export async function findUnknownToolOutcomes(
        join runs r on r.id = a.run_id
       where i.outcome is null
         -- run 还在跑时，工具调用正处于「意图已写、结果未回」是正常的
-        and r.status in ${TERMINAL}
+        and r.status in ${TERMINAL_RUN_SQL}
         ${scope}`,
     params,
   )

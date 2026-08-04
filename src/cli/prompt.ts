@@ -238,9 +238,6 @@ async function drainStdin(input: NodeJS.ReadStream): Promise<string[]> {
 }
 
 /** 预置输入队列 —— 测试用，免得真去碰 stdin */
-export function primeInput(lines: string[]): void {
-  queued = [...lines]
-}
 
 /** 向导结束时调一次 —— readline 不关的话进程不会退出 */
 export function closePrompts(): void {

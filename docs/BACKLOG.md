@@ -838,6 +838,70 @@ tool call。而我当时的处理是「模型没有调用 propose_rule，换个�
 
 ## F. 诚实性与技术债
 
+### F0. 「声明了但没接线」的自动检查 ✅ 已完成
+
+**这是这个项目出现次数最多的一类缺陷**：代码里声明了某个东西，但没有任何地方
+使用它。共同点是**都不报错** —— 类型检查过、测试绿、功能看起来在，
+只是那件事实际没发生。
+
+`test/unwired.test.ts` 查四类：
+
+| 判据 | 为什么 `noUnusedLocals` 抓不到 |
+|---|---|
+| 导出了值，src 里除声明外零引用 | 它只管同一个文件内 |
+| store 的方法**只有测试在调** | 跨文件，而且测试是绿的 |
+| 迁移建了表，src 从不引用 | 它不看 SQL |
+| `NucleusConfig` 字段没人读 | 跨文件 |
+
+**允许清单就是这条检查的全部意义。** 判据必然有合理的例外（测试替身、
+给测试用的调用入口），所以不是放宽判据，而是要求**每个例外写下理由** ——
+「为什么这个导出没人调」写不出来的时候，通常就是真的忘了接线。
+
+清单本身也有一条测试：**条目失效了要报**（已经接上线的留在清单里，
+会掩盖后来真正的新问题）。写完立刻抓到一个：`FakeClock` 其实有 src 引用。
+
+#### 这次跑出来的：删掉 8 个无人使用的声明
+
+`EMPTY_SUMMARY`、`exactlyOne`、`isTerminalRun`、`isResponse`、`permissionSpec`、
+`testDeps`、`primeInput` —— 全仓只有声明本身。
+
+`plannedBetween` —— 被 `latestPlanned` 取代（前者的 N 上限**绑在区间开头**，
+补跑要的是最近的 N 个）。它只剩一条测试在当对照用，那条测试改成了文字说明：
+**「为了一条测试留着生产代码」正是要清掉的形状。**
+
+#### `TERMINAL_RUN_STATUSES` 不是死代码，是 5 处重复
+
+它声明在 `domain.ts` 而没有任何引用，**同一份清单被硬编码在 5 处 SQL 里**
+（stuck.ts、reconciler.ts、worker.ts ×2、子 run 汇总）。加一个终态要找齐 5 处，
+而漏一处不会报错 —— 那个 run 会被永远当成「还在跑」。
+
+改成从常量派生 `TERMINAL_RUN_SQL`。**这里有一个 `tsc` 抓不到的坑**：
+把 `'(...)'` 换成 `${TERMINAL_RUN_SQL}` 之后，如果那段 SQL 不在模板字符串里，
+`${...}` 就是字面量，SQL 静默变错而类型检查照样过。四处都逐个核对了反引号。
+
+### F1. 检查报出来的、还没接线的（逐条）
+
+每一条都在 `unwired.test.ts` 的允许清单里带着理由，不是被忽略：
+
+1. **`makeSecretResolver`** —— boot 只在启动时解析一次凭据（`boot.ts:93-100`），
+   而这个函数才带 OAuth 过期续期。后果：**长驻 worker 的 OAuth token 过期后
+   只会 401，不会续**。用 API key 的人看不到这个问题，所以它一直没暴露。
+2. **`indexedRulesForAgent`** —— `boot.ts:122` 内联算 `presenceOf(r) === 'indexed'`，
+   **不按 agent 过滤**。而 `read_rule` 的工具说明写着「读的是约束这个 agent
+   自己的规则」。文档和实现不符：任何 agent 能读任何规则的正文。
+   结构性的：boot 时不知道是哪个 agent，过滤得挪到 runner 里。
+3. **`conversations.acquire()` / `release()`** —— 见 D-16。
+4. **`appliedSchemaHash`** —— schema 漂移检测没有调用点。
+5. **`parseWindowFromError`** —— `providers probe` 没用它。
+6. **`hasPricing`** —— 成本计算另有判断，两套。
+7. **`accountIdFromToken`** —— 账号身份没落地。
+8. **`toAgentConfig`** —— `agent new` 另有一条路径，可能是重复逻辑。
+9. **`one()`** —— src 里 23 处用 `rows[0]`，而 `one()` 会在缺行时抛。
+   不是 bug，是一次没做的安全改进。
+10. **`conversations.archive()` / `fork()`、`runs.getAttempt()` / `getWake()`**
+    —— 只有测试在调。
+
+
 19. ~~**README / DESIGN 的现状段改准**~~ ✅ README 已改（DESIGN 待查）。
     原来说「前沿模型遵守率未知」（真实 GLM 已验，0 次契约退回）、
     把「context 装配」列在已完成里（接线之前那句不成立）、

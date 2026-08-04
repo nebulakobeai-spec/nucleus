@@ -31,10 +31,6 @@ export interface JsonRpcResponse {
 
 export type JsonRpcMessage = JsonRpcResponse | JsonRpcNotification
 
-export function isResponse(m: JsonRpcMessage): m is JsonRpcResponse {
-  return 'id' in m
-}
-
 // ── MCP 语义 ─────────────────────────────────────────────
 
 export interface McpServerInfo {

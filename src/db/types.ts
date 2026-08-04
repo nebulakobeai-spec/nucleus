@@ -40,8 +40,3 @@ export function one<R>(res: QueryResult<R>): R | undefined {
   return res.rows[0]
 }
 
-export function exactlyOne<R>(res: QueryResult<R>, what = 'row'): R {
-  const r = res.rows[0]
-  if (!r) throw new Error(`expected exactly one ${what}, got ${res.rows.length}`)
-  return r
-}

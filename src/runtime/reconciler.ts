@@ -1,7 +1,7 @@
 import type { Db } from '../db/types.js'
 import type { Deps } from '../seams.js'
 import { RunStore } from '../store/runs.js'
-import { recoveryFor, type SideEffectClass } from '../domain.js'
+import { TERMINAL_RUN_SQL, recoveryFor, type SideEffectClass } from '../domain.js'
 
 export interface ReconcileReport {
   /** lease 过期 → attempt 判 lost */
@@ -213,7 +213,7 @@ export class Reconciler {
           and not exists (
             select 1 from runs r
              where r.id = any(w.wait_on_run_ids)
-               and r.status not in ('succeeded','failed','cancelled')
+               and r.status not in ${TERMINAL_RUN_SQL}
           )`,
     )
 

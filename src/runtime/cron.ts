@@ -194,23 +194,6 @@ export function nextFireAt(expr: string, timeZone: string, after: Date): Date | 
  * 用计划时刻而不是实际时刻，是为了让幂等键稳定：同一个计划点无论什么时候
  * 被补跑，键都一样，所以 reconciler 重放不会重复触发外部副作用。
  */
-export function plannedBetween(
-  expr: string,
-  timeZone: string,
-  from: Date,
-  to: Date,
-  max: number,
-): Date[] {
-  const out: Date[] = []
-  let cursor = from
-  for (let i = 0; i < max; i++) {
-    const next = nextFireAt(expr, timeZone, cursor)
-    if (!next || next.getTime() > to.getTime()) break
-    out.push(next)
-    cursor = next
-  }
-  return out
-}
 
 /**
  * `before` 之前（不含 before 那一分钟）最近的一次触发时刻。
