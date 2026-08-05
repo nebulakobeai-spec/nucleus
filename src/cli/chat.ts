@@ -102,6 +102,8 @@ async function interactiveLoop(n: Nucleus, session: ChatSession): Promise<number
   printBanner(n, session)
 
   try {
+    /** 空手 Ctrl-C 按过一次了吗 —— 第二次才退 */
+    let armedExit = false
     for (;;) {
       const r = await box.read()
       if (r.type === 'eof') {
@@ -109,9 +111,32 @@ async function interactiveLoop(n: Nucleus, session: ChatSession): Promise<number
         break
       }
       if (r.type === 'cancel') {
-        // 空手 Ctrl-C 只是清掉当前输入，不退出 —— 误触不该丢掉整个会话
+        /**
+         * **连按两次 Ctrl-C 退出。**
+         *
+         * 原先空手 Ctrl-C 只清输入、永不退出，理由写的是「误触不该丢掉整个会话」。
+         * 而那个代价**根本不存在** —— 会话是落库的，`nucleus chat --conv <id>`
+         * 就能接着聊。也就是说我用一个不存在的代价，换掉了所有人对 Ctrl-C 的
+         * 肌肉记忆，而使用者的反馈正是「为什么不能 Ctrl-C 退出」。
+         *
+         * 通行约定是连按两次：第一次给提示，第二次退。有输入时第一次仍然只清输入
+         * （那时你想清的是那行字，不是退出）。
+         */
+        // 有字时第一次只清掉那行 —— 那时你想清的是那行字，不是退出
+        if (r.hadText) {
+          armedExit = false
+          continue
+        }
+        if (armedExit) {
+          line(`${petStill('idle')} ${c.gray('再见')}`)
+          break
+        }
+        armedExit = true
+        line(c.gray('  再按一次 Ctrl-C 退出（/exit 同效）。会话已落库，下次 --conv 接着聊。'))
         continue
       }
+      // 任何别的输入都解除「再按一次就退」——否则十分钟前那次误触会一直生效
+      armedExit = false
 
       const input = r.text.trim()
       if (!input) continue

@@ -515,7 +515,16 @@ export interface BoxInputOptions {
 
 export type ReadResult =
   | { type: 'submit'; text: string }
-  | { type: 'cancel' }
+  /**
+   * Ctrl-C。`hadText` 区分两种意图：
+   *
+   *  有文字 → 你想清掉这一行
+   *  空手   → 你想退出（连按两次才真退，见 chat.ts）
+   *
+   * 不带这个标志的话上层没法分开处理，只能二选一 ——
+   * 而原先选的是「永不退出」，于是 Ctrl-C 退不出去。
+   */
+  | { type: 'cancel'; hadText: boolean }
   | { type: 'eof' }
 
 /**
@@ -617,7 +626,8 @@ export class BoxInput {
     let done: ReadResult | null = null
     for (const ev of this.#editor.feed(data)) {
       if (ev.type === 'submit') done = { type: 'submit', text: ev.text }
-      else if (ev.type === 'cancel') done = { type: 'cancel' }
+      // 按下那一刻还有没有字 —— 编辑器已经清了 buffer，所以要在这里取
+      else if (ev.type === 'cancel') done = { type: 'cancel', hadText: this.#editor.text.length > 0 }
       else if (ev.type === 'eof') done = { type: 'eof' }
     }
 

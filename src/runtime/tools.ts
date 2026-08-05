@@ -44,6 +44,23 @@ export interface ToolResult {
    * 它的下一次 attempt 由 wake 触发（DESIGN.md §3.5）。
    */
   suspend?: boolean
+  /**
+   * **不是故障,是「你给的参数不合规,理由已经回给你了」。**
+   *
+   * ── 为什么要和 ok:false 分开 ────────────────────────
+   *
+   * 实测：`create_rule` 第一次被校验拒（引用了未声明的字段），第二次改对了 ——
+   * 那正是设计要的行为。而终端显示的是 `create_rule ✗ 0ms`，**看起来像故障**。
+   *
+   * 这两件事该给的提示完全不同：
+   *
+   *   故障   写文件失败、网络断了 —— 你要去查环境
+   *   退回   模型给的参数不合规，理由已回给它，它会自己改 —— 你什么都不用做
+   *
+   * `contract.rejected` 那一档早就分开了（「结果被退回（第 N 次）→ 已把缺项
+   * 告知模型」），工具校验没有。同一类错的两个位置，修了一个漏了一个。
+   */
+  rejected?: boolean
 }
 
 export interface ToolDefinition {

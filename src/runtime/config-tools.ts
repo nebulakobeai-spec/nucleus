@@ -114,7 +114,7 @@ export function createRuleTool(paths: ConfigPaths, existing: () => NucleusConfig
       const a = args as Record<string, unknown>
       const id = String(a['id'] ?? '').trim()
       if (!ID_RE.test(id)) {
-        return { ok: false, content: `id 只能是小写字母、数字、点与连字符：${id || '(空)'}` }
+        return { ok: false, rejected: true, content: `id 只能是小写字母、数字、点与连字符：${id || '(空)'}` }
       }
 
       const cfg = existing()
@@ -122,6 +122,8 @@ export function createRuleTool(paths: ConfigPaths, existing: () => NucleusConfig
       if (problems.length) {
         return {
           ok: false,
+          // 校验拒绝不是故障：理由已经回给模型，它会自己改
+          rejected: true,
           content: `这条规则没通过校验：\n${problems.map((p) => `- ${p}`).join('\n')}`,
         }
       }
@@ -298,19 +300,20 @@ export function createAgentTool(
       const a = args as Record<string, unknown>
       const id = String(a['id'] ?? '').trim()
       if (!ID_RE.test(id)) {
-        return { ok: false, content: `id 只能是小写字母、数字、点与连字符：${id || '(空)'}` }
+        return { ok: false, rejected: true, content: `id 只能是小写字母、数字、点与连字符：${id || '(空)'}` }
       }
       const cfg = existing()
       if (cfg.agents.some((x) => x.id === id)) {
         return {
           ok: false,
+          rejected: true,
           content: `已经有一个叫 ${id} 的专家了。换个 id，或者让使用者先删掉那个文件。`,
         }
       }
       const identity = String(a['identity'] ?? '').trim()
       const whenToUse = String(a['whenToUse'] ?? '').trim()
       if (!identity || !whenToUse) {
-        return { ok: false, content: 'identity 与 whenToUse 都不能为空 —— 它们各有各的读者' }
+        return { ok: false, rejected: true, content: 'identity 与 whenToUse 都不能为空 —— 它们各有各的读者' }
       }
 
       const perms = ((a['permissions'] as string[]) ?? []).map(String)
@@ -318,6 +321,7 @@ export function createAgentTool(
       if (bad.length) {
         return {
           ok: false,
+          rejected: true,
           content: `这些权限不能授予：${bad.join(', ')}。可选：${grantable}`,
         }
       }
@@ -419,12 +423,13 @@ export function configureModelTool(paths: ConfigPaths): ToolDefinition {
       }
       const key = String(a['key'] ?? '').trim()
       if (!key.includes(':')) {
-        return { ok: false, content: `模型键要形如 provider:model，收到「${key}」` }
+        return { ok: false, rejected: true, content: `模型键要形如 provider:model，收到「${key}」` }
       }
       const cw = Number(a['contextWindow'])
       if (!Number.isFinite(cw) || cw <= 0) {
         return {
           ok: false,
+          rejected: true,
           content:
             'contextWindow 必须是正数，而且**不要猜** —— 不知道就问使用者，' +
             '或者让他跑 nucleus providers probe。',
@@ -438,11 +443,16 @@ export function configureModelTool(paths: ConfigPaths): ToolDefinition {
         if (/^(apiKey|token|secret|password)$/i.test(k)) {
           return {
             ok: false,
+            rejected: true,
             content: `不要传 ${k} —— 配置里只放 apiKeyRef（引用名）。值由运行时从环境变量 / keychain 解析。`,
           }
         }
         if (typeof v === 'string' && /^(sk-|xai-)/.test(v)) {
-          return { ok: false, content: `${k} 看起来是一个真实密钥。配置里只放引用名。` }
+          return {
+            ok: false,
+            rejected: true,
+            content: `${k} 看起来是一个真实密钥。配置里只放引用名。`,
+          }
         }
       }
 

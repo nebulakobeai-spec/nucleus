@@ -695,8 +695,41 @@ describe('BoxInput', () => {
     const box = boxOn(tty, { onInterrupt: () => hit++ })
     const p = box.read()
     tty.type('\x03')
-    await expect(p).resolves.toEqual({ type: 'cancel' })
+    await expect(p).resolves.toEqual({ type: 'cancel', hadText: false })
     expect(hit).toBe(0)
+    box.close()
+  })
+
+  /**
+   * ── `hadText` 区分两种意图 ──────────────────────────
+   *
+   * 有文字 → 你想清掉这一行；空手 → 你想退出。
+   *
+   * 不带这个标志的话上层只能二选一 —— 而原先选的是「永不退出」，理由写的是
+   * 「误触不该丢掉整个会话」。那个代价**根本不存在**：会话是落库的，
+   * `nucleus chat --conv <id>` 就能接着聊。于是我用一个不存在的代价，
+   * 换掉了所有人对 Ctrl-C 的肌肉记忆。
+   */
+  it('有文字时 Ctrl-C 带 hadText —— 上层据此只清行不退出', async () => {
+    const tty = fakeTty()
+    const box = boxOn(tty)
+    const p = box.read()
+    tty.type('写了一半的话')
+    tty.type('\x03')
+    await expect(p).resolves.toEqual({ type: 'cancel', hadText: true })
+    box.close()
+  })
+
+  it('下一次 read 不会把上次取消掉的字带回来', async () => {
+    const tty = fakeTty()
+    const box = boxOn(tty)
+    const p1 = box.read()
+    tty.type('abc')
+    tty.type('\x03')
+    await p1
+    const p2 = box.read()
+    tty.type('x\r')
+    await expect(p2).resolves.toEqual({ type: 'submit', text: 'x' })
     box.close()
   })
 

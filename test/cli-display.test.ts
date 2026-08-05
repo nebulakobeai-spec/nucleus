@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { delta, fmt, outcomeMark, outcomeText, relative } from '../src/cli/schedule.js'
 import { rateColor, scopeLabel, tierLabel } from '../src/cli/rules.js'
+import { renderEvent } from '../src/cli/turn.js'
+import type { RunEvent } from '../src/runtime/events.js'
 import type { FireRecord } from '../src/store/schedules.js'
 
 /**
@@ -151,5 +153,42 @@ describe('规则清单的标签', () => {
   it('遵守率的颜色分档', () => {
     expect(rateColor(1)).not.toBe(rateColor(0.99))
     expect(rateColor(0.5)).not.toBe(rateColor(1))
+  })
+})
+
+/**
+ * ── 「参数被退回」不是故障 ──────────────────────────────
+ *
+ * 实测：`create_rule` 第一次被校验拒（引用了未声明的字段），第二次改对了 ——
+ * **那正是设计要的行为**。而终端显示的是 `create_rule ✗ 0ms`，看起来像出了故障，
+ * 于是使用者的反馈是「create_user 第一次失败了」。
+ *
+ * 这两件事该给的提示完全不同：
+ *
+ *   故障  写文件失败、网络断了 —— 你要去查环境
+ *   退回  模型给的参数不合规，理由已回给它 —— 你什么都不用做
+ *
+ * `contract.rejected` 那一档早就分开了，工具校验没有 ——
+ * 同一类错的两个位置，修了一个漏了一个。
+ */
+describe('工具结果：退回与故障要分开', () => {
+  const ev = (payload: Record<string, unknown>): RunEvent =>
+    ({ kind: 'tool.outcome', runId: 'r', attemptId: 'a', payload, seq: 1 }) as unknown as RunEvent
+
+  it('参数被退回 → 说清「已告知模型」，不打红叉', () => {
+    const out = renderEvent(ev({ tool: 'create_rule', ok: false, ms: 0, rejected: true }), '')!
+    expect(out).toMatch(/参数被退回/)
+    expect(out).toMatch(/已把原因告知模型/)
+    expect(out, '退回不该显示成失败').not.toContain('✗')
+  })
+
+  it('真故障照旧打红叉并带错误码', () => {
+    const out = renderEvent(ev({ tool: 'write_file', ok: false, ms: 12, errorCode: 'fs.denied' }), '')!
+    expect(out).toContain('✗')
+    expect(out).toContain('fs.denied')
+  })
+
+  it('成功照旧打勾', () => {
+    expect(renderEvent(ev({ tool: 'create_rule', ok: true, ms: 4 }), '')!).toContain('✓')
   })
 })

@@ -76,7 +76,19 @@ export function renderEvent(e: RunEvent, indent: string): string | null {
 
   switch (e.kind) {
     case 'attempt.started':
-      return `${indent}${ICON.step} ${c.cyan(String(q['agent']))} ${c.gray(`#${q['attemptNo']}`)}`
+      /**
+       * **带上 run 前缀。**
+       *
+       * 实测有一次同一轮里出现了三个 `orchestrator #1`，而底下写着「1 个 run」——
+       * 两者矛盾，而屏幕上没有任何东西能区分「同一个 run 的第二次 attempt」
+       * 与「另一个 run 的第一次」。我去查时数据库已经坏了，于是**查不出来**。
+       *
+       * 一行里多八个字符，换来的是这类问题下次能自己回答。
+       */
+      return (
+        `${indent}${ICON.step} ${c.cyan(String(q['agent']))} ` +
+        c.gray(`#${q['attemptNo']} · ${e.runId.slice(0, 8)}`)
+      )
 
     case 'llm.call.finished': {
       const tok = Number(q['tokensIn'] ?? 0) + Number(q['tokensOut'] ?? 0)
@@ -94,6 +106,21 @@ export function renderEvent(e: RunEvent, indent: string): string | null {
       return br + c.gray(`想了 ${compactTokens(Number(q['chars'] ?? 0))} 字`)
 
     case 'tool.outcome':
+      /**
+       * 「参数被退回」不是故障，不该显示成红叉。
+       *
+       * 实测：`create_rule` 第一次被校验拒、第二次改对 —— 那是设计要的行为，
+       * 而屏幕上是 `create_rule ✗ 0ms`，看起来像出了故障。
+       * 与 `contract.rejected` 那一档同一个道理：说清「已经告知模型」，
+       * 人就知道自己什么都不用做。
+       */
+      if (q['rejected']) {
+        return (
+          br +
+          `${q['tool']} ${c.yellow('参数被退回')} ` +
+          c.gray('→ 已把原因告知模型，它会自己改')
+        )
+      }
       return (
         br +
         `${q['tool']} ${q['ok'] ? ICON.ok : ICON.fail} ` +

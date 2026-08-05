@@ -781,6 +781,8 @@ export class Runner {
       ok: out.ok,
       ms: this.deps.clock.now() - started,
       errorCode: out.errorCode ?? null,
+      // 「参数不合规、理由已回给模型」与「故障」要分开 —— 前者你什么都不用做
+      ...(out.rejected ? { rejected: true } : {}),
     })
 
     return out
