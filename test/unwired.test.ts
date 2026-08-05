@@ -129,8 +129,6 @@ describe('导出了但 src 里没人用', () => {
  * 今天没出问题只是因为 CLI 与 REPL 都是串行的。
  */
 const ALLOW_TEST_ONLY: Record<string, string> = {
-  'src/store/conversations.ts acquire': '会话锁没接线 —— BACKLOG D-16 已记（那里数为「第 9 处」）',
-  'src/store/conversations.ts release': '同上，与 acquire 成对',
   'src/store/conversations.ts archive': '归档没有入口。见 BACKLOG F',
   'src/store/conversations.ts fork': '分叉会话没有入口。见 BACKLOG F',
   'src/store/runs.ts getAttempt': '只有测试在查单个 attempt。见 BACKLOG F',
@@ -162,6 +160,23 @@ describe('只有测试在调用', () => {
       found,
       '这些方法只有测试在调用 —— 有通过的测试、没有生产调用点，看起来做完了其实没参与',
     ).toEqual([])
+  })
+
+  /**
+   * **这份清单也要有失效检查。**
+   *
+   * `ALLOW_UNCALLED` 一开始就有，而这份没有 —— 于是 `conversations.acquire` /
+   * `release` 接上线之后，条目还留在清单里没人发现。一条失效的豁免比没有豁免更糟：
+   * 它会把**后来真正的新问题**一起放过去（同一个 key 撞上就静默通过）。
+   */
+  it('清单里没有已经接上线的方法', () => {
+    const stale = Object.keys(ALLOW_TEST_ONLY).filter((key) => {
+      const [f, name] = key.split(' ') as [string, string]
+      if (!text.has(f)) return true
+      const call = new RegExp(`\\.${name}\\s*\\(`, 'g')
+      return SRC.filter((g) => g !== f).some((g) => call.test(text.get(g)!))
+    })
+    expect(stale, '这些已经有生产调用点了，从清单里删掉').toEqual([])
   })
 })
 
