@@ -59,6 +59,28 @@ export function relative(d: Date | null, now: number): string {
   return ms >= 0 ? `${unit} 后` : `${unit} 前`
 }
 
+/**
+ * 「下次」那一列。逾期时说「逾期」而不是「N 前」。
+ *
+ * 一个正常的计划这一列永远是「…后」，所以「前」本身就是异常信号 ——
+ * 而实测有人把「6h 前」读成了「每 6 分钟一次」。那不是他读错，
+ * 是这一列没有把「逾期」这件事说出来。
+ */
+export function overdueOrNext(next: Date | null, now: number): string {
+  if (!next) return ''
+  const rel = relative(next, now)
+  return next.getTime() < now ? c.yellow(`逾期 ${rel.replace(' 前', '')}`) : c.gray(rel)
+}
+
+/**
+ * 当前读的是哪个库。
+ *
+ * 连接串带密码，所以只说种类不说地址 —— 要区分两个库这就够了。
+ */
+export function dbLabel(n: { db: { kind: string } }): string {
+  return n.db.kind === 'postgres' ? 'postgres' : 'pglite（本地，只有当前目录看得到）'
+}
+
 async function withStore<T>(
   flags: Record<string, string | true>,
   fn: (n: Nucleus, store: ScheduleStore) => Promise<T>,
@@ -90,18 +112,45 @@ export async function scheduleList(
 
     const now = Date.now()
     heading(`定时任务（${all.length}）`)
+    /**
+     * **哪个库要写出来。**
+     *
+     * 实测的困惑：使用者在自己终端里 `schedule list` 看到的是一条早就删掉的
+     * 计划，而常驻进程跑的是另一条 —— 因为他的 shell 里没有
+     * `NUCLEUS_DATABASE_URL`，读的是本地 pglite，而常驻进程的连接串在 plist 的
+     * 环境变量里，读的是 postgres。
+     *
+     * 两个库、两套计划，而屏幕上没有任何东西能区分。一条命令的输出必须能说清
+     * 它在看哪里 —— 否则「为什么和我想的不一样」根本无法回答。
+     */
+    line(c.gray(`  库：${dbLabel(n)}`))
     table(
       all.map((s) => [
         s.enabled ? s.name : c.gray(s.name),
         s.cron,
         s.agentId,
         s.enabled ? fmt(s.nextFireAt, s.timezone) : c.gray('已停用'),
-        s.enabled ? c.gray(relative(s.nextFireAt, now)) : '',
+        s.enabled ? overdueOrNext(s.nextFireAt, now) : '',
         c.gray(s.timezone),
         fmt(s.lastFiredAt, s.timezone),
       ]),
       ['名称', '表达式', 'agent', '下次', '', '时区', '上次'],
     )
+
+    /**
+     * **「下次」落在过去 = 没有 worker 在推这个库。**
+     *
+     * 原先那一列只显示 `relative()`，于是一个逾期 6 小时的计划显示成「6h 前」——
+     * 而使用者把它读成了「每 6 分钟一次」。一个正常的计划那一列永远是「…后」，
+     * 所以「前」本身就是异常信号，该说出来而不是让人自己领会。
+     */
+    const stale = all.filter((s) => s.enabled && s.nextFireAt && s.nextFireAt.getTime() < now)
+    if (stale.length) {
+      line()
+      line(`${ICON.warn} ${c.yellow(`${stale.length} 条已经逾期`)} —— 说明没有 worker 在跑这个库`)
+      line(c.gray('  启动常驻进程：nucleus serve'))
+      line(c.gray('  或者你连错了库 —— 上面那行「库」写着当前读的是哪个'))
+    }
 
     // agent 不存在的计划会在触发时静默失败 —— 提前说
     const known = new Set(n.config.agents.map((a) => a.id))
@@ -115,8 +164,18 @@ export async function scheduleList(
     }
 
     line()
-    line(c.gray('执行不需要额外进程：worker tick 里就地触发。'))
-    line(c.gray('所以要有一个 nucleus chat 或长驻 worker 在跑，计划才会到点执行。'))
+    /**
+     * 这两句原先是「执行不需要额外进程 …… 要有一个 `nucleus chat` 或长驻 worker
+     * 在跑」。两处都不准:
+     *
+     *  · **空闲的 chat 不推进任何东西** —— 只有 `ask()` 里的 `drain()` 驱动
+     *    worker，也就是你打一句话才推进一次。同一句假话在 `schedule add`
+     *    的输出里修过，`list` 这里漏了。
+     *  · 「不需要额外进程」容易被读成「不需要任何进程」。准确的说法是
+     *    **不需要单独的调度器** —— 触发就在 worker tick 里，但 worker 得有人在跑。
+     */
+    line(c.gray('不需要单独的调度进程 —— 触发就在 worker tick 里。'))
+    line(c.gray('但必须有 worker 在跑：') + c.cyan('nucleus serve'))
     line(c.gray('看某条的历史：nucleus schedule history <名称>'))
     return 0
   })

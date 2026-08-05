@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { delta, fmt, outcomeMark, outcomeText, relative } from '../src/cli/schedule.js'
+import {
+  dbLabel,
+  delta,
+  fmt,
+  outcomeMark,
+  outcomeText,
+  overdueOrNext,
+  relative,
+} from '../src/cli/schedule.js'
 import { rateColor, scopeLabel, tierLabel } from '../src/cli/rules.js'
 import { renderEvent } from '../src/cli/turn.js'
 import type { RunEvent } from '../src/runtime/events.js'
@@ -190,5 +198,60 @@ describe('工具结果：退回与故障要分开', () => {
 
   it('成功照旧打勾', () => {
     expect(renderEvent(ev({ tool: 'create_rule', ok: true, ms: 4 }), '')!).toContain('✓')
+  })
+})
+
+/**
+ * ── 「下次」落在过去时要说「逾期」──────────────────────────
+ *
+ * 实测的困惑：使用者看到 `下次 2026-08-05 01:58 · 6h 前`，读成了
+ * **「每 6 分钟一次」**。而实际含义是「下次触发时刻在 6 小时之前」——
+ * 即那个库里没有 worker 在推它。
+ *
+ * 那不是他读错，是这一列没把「逾期」说出来：一个正常的计划这一列永远是「…后」，
+ * 所以「前」本身就是异常信号。
+ */
+describe('逾期的计划要说出来', () => {
+  const now = new Date('2026-08-05T08:00:00Z').getTime()
+
+  it('未来 → 「N 后」', () => {
+    expect(overdueOrNext(new Date(now + 59 * 60_000), now)).toMatch(/59m 后/)
+    expect(overdueOrNext(new Date(now + 59 * 60_000), now)).not.toMatch(/逾期/)
+  })
+
+  it('过去 → 「逾期 N」，不再是「N 前」', () => {
+    const out = overdueOrNext(new Date(now - 6 * 3600_000), now)
+    expect(out).toMatch(/逾期 6h/)
+    expect(out, '「前」会被读成间隔').not.toMatch(/前/)
+  })
+
+  it('没有下次触发时刻 → 空串', () => {
+    expect(overdueOrNext(null, now)).toBe('')
+  })
+})
+
+/**
+ * ── 一条命令必须能说清它在看哪个库 ─────────────────────────
+ *
+ * 实测：使用者终端里的 `schedule list` 显示的是一条早就删掉的计划，而常驻进程
+ * 跑的是另一条 —— 因为他的 shell 里没有 `NUCLEUS_DATABASE_URL`（读本地 pglite），
+ * 而常驻进程的连接串在 plist 的环境变量里（读 postgres）。
+ *
+ * 两个库、两套计划，而屏幕上原先没有任何东西能区分。
+ */
+describe('输出要说清读的是哪个库', () => {
+  it('两种库分得开', () => {
+    expect(dbLabel({ db: { kind: 'postgres' } })).toBe('postgres')
+    expect(dbLabel({ db: { kind: 'pglite' } })).toMatch(/pglite/)
+  })
+
+  /** pglite 要说清它只在当前目录 —— 那正是「换个目录就看不到」的原因 */
+  it('pglite 说明它的作用范围', () => {
+    expect(dbLabel({ db: { kind: 'pglite' } })).toMatch(/当前目录/)
+  })
+
+  /** 连接串带密码，所以只说种类不说地址 */
+  it('不带地址或凭据', () => {
+    expect(dbLabel({ db: { kind: 'postgres' } })).not.toMatch(/@|:\/\/|127\.0\.0\.1/)
   })
 })
