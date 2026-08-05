@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { hintFor } from '../src/providers/openai-compat.js'
 import { ask, boot, type Nucleus } from '../src/boot.js'
 import { defaultConfig, type NucleusConfig } from '../src/config.js'
 import { withExampleAgents } from '../src/examples/agents.js'
@@ -254,8 +255,26 @@ describe('provider 事件', () => {
     const failed = await events('failed')
     expect(failed.length).toBeGreaterThan(0)
     expect(failed[0]!.error_code).toBe('provider.unreachable')
-    // 根因提示 —— 只报错误码等于让人自己猜
-    expect(String(failed[0]!.detail['hint'])).toContain('出网权限')
+
+    /**
+     * ── 这条断言原先写的是环境的产物 ──────────────────────
+     *
+     * 原文是 `toContain('出网权限')` —— 而那句提示只对 `EPERM` 出现。
+     * 它一直通过，是因为开发机的沙箱把出网整个挡掉了；
+     * 沙箱一解开，同一个连接失败变成 `ECONNREFUSED`，提示变成
+     * 「服务没在监听」，这条就红了。
+     *
+     * 也就是说它**过去是因为环境不对而通过的**，不是因为逻辑对。
+     *
+     * 该断言的是「提示与实际的 errno 对得上」，而不是某一个特定环境里
+     * 恰好会出现的那句话。所以拿 detail 里的 sys 去查映射表 ——
+     * 这样它在任何环境下都成立，而且**映射表改错了它会红**。
+     */
+    // errno 在 message 里（provider_events 的 detail 不带 syscallCode）
+    const msg = String(failed[0]!.detail['message'])
+    const sys = /\b(E[A-Z_]+|CERT_[A-Z_]+|UNABLE_TO_[A-Z_]+)\b/.exec(msg)?.[1] ?? null
+    expect(sys, `message 里没有 errno：${msg}`).not.toBeNull()
+    expect(String(failed[0]!.detail['hint'])).toBe(hintFor(sys))
     expect(failed[0]!.detail['consecutiveErrors']).toBeGreaterThan(0)
   })
 

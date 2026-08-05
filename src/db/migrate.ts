@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Db } from './types.js'
+import type { Db, Queryable } from './types.js'
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../migrations')
 
@@ -62,34 +62,56 @@ const MIGRATE_LOCK = 0x6e75636c // 'nucl'
 
 export async function migrate(db: Db, dir?: string): Promise<MigrateResult> {
   const ms = loadMigrations(dir)
-  await db.exec(BOOTSTRAP)
 
   /**
-   * **并发迁移要串起来。**
+   * **并发迁移要串起来 —— 而我第一版这段是错的,两处都错。**
    *
-   * pglite 是单进程，所以这件事一直看不见。而 postgres 上「常驻 daemon +
-   * 一条 CLI 命令同时启动」是**常态** —— 两边都会跑 migrate，于是同一个
-   * `create table` 撞在一起：一边成功，另一边报 42P07（已存在）而整个 boot 失败，
-   * 而错误看起来像「schema 坏了」。
+   * postgres 上「常驻 daemon + 一条 CLI 命令同时启动」是常态，两边都会跑
+   * migrate。pglite 是单进程，所以这件事在它那儿永远看不见。
    *
-   * `pg_advisory_lock` 是会话级的，pglite 上不存在 —— 那边不需要，
-   * 所以拿不到函数时直接跳过（`kind` 判一下比 try/catch 清楚：
-   * 后者会把真正的权限错误也一起吞掉）。
+   * 第一版（凭代码推理写的，没跑过）：
+   *
+   *   ① **`BOOTSTRAP` 在拿锁之前跑。** 那句就是 `create table _migrations` ——
+   *      三个进程正好撞在它上面，而锁还没取。
+   *   ② **`pg_advisory_lock` 是会话级的，而 `query()` 走连接池。** 加锁的语句
+   *      借一条连接、查完就还回去，后面的语句可能换了另一条 —— 锁看起来加上了，
+   *      实际什么都没串起来。而 `pg_advisory_unlock` 从另一条连接调还会失败，
+   *      锁一直留到那条池连接被关掉。
+   *
+   * 实测三个进程同时 migrate，两个挂在
+   * `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`
+   * —— 两个 `CREATE TABLE` 撞在一起的样子。**这就是为什么那条测试非跑不可。**
+   *
+   * 现在：`session()` 钉住一条连接，锁、BOOTSTRAP、读清单、跑迁移全在它上面。
    */
-  const needsLock = db.kind === 'postgres'
-  if (needsLock) await db.query('select pg_advisory_lock($1)', [MIGRATE_LOCK])
-  try {
-    return await applyAll(db, ms)
-  } finally {
-    if (needsLock) {
-      await db.query('select pg_advisory_unlock($1)', [MIGRATE_LOCK]).catch(() => {
+  if (db.kind !== 'postgres') {
+    // pglite 单进程，没有 pg_advisory_lock 也不需要
+    await db.exec(BOOTSTRAP)
+    return applyAll(db, db, ms)
+  }
+
+  return db.session(async (s) => {
+    await s.query('select pg_advisory_lock($1)', [MIGRATE_LOCK])
+    try {
+      // BOOTSTRAP **在锁里面** —— 它自己就是一句 create table
+      await s.exec(BOOTSTRAP)
+      return await applyAll(db, s, ms)
+    } finally {
+      await s.query('select pg_advisory_unlock($1)', [MIGRATE_LOCK]).catch(() => {
         // 连接已断时解锁会失败 —— 而那时锁本来就随连接释放了
       })
     }
-  }
+  })
 }
 
-async function applyAll(db: Db, ms: Migration[]): Promise<MigrateResult> {
+/**
+ * `db` 用来开每条迁移自己的事务，`q` 是钉住的那条连接（读清单、写 _migrations）。
+ *
+ * 分开传是因为**每条迁移要单独一个事务**（失败时前面的保持已应用），
+ * 而事务只能从 `db.tx()` 开 —— 那会另借一条连接，但那没关系：
+ * 锁在钉住的那条上，串行性已经保证了。
+ */
+async function applyAll(db: Db, q: Queryable, ms: Migration[]): Promise<MigrateResult> {
 
   /**
    * 拿到锁**之后**才读已应用清单。
@@ -97,7 +119,7 @@ async function applyAll(db: Db, ms: Migration[]): Promise<MigrateResult> {
    * 等锁期间另一个进程可能已经把全部迁移跑完了 —— 在锁之前读的话这里会拿到
    * 一份过期的清单，然后重跑那些迁移并撞 42P07。
    */
-  const existing = await db.query<{ name: string; sha: string }>('select name, sha from _migrations')
+  const existing = await q.query<{ name: string; sha: string }>('select name, sha from _migrations')
   const seen = new Map(existing.rows.map((r) => [r.name, r.sha]))
 
   const applied: string[] = []

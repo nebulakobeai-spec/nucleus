@@ -28,6 +28,24 @@ export interface Db extends Queryable {
    * 所以这是唯一的事务入口，不允许手写 BEGIN/COMMIT。
    */
   tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T>
+  /**
+   * 钉住**一条连接**跑一段，不开事务。
+   *
+   * ── 为什么需要它 ────────────────────────────────
+   *
+   * `pg_advisory_lock` 是**会话级**的 —— 锁属于那条连接。而 `query()` 走连接池：
+   * 加锁的语句借一条连接、查完就还回去，后面的语句可能换了另一条。
+   * 于是锁看起来加上了，实际上什么都没串起来；而 `pg_advisory_unlock`
+   * 从另一条连接调还会失败，锁一直留到那条池连接被关掉。
+   *
+   * 这是实测抓到的：三个进程同时 `nucleus migrate`，两个挂在
+   * `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`
+   * —— 两个 `CREATE TABLE` 撞在一起的样子。**会话锁和连接池不能这么配。**
+   *
+   * 与 `tx` 的区别是它**不开事务** —— 迁移要「每条一个事务」（失败时前面的
+   * 保持已应用），所以不能整个包进一个 tx 里。
+   */
+  session<T>(fn: (q: Queryable) => Promise<T>): Promise<T>
   /** 跨进程事件：部署机用 LISTEN/NOTIFY */
   listen(channel: string, handler: (payload: string) => void): Promise<() => Promise<void>>
   notify(channel: string, payload: string): Promise<void>

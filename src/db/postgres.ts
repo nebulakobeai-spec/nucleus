@@ -33,6 +33,36 @@ export class PostgresDb implements Db {
     await this.#pool.query(sql)
   }
 
+  /**
+   * 钉一条连接，不开事务。
+   *
+   * `query()` 每次从池里借一条 —— 会话级的 `pg_advisory_lock` 因此串不起来。
+   * 这里把同一条 client 交给回调，锁与解锁就落在同一个会话上。
+   */
+  async session<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
+    const client = await this.#pool.connect()
+    try {
+      return await fn({
+        query: async <R>(sql: string, params: unknown[] = []) => {
+          const r = await client.query(sql, params)
+          return { rows: r.rows as R[], rowCount: r.rowCount ?? r.rows.length }
+        },
+        exec: async (sql: string) => {
+          await client.query(sql)
+        },
+      })
+    } finally {
+      /**
+       * `release(true)` **销毁**这条连接而不是还回池子。
+       *
+       * 会话锁如果因为任何原因没解开（比如中途抛异常、或者解锁语句本身失败），
+       * 还回池子就意味着**下一个借到它的人带着一把别人的锁** ——
+       * 而那把锁再也不会被解开。销毁掉是唯一干净的收尾。
+       */
+      client.release(true)
+    }
+  }
+
   async tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
     const client = await this.#pool.connect()
     try {

@@ -48,6 +48,16 @@ export class PgliteDb implements Db {
     await this.#pg.exec(sql)
   }
 
+  /**
+   * pglite 只有一条连接，所以「钉住连接」是天然的 —— 直接跑。
+   *
+   * 它也没有 `pg_advisory_lock`（单进程用不上），所以 migrate 那边按 `kind`
+   * 判断要不要取锁。
+   */
+  async session<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
+    return fn(this)
+  }
+
   async tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
     // 串行化：PGlite 单连接，并发事务会互相污染
     const run = this.#txChain.then(async () => {
