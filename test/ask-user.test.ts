@@ -3,6 +3,7 @@ import { ask, boot, type Nucleus } from '../src/boot.js'
 import { defaultConfig } from '../src/config.js'
 import { FakeClock, FakeIds } from '../src/seams.js'
 import { ConversationBusyError } from '../src/store/conversations.js'
+import { ScheduleStore } from '../src/store/schedules.js'
 
 /**
  * `ask_user` —— 编排者反问用户。
@@ -414,5 +415,80 @@ describe('问完就停', () => {
     const done = await n.runs.getRun(runId)
     expect(done!.status).toBe('succeeded')
     expect((done!.result as { summary: string }).summary).toBe('按你说的做完了')
+  })
+})
+
+/**
+ * ── 定时任务不许提问 ────────────────────────────────
+ *
+ * 实测：一条每分钟的计划**从第一次触发起就永久死了**。
+ *
+ *     ✓ 定时触发 heartbeat run 5f4b0e28
+ *     ⎿ 5f4b0e28 waiting_user
+ *     · 跳过 heartbeat：上一次的 run 5f4b0e28 还在跑
+ *     · 跳过 heartbeat：上一次的 run 5f4b0e28 还在跑
+ *
+ * gemma4 在定时任务里调了 `ask_user`。那个 run 停在 waiting_user 等一个永远
+ * 不会来的回答，而重入保护让后面每一次触发都被跳过 ——
+ * **一次提问把整条计划永久锁死。**
+ *
+ * 「子 run 没有 conversation」那道检查挡不住它：定时任务**有** conversation
+ * （计划会建一个），只是没有人在看。
+ *
+ * 判据是 `scheduleId` —— 一个机械事实。与「做完了还问」不同：
+ * 那个只能靠提醒层，这个能挡死。
+ */
+describe('定时任务不许提问', () => {
+  it('scheduleId 存在 → 拒绝，并说清后果与替代做法', async () => {
+    n = await boot({
+      config: cfg(),
+      deps: { clock: new FakeClock(), ids: new FakeIds() },
+      mock: {
+        orchestrator: [
+          { tool: { name: 'ask_user', args: { question: '你想要哪种格式？' } } },
+          { submit: { status: 'partial', summary: '不确定格式', artifacts: [] } },
+        ],
+      },
+    })
+    // schedule_id 有外键 —— 建一条真计划，而不是编一个 uuid
+    const store = new ScheduleStore(n.db, n.deps)
+    const sched = await store.create({
+      name: 'heartbeat',
+      cron: '* * * * *',
+      agentId: 'orchestrator',
+      goal: '自检',
+    })
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    const run = await n.runs.createRun({
+      agentId: 'orchestrator',
+      conversationId: conv.id,
+      scheduleId: sched.id,
+    })
+    await n.runs.enqueueAttempt(run.id)
+    await n.worker.drain(10)
+
+    const after = await n.runs.getRun(run.id)
+    // **最要紧的一条**：不能停在 waiting_user，否则这条计划就死了
+    expect(after!.status, '定时 run 停在 waiting_user 会让整条计划永久卡住').not.toBe(
+      'waiting_user',
+    )
+    expect(await n.runs.pendingQuestion(run.id)).toBeNull()
+
+    // 拒绝的理由要回给模型，并给出替代做法
+    const t = await n.db.query<{ request: unknown }>(`select request from transcripts order by id`)
+    const all = t.rows.map((r) => JSON.stringify(r.request)).join('\n')
+    expect(all).toMatch(/没有人在等着回答/)
+    expect(all).toMatch(/open_questions/)
+  })
+
+  it('不是定时任务的照旧能问', async () => {
+    n = await boot({
+      config: cfg(),
+      deps: { clock: new FakeClock(), ids: new FakeIds() },
+      mock: askThenSubmit('哪一种？'),
+    })
+    const conv = await n.conversations.create({ agentId: 'orchestrator' })
+    const { runId } = await ask(n, conv.id, '做点什么')
+    expect((await n.runs.getRun(runId))!.status).toBe('waiting_user')
   })
 })

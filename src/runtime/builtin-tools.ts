@@ -466,6 +466,37 @@ export function askUserTool(store: RunStore, conversations: ConversationAppender
           errorCode: 'tool.denied',
         }
       }
+      /**
+       * **定时任务不许提问 —— 没有人在等着回答。**
+       *
+       * ── 实测:一条每分钟的计划从第一次触发起就永久死了 ────────────
+       *
+       *     ✓ 定时触发 heartbeat run 5f4b0e28
+       *     ⎿ 5f4b0e28 waiting_user
+       *     · 跳过 heartbeat：上一次的 run 5f4b0e28 还在跑
+       *     · 跳过 heartbeat：上一次的 run 5f4b0e28 还在跑
+       *
+       * gemma4 在一个定时任务里调了 `ask_user`。那个 run 停在 `waiting_user`
+       * 等一个永远不会来的回答，而重入保护让后面每一次触发都被跳过 ——
+       * **一次提问把整条计划永久锁死。**
+       *
+       * 我挡住了「子 run 没有 conversation」那种情况，但定时任务**有**
+       * conversation（计划会建一个），所以那道检查放过了它。
+       *
+       * 判据是 `scheduleId` —— 一个机械事实，不是措辞。与 I1 那个
+       * 「做完了还问」不同：那个只能靠提醒层，这个能挡死。
+       */
+      if (run.scheduleId) {
+        return {
+          ok: false,
+          rejected: true,
+          content:
+            '这是定时任务，**没有人在等着回答** —— 问了会让这个 run 永远停在 waiting_user，\n' +
+            '而重入保护会让这条计划后面每一次触发都被跳过（等于整条计划死掉）。\n' +
+            '把要问的写进 open_questions 然后 submit_result：那样产出还在，' +
+            '而人看结果时就会看到你不确定什么。',
+        }
+      }
       if (await store.pendingQuestion(ctx.runId)) {
         // 一个 run 只能有一条待答的提问；用户的下一句只能回答一个
         return {

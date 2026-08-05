@@ -130,7 +130,9 @@ export function ruleProposalSchema(): Record<string, unknown> {
         type: 'array',
         items: { type: 'string' },
         description:
-          'check：必填字段路径。`a[].b` 表示 a 非空且每一条的 b 都非空。' +
+          'check：必填字段路径。`a[].b` 表示**有 a 的时候**每条都要有 b' +
+          '（没有 a 时这条要求算满足）；`a[]!.b` 额外要求 a 必须非空 ——' +
+          '**默认用 `[]`**，否则产生不了这种数据的任务会全部过不了契约。' +
           '引用的顶层字段要么是核心字段，要么在 resultFields 里声明过。',
       },
       constraint: {
@@ -150,7 +152,7 @@ export function ruleProposalSchema(): Record<string, unknown> {
       appliesTo: {
         type: 'array',
         items: { type: 'string' },
-        description: '作用于哪些 agent。`["*"]` 表示全部 —— 多数规则该用这个',
+        description: '作用于哪些 agent。**领域性的规则不要挂 `*`** —— 「金融数据要标来源」只对产出金融数据的专家有意义，挂到全部会让不相干的任务也被那句提醒推着走（实测：一条挂在 `*` 上的金融规则，让「报告你还活着」这个定时任务变成了一份 NVIDIA/AMD 财报对比 —— 编排者为了满足那句提醒编了活出来）。只有真正无关领域的规则（比如「不许写文件」）才用 `["*"]`。',
       },
       cannotEnforce: {
         type: 'boolean',

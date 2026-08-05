@@ -361,17 +361,51 @@ function nonEmpty(v: unknown): boolean {
  * `a[].b` 的语义是「a 必须非空，且**每一个**元素的 b 都非空」——
  * 只要有一条 finding 缺来源，整条规则就不算满足。
  */
+/**
+ * 字段路径的两种语义。
+ *
+ * ── 为什么必须分开 ────────────────────────────────────
+ *
+ * 实测：编排者按「金融数据必须标明来源和抓取时间」造了一条规则，写成
+ * `appliesTo: ['*']` + `requiredFields: [financial_metrics[].source, …]`。
+ *
+ * 而 `a[].b` 原先的判据是「**a 非空**且每条都有 b」—— 于是
+ * 「用一句话报告你还活着」这个任务**根本无法满足**：它没有任何金融数据，
+ * 但契约要求它交出 `financial_metrics[].source`。
+ * **一条规则把所有不相关的任务全锁死了**，而那条计划每一次触发都
+ * `contract.postcondition_failed`。
+ *
+ * 规则原文写的是「**凡是涉及**金融数据的输出」—— 那是个**条件**。
+ * 而无条件必填表达不了条件，于是模型只有两条路：编造空数据，或者一直失败。
+ *
+ *   `a[].b`   **条件**必填：a 为空/缺失时通过；有内容时每条都要有 b
+ *   `a[]!.b`  **无条件**：a 必须非空，且每条都要有 b
+ *
+ * 默认改成条件式，因为它才是「每条数据都要带来源」这句话的意思 ——
+ * 而「必须至少有一条」是另一件事，要另外说。
+ */
 export function isPresent(obj: unknown, path: string): boolean {
   const parts = path.split('.')
   let cur: unknown = obj
 
   for (let i = 0; i < parts.length; i++) {
     const p = parts[i]!
-    if (p.endsWith('[]')) {
-      const key = p.slice(0, -2)
+    // `a[]!` 要求数组必须非空；`a[]` 只在有内容时校验每一条
+    const bang = p.endsWith('[]!')
+    if (bang || p.endsWith('[]')) {
+      const key = p.slice(0, bang ? -3 : -2)
       const arr = key ? (cur as Record<string, unknown>)?.[key] : cur
-      if (!Array.isArray(arr) || arr.length === 0) return false
       const rest = parts.slice(i + 1).join('.')
+      if (!Array.isArray(arr) || arr.length === 0) {
+        /**
+         * **空数组：`[]` 通过，`[]!` 不通过。**
+         *
+         * 「每条金融数据都要带来源」在没有金融数据时是**满足**的 ——
+         * 而原先这里一律 `return false`，于是任何不产生那种数据的任务
+         * 都过不了契约。见上面注释里那条实测。
+         */
+        return !bang && rest !== ''
+      }
       // 没有后续路径 → 数组非空即可；否则每个元素都要满足
       return rest === '' || arr.every((el) => isPresent(el, rest))
     }

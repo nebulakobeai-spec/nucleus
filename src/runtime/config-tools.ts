@@ -85,7 +85,13 @@ export function createRuleTool(paths: ConfigPaths, existing: () => NucleusConfig
         requiredFields: {
           type: 'array',
           items: { type: 'string' },
-          description: 'check：必填字段路径。`a[].b` 表示 a 非空且每条的 b 都非空',
+          description:
+            'check：必填字段路径。' +
+            '`a[].b` 表示**有 a 的时候**每条都要有 b —— 没有 a 时这条要求算满足。' +
+            '`a[]!.b` 额外要求 a 必须非空。' +
+            '\n**默认用 `[]`。** 用 `[]!` 之前想清楚：那会让任何产生不了这种数据的' +
+            '任务都过不了契约。实测踩过一次 —— 一条「金融数据要标来源」的规则挂到 `*` 上，' +
+            '结果「报告你还活着」这种任务也被锁死，每次触发都 contract.postcondition_failed。',
         },
         resultFields: {
           type: 'object',
@@ -98,7 +104,11 @@ export function createRuleTool(paths: ConfigPaths, existing: () => NucleusConfig
           type: 'string',
           description: `正文超过约 ${INLINE_MAX_TOKENS} token 时必须给的索引行，**要带触发条件**`,
         },
-        appliesTo: { type: 'array', items: { type: 'string' }, description: '作用于哪些 agent。["*"] 表示全部' },
+        appliesTo: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '作用于哪些 agent。**领域性的规则不要挂 `*`** —— 「金融数据要标来源」只对产出金融数据的专家有意义，挂到全部会让不相干的任务也被那句提醒推着走（实测：一条挂在 `*` 上的金融规则，让「报告你还活着」这个定时任务变成了一份 NVIDIA/AMD 财报对比 —— 编排者为了满足那句提醒编了活出来）。只有真正无关领域的规则（比如「不许写文件」）才用 `["*"]`。',
+        },
         uncoveredClauses: {
           type: 'array',
           items: { type: 'string' },

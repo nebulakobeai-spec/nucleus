@@ -147,12 +147,33 @@ describe('规则真的会退回不合规的结果', () => {
     expect(good.ok, JSON.stringify(good)).toBe(true)
   })
 
-  /** 空列表也算不合规 —— `a[].b` 的语义是「a 非空且每条的 b 都非空」 */
-  it('列表为空时也不合规', async () => {
+  /**
+   * **空列表算合规** —— `a[].b` 的语义是「**有 a 的时候**每条都要有 b」。
+   *
+   * 这条原先断言的是相反的（无条件必填），而那个语义在实测里把不相关的任务
+   * 全锁死了：一条挂在 `*` 上的「金融数据要标来源」规则，让「报告你还活着」
+   * 这种定时任务每次触发都 `contract.postcondition_failed` ——
+   * 它没有任何金融数据，却被要求交出 `financial_metrics[].source`。
+   *
+   * 规则原文写的是「凡是涉及金融数据的输出」,那是个**条件**。
+   * 要「必须至少有一条」时用 `a[]!.b`。
+   */
+  it('列表为空时算合规 —— 没有那种数据时这条要求是满足的', async () => {
     const rules = loadRuleFiles(dir).rules
     const spec = agentSpec({ id: 'a', name: 'a', identity: 'x' }, defaultConfig.defaults, rules)
     const r = validateResult(
       { status: 'ok', summary: 'x', artifacts: [], data_points: [] },
+      spec.resultSpec,
+    )
+    expect(r.ok, '一条不相关的任务被规则锁死了').toBe(true)
+  })
+
+  /** 而「有数据但缺字段」正是规则该管的那一种 */
+  it('有数据但缺字段仍然不合规', async () => {
+    const rules = loadRuleFiles(dir).rules
+    const spec = agentSpec({ id: 'a', name: 'a', identity: 'x' }, defaultConfig.defaults, rules)
+    const r = validateResult(
+      { status: 'ok', summary: 'x', artifacts: [], data_points: [{ value: 1 }] },
       spec.resultSpec,
     )
     expect(r.ok).toBe(false)
