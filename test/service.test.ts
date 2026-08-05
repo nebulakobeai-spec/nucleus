@@ -54,11 +54,33 @@ describe('plist 的形状', () => {
     expect(renderPlist(base)).toMatch(/<key>RunAtLoad<\/key>\s*<true\/>/)
   })
 
-  it('给了 db 就写进参数，没给就写 --data', () => {
-    const pg = renderPlist({ ...base, databaseUrl: 'postgres://h/db' })
-    expect(pg).toMatch(/--db/)
-    expect(pg, '用 postgres 时不该再传 pglite 目录').not.toMatch(/--data/)
-    expect(renderPlist(base)).not.toMatch(/--db/)
+  /**
+   * ── 连接串不进 ProgramArguments ────────────────────────
+   *
+   * 那里的内容会出现在 `ps` 的输出里 —— 而 postgres 的连接串带着密码。
+   * 走 `EnvironmentVariables` 至少不会被 `ps` 看到。
+   *
+   * 写部署文档时才发现这一处。而那条「PASS_ENV 里不许有像凭据的名字」的测试
+   * 给了我**假的安心**：它查的是变量**名**，而 `NUCLEUS_DATABASE_URL`
+   * 名字干净、值里带密码。
+   */
+  it('连接串走环境变量，不进命令行（ps 看不到）', () => {
+    const pg = renderPlist({ ...base, databaseUrl: 'postgres://u:pw@h/db' })
+    // ProgramArguments 那一段里不能有它
+    const argsBlock = pg.slice(pg.indexOf('<array>'), pg.indexOf('</array>'))
+    expect(argsBlock, '密码进了命令行 —— ps 能看到').not.toContain('pw@h')
+    expect(argsBlock).not.toMatch(/--db/)
+    // 而应该在 EnvironmentVariables 里
+    expect(pg).toMatch(/<key>NUCLEUS_DATABASE_URL<\/key>/)
+    expect(pg).toContain('postgres://u:pw@h/db')
+  })
+
+  it('用 postgres 时不再传 pglite 目录', () => {
+    expect(renderPlist({ ...base, databaseUrl: 'postgres://h/db' })).not.toMatch(/--data/)
+  })
+
+  it('没给 db 时不写 NUCLEUS_DATABASE_URL', () => {
+    expect(renderPlist(base)).not.toMatch(/NUCLEUS_DATABASE_URL/)
   })
 
   /**

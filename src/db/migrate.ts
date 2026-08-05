@@ -51,10 +51,52 @@ export interface MigrateResult {
  * Forward-only migration。不支持 down —— 回滚靠重建库或写新的 forward migration。
  * 个人部署场景下 down migration 的维护成本远高于收益。
  */
+/**
+ * 迁移用的 advisory lock id。
+ *
+ * 任意常数，只要全项目唯一。用 `pg_advisory_lock` 而不是自己建一张锁表：
+ * 它**跟着连接自动释放** —— 进程在迁移中途被 kill 掉时锁不会留下来，
+ * 而一张锁表会，然后下一次启动会永远等一个不存在的持有者。
+ */
+const MIGRATE_LOCK = 0x6e75636c // 'nucl'
+
 export async function migrate(db: Db, dir?: string): Promise<MigrateResult> {
   const ms = loadMigrations(dir)
   await db.exec(BOOTSTRAP)
 
+  /**
+   * **并发迁移要串起来。**
+   *
+   * pglite 是单进程，所以这件事一直看不见。而 postgres 上「常驻 daemon +
+   * 一条 CLI 命令同时启动」是**常态** —— 两边都会跑 migrate，于是同一个
+   * `create table` 撞在一起：一边成功，另一边报 42P07（已存在）而整个 boot 失败，
+   * 而错误看起来像「schema 坏了」。
+   *
+   * `pg_advisory_lock` 是会话级的，pglite 上不存在 —— 那边不需要，
+   * 所以拿不到函数时直接跳过（`kind` 判一下比 try/catch 清楚：
+   * 后者会把真正的权限错误也一起吞掉）。
+   */
+  const needsLock = db.kind === 'postgres'
+  if (needsLock) await db.query('select pg_advisory_lock($1)', [MIGRATE_LOCK])
+  try {
+    return await applyAll(db, ms)
+  } finally {
+    if (needsLock) {
+      await db.query('select pg_advisory_unlock($1)', [MIGRATE_LOCK]).catch(() => {
+        // 连接已断时解锁会失败 —— 而那时锁本来就随连接释放了
+      })
+    }
+  }
+}
+
+async function applyAll(db: Db, ms: Migration[]): Promise<MigrateResult> {
+
+  /**
+   * 拿到锁**之后**才读已应用清单。
+   *
+   * 等锁期间另一个进程可能已经把全部迁移跑完了 —— 在锁之前读的话这里会拿到
+   * 一份过期的清单，然后重跑那些迁移并撞 42P07。
+   */
   const existing = await db.query<{ name: string; sha: string }>('select name, sha from _migrations')
   const seen = new Map(existing.rows.map((r) => [r.name, r.sha]))
 

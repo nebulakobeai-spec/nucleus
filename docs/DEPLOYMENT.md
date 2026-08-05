@@ -158,9 +158,25 @@ nucleus doctor      # provider 健康：谁在熔断、何时恢复
 | 数据库用户是否有建表权限 | `migrate` 会直接报错，很明确 |
 | Postgres 主版本 | `psql -c 'select version()'`，必须 ≥ 14 |
 
-> ⚠️ **真 Postgres 路径尚未在真实环境验证过** —— 开发方的机器连不上数据库，
-> 所有测试跑在 PGlite 上。这是整个部署中最大的未知数。
-> 如果 `migrate` 或 `doctor` 在这里失败，**这是预期内的风险**，直接导出诊断包。
+> ⚠️ **真 Postgres 路径尚未在真实环境验证过。** 说具体一点：
+>
+> - `src/db/postgres.ts` **零测试** —— 全部 1100 条测试都跑在 PGlite 上
+> - 开发方的沙箱**连不上任何网络，包括 localhost** —— 所以连一次本地
+>   postgres 都没连过
+>
+> 这是整个部署中最大的未知数。如果 `migrate` 或 `doctor` 在这里失败，
+> **这是预期内的风险**，直接导出诊断包。
+>
+> 已知会不一样的两件事（都处理过，但没在真 postgres 上跑过）：
+>
+> 1. **并发迁移。** PGlite 是单进程，所以「常驻 daemon + 一条 CLI 命令同时启动」
+>    这件事在它那儿看不见。postgres 上两边都会跑 `migrate`，同一个
+>    `create table` 撞在一起会报 42P07 而整个 boot 失败 —— 错误看起来像
+>    「schema 坏了」。现在用 `pg_advisory_lock` 串起来（会话级，进程被 kill
+>    也不会留下锁），拿到锁之后才读已应用清单。
+> 2. **版本差异。** PGlite 基于较新的 postgres，而部署机可能是 14。
+>    迁移里没有用任何 15+ 的语法（`generated always`、`MERGE`、
+>    `NULLS NOT DISTINCT` 等都没有），但这一条只是代码审查的结论，不是实测。
 
 ### D. 工作目录
 
@@ -321,7 +337,62 @@ psql "postgresql://nucleus:<密码>@localhost:5432/nucleus" -c 'select version()
 
 能打印出版本号，且主版本 ≥ 14。
 
-> ⚠️ 真 Postgres 路径尚未在真实环境验证过，见 [阶段 0.5 C](#c-数据库连接细节)。
+### 已经装过 postgres 的机器
+
+先看有没有，别装第二份：
+
+```bash
+brew list --versions | grep -i postgres    # macOS
+psql -lqt                                   # 能连上就说明在跑
+```
+
+已有 `postgresql@14`（或任何 ≥14）时只建库，不要再装：
+
+```bash
+brew services start postgresql@14          # 没在跑的话
+createuser -P nucleus                      # 会问密码
+createdb -O nucleus nucleus
+psql "postgresql://nucleus:<密码>@127.0.0.1:5432/nucleus" -c 'select version();'
+```
+
+### 连接串怎么给 —— 三个位置，别写进 git
+
+连接串**带着密码**，所以它只能出现在这三处之一：
+
+| 位置 | 用在哪 | 注意 |
+|---|---|---|
+| `NUCLEUS_DATABASE_URL` 环境变量 | 交互式命令、`nucleus serve` | 写在 `~/.zshrc` 里就够 |
+| `--db <串>` | 一次性命令 | **会出现在 `ps` 输出里**，只在临时排查时用 |
+| launchd plist 的 `EnvironmentVariables` | 开机自启 | `serve --install` 自动写，**装完 chmod 600** |
+
+**`nucleus.config.json` 里没有数据库字段** —— 刻意的：那份文件是要提交的
+（`.gitignore` 里它没被忽略是因为它含真实模型配置，见下），而连接串带密码。
+
+`serve --install` 会把 `--db` 给的串写进 plist 的 `EnvironmentVariables`
+而**不是** `ProgramArguments` —— 后者会被 `ps` 看到。它还会提醒你 chmod 600，
+因为 plist 本身是明文。
+
+### 从 PGlite 换到 Postgres
+
+**没有迁移工具，也不该有。** PGlite 那份库是本地开发用的：
+
+```bash
+# 换过去之后 pglite 那份就不再被读了，可以直接删
+rm -rf .nucleus-data
+export NUCLEUS_DATABASE_URL="postgresql://nucleus:<密码>@127.0.0.1:5432/nucleus"
+nucleus migrate      # 在新库上建表
+nucleus doctor
+```
+
+规则（`rules/*.md`）与专家（`agents/*.md`）**是文件,不在数据库里** ——
+换库不会丢。丢的是历史 run、会话与 transcript。
+
+> ⚠️ **PGlite 撑不住常驻进程。** 它自己的文档写着「single user/connection」，
+> 而且**没有锁文件** —— `nucleus serve` 跑着的时候另开一条 nucleus 命令
+> 不会报错，只会读到不确定的快照。实测撞上过一次：同一条命令里统计与表格
+> 对不上；后来那份库直接坏了（`Aborted()`，连拷贝出来的副本都打不开）。
+>
+> **所以任何要跑 `nucleus serve` 的机器都必须用真 postgres。**
 
 ---
 

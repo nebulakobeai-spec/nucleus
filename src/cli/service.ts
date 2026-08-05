@@ -60,13 +60,31 @@ export interface PlistInput {
 export function renderPlist(input: PlistInput): string {
   const args = [input.node, input.cli, 'serve']
   if (input.configPath) args.push('--config', input.configPath)
-  if (input.databaseUrl) args.push('--db', input.databaseUrl)
-  // pglite 的数据目录也要绝对 —— launchd 下 cwd 是 `/`，相对路径会指向根目录
-  else if (input.dataDir) args.push('--data', input.dataDir)
+  /**
+   * **连接串不进 ProgramArguments。**
+   *
+   * 那里的内容会出现在 `ps` 的输出里 —— 而 postgres 的连接串带着密码。
+   * 走 `EnvironmentVariables` 至少不会被 `ps` 看到（plist 文件本身仍然是明文，
+   * 所以安装完要 chmod 600，install 的输出里会说）。
+   *
+   * 写这份部署文档时才发现这一处。而那条「PASS_ENV 里不许有像凭据的名字」的
+   * 测试给了我假的安心：它查的是变量**名**，而 `NUCLEUS_DATABASE_URL`
+   * 名字干净、值里带密码。
+   */
+  if (!input.databaseUrl && input.dataDir) {
+    // pglite 的数据目录也要绝对 —— launchd 下 cwd 是 `/`，相对路径会指向根目录
+    args.push('--data', input.dataDir)
+  }
 
-  const envEntries = input.passEnv
-    .filter((k) => input.env[k] !== undefined)
-    .map((k) => `      <key>${k}</key>\n      <string>${esc(input.env[k]!)}</string>`)
+  const env: Record<string, string> = {}
+  for (const k of input.passEnv) {
+    if (input.env[k] !== undefined) env[k] = input.env[k]!
+  }
+  // --db 给的连接串走环境变量，而不是命令行
+  if (input.databaseUrl) env['NUCLEUS_DATABASE_URL'] = input.databaseUrl
+  const envEntries = Object.entries(env).map(
+    ([k, v]) => `      <key>${k}</key>\n      <string>${esc(v)}</string>`,
+  )
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -219,6 +237,16 @@ export async function installService(flags: Record<string, string | true>): Prom
   line(`  ${c.cyan(`launchctl load -w ${plistPath}`)}`)
   line(`  ${c.cyan(`tail -f ${join(logDir, 'serve.log')}`)}`)
   line()
+  /**
+   * plist 是明文，而它可能带着数据库连接串（含密码）。
+   * launchd 只要求文件属于你、可读，600 完全够。
+   */
+  if (plist.includes('NUCLEUS_DATABASE_URL')) {
+    line(`${ICON.warn} ${c.yellow('这份 plist 里有数据库连接串（含密码）')}`)
+    line(c.cyan(`  chmod 600 ${plistPath}`))
+    line(c.gray('  launchd 只要求文件属于你且可读，600 够用。'))
+    line()
+  }
   line(c.gray(`停掉：launchctl unload -w ${plistPath}`))
   line(c.gray('  没有自动 load —— 写文件可逆且你能先打开看一眼，load 是即刻生效的。'))
   return 0

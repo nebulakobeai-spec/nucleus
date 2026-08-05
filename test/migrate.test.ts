@@ -111,3 +111,49 @@ describe('schema invariants', () => {
     })
   })
 })
+
+/**
+ * ── 并发迁移 ────────────────────────────────────────
+ *
+ * pglite 是单进程，所以这件事一直看不见。而 postgres 上「常驻 daemon +
+ * 一条 CLI 命令同时启动」是**常态** —— 两边都会跑 migrate，同一个
+ * `create table` 撞在一起：一边成功，另一边报 42P07 而整个 boot 失败，
+ * 而错误看起来像「schema 坏了」。
+ *
+ * 真正的并发只能在 postgres 上验，而我的沙箱连不上任何网络（包括 localhost）。
+ * 所以这里验的是**能验的那部分**：锁只对 postgres 取、pglite 上不取、
+ * 而且同一个库连着迁移两次是幂等的。
+ */
+describe('并发迁移', () => {
+  it('pglite 上不去取 advisory lock —— 那个函数在它那儿不存在', async () => {
+    const db = await PgliteDb.open()
+    const calls: string[] = []
+    const spy = {
+      ...db,
+      kind: db.kind,
+      query: async (sql: string, params?: unknown[]) => {
+        calls.push(sql)
+        return db.query(sql, params ?? [])
+      },
+      exec: (sql: string) => db.exec(sql),
+      tx: <T>(fn: Parameters<typeof db.tx<T>>[0]) => db.tx(fn),
+      listen: db.listen.bind(db),
+      notify: db.notify.bind(db),
+      close: db.close.bind(db),
+    } as unknown as Parameters<typeof migrate>[0]
+
+    await migrate(spy)
+    expect(calls.some((s) => s.includes('pg_advisory_lock'))).toBe(false)
+    await db.close()
+  })
+
+  it('同一个库迁移两次是幂等的 —— 第二次一条都不应用', async () => {
+    const db = await PgliteDb.open()
+    const first = await migrate(db)
+    expect(first.applied.length).toBeGreaterThan(0)
+    const second = await migrate(db)
+    expect(second.applied).toEqual([])
+    expect(second.alreadyApplied.length).toBe(first.applied.length)
+    await db.close()
+  })
+})
