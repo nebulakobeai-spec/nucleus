@@ -158,25 +158,40 @@ nucleus doctor      # provider 健康：谁在熔断、何时恢复
 | 数据库用户是否有建表权限 | `migrate` 会直接报错，很明确 |
 | Postgres 主版本 | `psql -c 'select version()'`，必须 ≥ 14 |
 
-> ⚠️ **真 Postgres 路径尚未在真实环境验证过。** 说具体一点：
+> ✅ **已在真 Postgres 上验证过**（PostgreSQL 14.17 / Homebrew / macOS arm64）：
 >
-> - `src/db/postgres.ts` **零测试** —— 全部 1100 条测试都跑在 PGlite 上
-> - 开发方的沙箱**连不上任何网络，包括 localhost** —— 所以连一次本地
->   postgres 都没连过
+> | 验了什么 | 结果 |
+> |---|---|
+> | `migrate` 建表 | 7 个迁移、22 张表 |
+> | `doctor` | 全绿（除环境本身的 `NODE_TLS_REJECT_UNAUTHORIZED=0`） |
+> | 端到端对话 | 委派链 depth 0→1 都 succeeded；run / attempt / event / transcript / usage_log / wake 全部落对 |
+> | **三个进程同时 `migrate`** | 三个全成功，22 张表，`_migrations` 7 条无重复 |
+> | 全套测试 | **1110 passed，0 skipped** |
 >
-> 这是整个部署中最大的未知数。如果 `migrate` 或 `doctor` 在这里失败，
-> **这是预期内的风险**，直接导出诊断包。
+> **而并发迁移那一测抓到了一个真 bug** —— 第一版的 advisory lock 是错的，
+> 两处都错，而两处在 PGlite 上都不可能暴露：
 >
-> 已知会不一样的两件事（都处理过，但没在真 postgres 上跑过）：
+> 1. **`BOOTSTRAP` 在拿锁之前跑。** 那句本身就是 `create table _migrations`，
+>    三个进程正好撞在它上面。实测报的是
+>    `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`
+>    —— 两个 `CREATE TABLE` 撞在一起的样子，不是预想的 42P07。
+> 2. **`pg_advisory_lock` 是会话级的，而 `query()` 走连接池。** 加锁的语句借一条
+>    连接、查完就还回去，后面的语句可能换了另一条 —— 锁看起来加上了，实际什么都
+>    没串起来。而 `pg_advisory_unlock` 从另一条连接调还会失败，锁一直留到那条
+>    池连接被关掉。**会话锁和连接池不能这么配。**
 >
-> 1. **并发迁移。** PGlite 是单进程，所以「常驻 daemon + 一条 CLI 命令同时启动」
->    这件事在它那儿看不见。postgres 上两边都会跑 `migrate`，同一个
->    `create table` 撞在一起会报 42P07 而整个 boot 失败 —— 错误看起来像
->    「schema 坏了」。现在用 `pg_advisory_lock` 串起来（会话级，进程被 kill
->    也不会留下锁），拿到锁之后才读已应用清单。
-> 2. **版本差异。** PGlite 基于较新的 postgres，而部署机可能是 14。
->    迁移里没有用任何 15+ 的语法（`generated always`、`MERGE`、
->    `NULLS NOT DISTINCT` 等都没有），但这一条只是代码审查的结论，不是实测。
+> 修法是给 `Db` 加 `session()`（钉住一条连接，不开事务），锁 / BOOTSTRAP /
+> 读清单全在它上面跑；每条迁移仍各自一个事务（失败时前面的保持已应用）。
+> postgres 的 `session()` 收尾用 `release(true)` **销毁**连接而不是还回池子 ——
+> 万一锁没解开，还回去就意味着下一个借到它的人带着一把别人的锁。
+>
+> 还顺带发现一条测试**一直在断言开发机沙箱的产物**：它写的是 `hint` 含
+> 「出网权限」，而那句只对 `EPERM` 出现。沙箱一解开，同一个连接失败变成
+> `ECONNREFUSED`，提示变成「服务没在监听」，那条就红了 ——
+> **也就是说它过去是因为环境不对而通过的。** 改成断言「提示与实际 errno 对得上」。
+>
+> **仍然没验的**：托管数据库（`?sslmode=require`）、跨主机连接、
+> 以及 14 以外的版本。
 
 ### D. 工作目录
 
